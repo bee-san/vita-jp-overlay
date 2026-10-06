@@ -18,6 +18,7 @@ typedef struct {
     int (*write_body)(void *ud, VjoConn *c);
     void *ud;
     int connect_timeout_us;    /* 0 = the platform's default */
+    const char *host_header;   /* optional authority with port; host remains the DNS name */
 } VjoHttpRequest;
 
 typedef struct {

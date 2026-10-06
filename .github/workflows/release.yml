@@ -1,22 +1,42 @@
 name: Release
-# Runs only for a release tag (v*), or by hand from the Actions tab.
+# Test changes in the fork; publishing still requires an explicit v* tag.
 on:
   push:
+    branches: [main]
     tags: ['v*']
+  pull_request:
+    branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   host:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y ninja-build python3-pil
       - run: cmake -S . -B build/host -G Ninja && cmake --build build/host
-      - run: ./build/host/vjo-tests && ./build/host/vjo-anki-tests
+      - run: ctest --test-dir build/host --output-on-failure
       - run: python3 tools/test_jpegsw.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check out the compatible Hachidori relay test server
+        uses: actions/checkout@v4
+        with:
+          repository: bee-san/hachidori-anki
+          # v0.0.5, pinned so the HTTP contract test cannot drift.
+          ref: beffaca1cab2584608a25c276d81b17b0f27088f
+          path: .refs/hachidori-anki
+      - name: Test the CLI through the real relay HTTP API
+        run: node --test tools/test_hachidori_relay.mjs
 
   vita:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     container: vitasdk/vitasdk:2026.08
     steps:
       - uses: actions/checkout@v4

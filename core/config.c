@@ -21,6 +21,7 @@ const char *vjo_trigger_name(int trigger)
 static const VjoDictInfo dicts[VJO_DICT_COUNT] = {
     [VJO_DICT_JPDB] = {"jpdb", "jpdb.io", "jpdb_api_key", "VJO_JPDB_KEY"},
     [VJO_DICT_JITEN] = {"jiten", "jiten.moe", "jiten_api_key", "VJO_JITEN_KEY"},
+    [VJO_DICT_HACHIDORI] = {"hachidori", "Hachidori relay", NULL, NULL},
 };
 
 const VjoDictInfo *vjo_dict_info(int dictionary)
@@ -35,7 +36,7 @@ const char *vjo_dict_name(int dictionary)
 
 const char *vjo_config_api_key(const VjoConfig *c)
 {
-    return c->api_key[c->dictionary];
+    return c->dictionary == VJO_DICT_HACHIDORI ? "" : c->api_key[c->dictionary];
 }
 
 static const struct {
@@ -53,7 +54,7 @@ static const struct {
 void vjo_config_defaults(VjoConfig *c)
 {
     memset(c, 0, sizeof(*c));
-    c->dictionary = VJO_DICT_JITEN;
+    c->dictionary = VJO_DICT_HACHIDORI;
     c->non_japanese_filter = VJO_FILTER_LINES;
     c->font_size_ja = 18;
     c->font_size_en = 14;
@@ -71,8 +72,13 @@ const char *vjo_config_default_text(void)
 {
     return "; Vita JP Overlay settings. Changes apply the next time the overlay opens.\n"
            "\n"
-           "; Dictionary used for word lookups: jpdb | jiten\n"
-           "dictionary = jiten\n"
+           "; Dictionary used for word lookups: hachidori | jpdb | jiten\n"
+           "dictionary = hachidori\n"
+           "\n"
+           "; Hachidori relay computer: host[:port], default port 19633 (no API key)\n"
+           "; Plain HTTP: use only on a trusted LAN. Anki and a sharing Hachidori host\n"
+           "; with dictionaries must be running; enable Sharing > Also with my other computers.\n"
+           "hachidori_host =\n"
            "\n"
            "; jpdb.io API key (needed for dictionary = jpdb): jpdb.io -> Settings -> API key\n"
            "jpdb_api_key =\n"
@@ -166,6 +172,35 @@ int vjo_anki_endpoint(const char *setting, char *host, size_t cap, int *port)
     return VJO_ANKI_MANUAL;
 }
 
+int vjo_hachidori_endpoint(const char *setting, char *host, size_t cap, int *port)
+{
+    int rc;
+    size_t label = 0;
+    if (!setting || vjo_ieq(setting, "auto"))
+        return -1;
+    rc = vjo_anki_endpoint(setting, host, cap, port);
+    if (rc != VJO_ANKI_MANUAL)
+        return -1;
+    /* DNS labels must not be empty or start/end with a hyphen. */
+    for (size_t i = 0; ; i++) {
+        char ch = host[i];
+        if (ch == '.' || ch == '\0') {
+            if (!label || host[i - 1] == '-')
+                return -1;
+            label = 0;
+            if (!ch)
+                break;
+        } else {
+            if (!label && ch == '-')
+                return -1;
+            label++;
+        }
+    }
+    if (!strchr(setting, ':'))
+        *port = VJO_HACHIDORI_PORT;
+    return 0;
+}
+
 static void warn(VjoConfig *c, const char *fmt, const char *a, const char *b)
 {
     if (c->n_warnings >= VJO_CONFIG_MAX_WARNINGS)
@@ -206,7 +241,7 @@ static int api_key_dict(const char *key)
     if (vjo_ieq(key, "api_key")) /* the old name of jpdb_api_key (tools/migrate_config.py RENAMED) */
         return VJO_DICT_JPDB;
     for (int i = 0; i < VJO_DICT_COUNT; i++)
-        if (vjo_ieq(key, dicts[i].key_setting))
+        if (dicts[i].key_setting && vjo_ieq(key, dicts[i].key_setting))
             return i;
     return -1;
 }
@@ -223,6 +258,7 @@ typedef struct {
 #define STR_SETTING(name, required, raw) \
     {#name, offsetof(VjoConfig, name), sizeof(((VjoConfig *)0)->name), required, raw}
 static const StrSetting str_settings[] = {
+    STR_SETTING(hachidori_host, 0, 0),
     STR_SETTING(log_host, 0, 0),
     STR_SETTING(anki_host, 0, 0),
     STR_SETTING(anki_deck, 1, 1),
@@ -325,6 +361,10 @@ static void set_kv(VjoConfig *c, const char *key, const char *val)
             warn(c, "%s: empty (keeping %s)", key, dst);
         else
             set_str(c, key, val, dst, ss->size);
+        if (dst == c->hachidori_host && *dst && vjo_hachidori_endpoint(dst, host, sizeof(host), &port) < 0) {
+            warn(c, "%s: invalid value '%s' (host[:port], not a URL)", key, val);
+            c->hachidori_host[0] = '\0';
+        }
         if (dst == c->anki_host && vjo_anki_endpoint(c->anki_host, host, sizeof(host), &port) < 0) {
             warn(c, "%s: invalid value '%s' (empty, auto, or IP[:port])", key, val);
             c->anki_host[0] = '\0';

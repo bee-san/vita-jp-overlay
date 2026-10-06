@@ -7,7 +7,7 @@
 #include "../include/vjo_api.h"
 
 enum { VJO_OCR_AUTO = 0, VJO_OCR_ON_PRESS = 1 };
-enum { VJO_DICT_JPDB = 0, VJO_DICT_JITEN = 1, VJO_DICT_COUNT };
+enum { VJO_DICT_JPDB = 0, VJO_DICT_JITEN = 1, VJO_DICT_HACHIDORI = 2, VJO_DICT_COUNT };
 
 /* Data put on an Anki note, each into the field named by its
  * anki_field_* setting ("" = not added). */
@@ -27,6 +27,7 @@ enum {
 typedef struct {
     int dictionary;           /* VJO_DICT_* */
     char api_key[VJO_DICT_COUNT][128]; /* indexed by VJO_DICT_* */
+    char hachidori_host[64];   /* required host[:port], default port 19633 */
     int non_japanese_filter;  /* VJO_FILTER_NONE | VJO_FILTER_LINES */
     int font_size_ja;         /* 8..40: header, headwords, readings */
     int font_size_en;         /* 8..40: meanings, rank, messages */
@@ -57,8 +58,8 @@ const char *vjo_trigger_name(int trigger);
 typedef struct {
     const char *id;          /* config.ini dictionary / CLI --dict value: "jpdb" | "jiten" */
     const char *name;        /* "jpdb.io" | "jiten.moe" */
-    const char *key_setting; /* config.ini key of its API key */
-    const char *key_env;     /* host CLI environment variable of its API key */
+    const char *key_setting; /* config.ini key of its API key, NULL for relay */
+    const char *key_env;     /* host CLI key environment variable, NULL for relay */
 } VjoDictInfo;
 
 /* Info for a VJO_DICT_* value (jpdb for an out-of-range one). */
@@ -68,6 +69,8 @@ const char *vjo_dict_name(int dictionary); /* "jpdb.io" | "jiten.moe" */
 int vjo_dict_find(const char *id);
 /* API key of the selected dictionary ("" if unset). */
 const char *vjo_config_api_key(const VjoConfig *c);
+/* Selected dictionary has a valid relay endpoint or its required cloud key. */
+int vjo_config_dict_ready(const VjoConfig *c);
 
 /* anki_host (or the saved anki_host.txt): "" = off, "auto" = search the
  * network, or host[:port]. For VJO_ANKI_MANUAL, host (cap bytes) and port
@@ -75,5 +78,10 @@ const char *vjo_config_api_key(const VjoConfig *c);
 #define VJO_ANKI_PORT 8765
 enum { VJO_ANKI_OFF = 0, VJO_ANKI_AUTO = 1, VJO_ANKI_MANUAL = 2 };
 int vjo_anki_endpoint(const char *setting, char *host, size_t cap, int *port);
+
+/* Relay requires a hostname/IPv4 address, optionally :port (not a URL or auto).
+ * Returns 0 on success, -1 if unset or invalid. */
+#define VJO_HACHIDORI_PORT 19633
+int vjo_hachidori_endpoint(const char *setting, char *host, size_t cap, int *port);
 
 #endif

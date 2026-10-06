@@ -116,7 +116,8 @@ static int run_anki(VjoArena *a, VjoArena *fa, const VjoPlatform *p, const VjoCo
 static void usage(void)
 {
     fprintf(stderr,
-            "usage: vjo-cli IMAGE.jpg [--dict jpdb|jiten] [--api-key KEY | --config FILE]\n"
+            "usage: vjo-cli IMAGE.jpg [--dict hachidori|jpdb|jiten] [--api-key KEY | --config FILE]\n"
+            "               [--hachidori HOST[:PORT]] (plain HTTP, trusted LAN; no key)\n"
             "               [--filter lines|none] [--record DIR] [--nav] [--stats] [-v]\n"
             "       vjo-cli --text TEXT [options]\n"
             "       vjo-cli --replay DIR [options]\n"
@@ -134,6 +135,7 @@ int main(int argc, char **argv)
     VjoOverlayData d;
     const char *image = NULL, *text = NULL, *replay = NULL, *config = NULL, *key = NULL, *dict = NULL;
     const char *anki = NULL, *anki_deck = NULL, *picture = NULL;
+    const char *hachidori = NULL;
     int nav = 0, stats = 0, anki_add = 0, rc;
 
     memset(mem, 0xA5, sizeof(mem)); /* like a reused arena on the Vita */
@@ -149,6 +151,8 @@ int main(int argc, char **argv)
             config = argv[++i];
         else if (!strcmp(s, "--dict") && more)
             dict = argv[++i];
+        else if (!strcmp(s, "--hachidori") && more)
+            hachidori = argv[++i];
         else if (!strcmp(s, "--filter") && more)
             cfg.non_japanese_filter = strcmp(argv[++i], "none") ? 1 : 0;
         else if (!strcmp(s, "--record") && more)
@@ -205,8 +209,18 @@ int main(int argc, char **argv)
         if (cfg.dictionary < 0)
             usage();
     }
-    if (!key)
-        key = getenv(vjo_dict_info(cfg.dictionary)->key_env); /* VJO_JPDB_KEY, VJO_JITEN_KEY */
+    if (hachidori) {
+        char host[64];
+        int port;
+        if (strlen(hachidori) >= sizeof(cfg.hachidori_host) ||
+            vjo_hachidori_endpoint(hachidori, host, sizeof(host), &port) < 0) {
+            fprintf(stderr, "--hachidori: expected HOST[:PORT], not a URL\n");
+            return 2;
+        }
+        snprintf(cfg.hachidori_host, sizeof(cfg.hachidori_host), "%s", hachidori);
+    }
+    if (!key && vjo_dict_info(cfg.dictionary)->key_env)
+        key = getenv(vjo_dict_info(cfg.dictionary)->key_env);
     if (key)
         snprintf(cfg.api_key[cfg.dictionary], sizeof(cfg.api_key[cfg.dictionary]), "%s", key);
 

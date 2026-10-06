@@ -1,7 +1,11 @@
-# Vita JP Overlay
+# Vita JP Overlay with Hachidori Relay
 
-Overlay for japanese learners. Text recognition uses Google Lens, and the definitions come from
-[jiten.moe](https://jiten.moe) or [jpdb.io](https://jpdb.io).
+This [bee-san fork](https://github.com/bee-san/vita-jp-overlay) of
+[Dartv/vita-jp-overlay](https://github.com/Dartv/vita-jp-overlay) uses your
+[Hachidori](https://github.com/bee-san/hachidori) dictionaries through
+[Hachidori Relay](https://github.com/bee-san/hachidori-anki) by default.
+Text recognition still uses Google Lens. Jiten and JPDB remain optional backends.
+No dictionary API key is needed for Hachidori.
 
 The idea comes from [meikidroid](https://github.com/rtr46/meikidroid)
 
@@ -11,13 +15,18 @@ The idea comes from [meikidroid](https://github.com/rtr46/meikidroid)
 
 - A PS Vita on firmware 3.60 to 3.74 with HENkaku Ensō or h-encore.
 - Wi-Fi.
-- An API key from jiten.moe or jpdb.io.
+- A computer running Anki with Hachidori Relay v0.0.4 or newer, and a current
+  Hachidori browser extension with dictionaries and network sharing enabled.
+- An API key only if you explicitly select the optional Jiten or JPDB backend.
 
 ## Installing
 
 ### From the release zip
 
-1. Download `VitaJPOverlay-<version>.zip` from the [Releases](../../releases) page.
+1. Download the **VitaJPOverlay** artifact from a successful run in this fork's
+   [Actions](https://github.com/bee-san/vita-jp-overlay/actions) page. Extract the
+   artifact wrapper to get `VitaJPOverlay-<version>.zip`, then extract that zip.
+   Upstream release zips do not contain this fork's Hachidori backend.
 2. Copy the zip's `ur0` folder to the root of `ur0:` on the Vita. VitaShell's FTP server or
   USB mode both work. You should end up with:
   - `ur0:tai/VitaJPOverlay_Kernel.skprx`
@@ -27,9 +36,10 @@ The idea comes from [meikidroid](https://github.com/rtr46/meikidroid)
   add two lines:
   - `ur0:tai/VitaJPOverlay_Kernel.skprx` on a new line under `*KERNEL`
   - `ur0:tai/VitaJPOverlay_Shell.suprx` on a new line under `*main`
-4. Copy the zip's `config.ini` to `ux0:data/VitaJPOverlay/config.ini` and set your API key: `jiten_api_key`, or
-  `dictionary = jpdb` and `jpdb_api_key`. Change any other settings you like. The file is read
-   each time the overlay opens, so later changes need no reboot.
+4. Copy the zip's `config.ini` to `ux0:data/VitaJPOverlay/config.ini`. Keep
+   `dictionary = hachidori` and set `hachidori_host` to your computer's LAN IP
+   as described below. The file is read each time the overlay opens, so later
+   changes need no reboot.
 5. Reboot.
 
 To update, copy the new files over the old ones and power-cycle the Vita. Your `config.ini`
@@ -39,15 +49,54 @@ stays as it is.
 
 If you have the source and a built copy of the plugins, `tools/install_ftp.sh` does the
 steps above in one go. It needs bash, curl and python3 (macOS or Linux). Start VitaShell's FTP
-server (press Select in VitaShell) and run:
+server (press Select in VitaShell) and run the example below, replacing
+`192.168.1.20` with your computer's LAN IP and `192.168.1.30` with the Vita's:
 
 ```bash
-tools/install_ftp.sh --set dictionary=jiten --set jiten_api_key=your-key <vita-ip>
+tools/install_ftp.sh --set dictionary=hachidori --set hachidori_host=192.168.1.20 192.168.1.30
 ```
 
 It backs up and patches the taiHEN config files, uploads the plugins and writes `config.ini`.
 Running it again later keeps your settings. `--uninstall` removes the plugin lines and
 `--status` prints the plugin logs.
+
+## Hachidori Relay setup
+
+1. On your computer, install a current [Hachidori browser extension](https://github.com/bee-san/hachidori)
+   and add the dictionaries you want to use.
+2. In Anki, install [Hachidori Relay v0.0.5](https://github.com/bee-san/hachidori-anki/releases/download/v0.0.5/hachidori-relay.ankiaddon),
+   restart Anki, and keep it and the browser open.
+3. In Hachidori's **Settings → Sharing**, enable **Also with my other computers**.
+   Use the home-network address it shows. Your Vita must be able to reach that
+   computer on the same trusted network, and its firewall must allow the API port.
+4. Set the Vita's `ux0:data/VitaJPOverlay/config.ini`:
+
+   ```ini
+   dictionary = hachidori
+   hachidori_host = 192.168.1.20
+   ```
+
+   Replace `192.168.1.20` with your computer's address. An optional port selects
+   a changed `yomitan_api_port`, for example `192.168.1.20:19634`.
+
+This backend uses the relay's **HTTP Yomitan API on port 19633**, not its
+WebSocket port 8771 or AnkiConnect's port 8765. It needs no API key. The relay
+asks your running Hachidori host for definitions; it does not have its own
+copy of the dictionaries. A Tailscale address only works if the Vita's network
+is routed into your tailnet; the normal setup uses the computer's LAN address.
+
+The relay has no authentication and this connection is plain HTTP. Do not
+expose it to the internet or enable network sharing on untrusted Wi-Fi.
+Google Lens OCR still needs internet access and receives the selected screen crop.
+
+The overlay chooses the host's first result at each word position. Inflected
+forms use the host's original matched length for highlighting. Dictionary
+structured content is reduced to text for the Vita, not rendered as HTML or
+images. Existing Anki mining still uses AnkiConnect and the Vita's `anki_*`
+settings below; it does not adopt Hachidori's Anki Templates automatically.
+
+Existing upstream configurations keep their selected dictionary when updated.
+To switch them, explicitly set `dictionary = hachidori` and `hachidori_host`.
 
 ## Using it
 
@@ -83,7 +132,8 @@ All settings live in `ux0:data/VitaJPOverlay/config.ini`. The area to read (□ 
 
 | Key                   | Values                                                              | Default    | What it does                                                                                 |
 | --------------------- | ------------------------------------------------------------------- | ---------- | -------------------------------------------------------------------------------------------- |
-| `dictionary`          | `jiten`, `jpdb`                                                     | `jiten`    | Which dictionary looks up the words.                                                         |
+| `dictionary`          | `hachidori`, `jiten`, `jpdb`                                        | `hachidori` | Which dictionary looks up the words.                                                        |
+| `hachidori_host`       | `HOST[:PORT]`                                                       | empty      | Hachidori Relay computer; HTTP API port defaults to 19633.                                   |
 | `jiten_api_key`       | text                                                                | empty      | Your jiten.moe API key.                                                                      |
 | `jpdb_api_key`        | text                                                                | empty      | Your jpdb.io API key.                                                                        |
 | `non_japanese_filter` | `lines`, `none`                                                     | `lines`    | Drop recognized lines with no kana or kanji.                                                 |
@@ -129,8 +179,12 @@ All settings live in `ux0:data/VitaJPOverlay/config.ini`. The area to read (□ 
 
 - The chosen area of the screen is sent to Google Lens for text recognition. In `auto` mode,
 and while subtitles are on, that happens every time the area changes while a game is running.
-- The recognized text is sent to jiten.moe (`api.jiten.moe`) or jpdb.io, along with your API
-key.
+- With `dictionary = hachidori`, recognised text is sent to your configured
+  Hachidori Relay computer over plain HTTP. Dictionary lookups stay on that
+  computer. No dictionary API key is sent, and a relay failure never falls back
+  to a cloud dictionary.
+- With `dictionary = jiten` or `jpdb`, recognised text is sent to the selected
+  cloud dictionary, along with its API key.
 - With Anki set up, the cards (including the screenshot) go to Anki on your computer over your
 local network. `anki_host = auto` looks for it on port 8765 of the other devices on your
 network.
@@ -160,7 +214,8 @@ tools/setup_toolchain.sh
 Build and run the tests on your computer:
 
 ```bash
-cmake -S . -B build/host -G Ninja && cmake --build build/host && ./build/host/vjo-tests
+cmake -S . -B build/host -G Ninja && cmake --build build/host
+ctest --test-dir build/host --output-on-failure
 ```
 
 Build the plugins and the release zip (`build/vita/VitaJPOverlay-<version>.zip`):
@@ -172,10 +227,29 @@ cmake -S vita -B build/vita && cmake --build build/vita --target release
 `vjo-cli` runs the same pipeline on a screenshot:
 
 ```bash
-VJO_JITEN_KEY=your-key ./build/host/vjo-cli --dict jiten screenshot.jpg --nav
+./build/host/vjo-cli --dict hachidori --hachidori <computer-lan-ip> screenshot.jpg --nav
+# Or bypass OCR to test the relay connection:
+./build/host/vjo-cli --hachidori <computer-lan-ip> --text "猫を見た。" --nav
 ```
 
 
+
+The host tests cover relay configuration, HTTP requests, reply parsing,
+structured definitions and Unicode token positions. CTest also compiles the
+actual Vita worker against host platform stubs, covering manual, background
+and subtitle lookup gates, lookup completion, errors, modes and retry backoff.
+This is not a physical Vita test. To exercise the CLI over Hachidori Relay's
+actual HTTP and WebSocket servers, with a deterministic browser-side
+dictionary fixture (Node 22 and Python 3.9+):
+
+```bash
+git clone --branch v0.0.5 --depth 1 https://github.com/bee-san/hachidori-anki .refs/hachidori-anki
+node --test tools/test_hachidori_relay.mjs
+```
+
+CI pins that relay release's commit and runs both host tests and the Vita
+cross-build. Its **VitaJPOverlay** artifact contains the installable zip.
+These tests do not replace testing on a physical Vita.
 
 ## Credits
 

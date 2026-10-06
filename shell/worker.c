@@ -390,8 +390,9 @@ static void open_overlay(void)
         return;
     }
     apply_config(); /* settings are re-read on every open */
-    if (!vjo_config_api_key(&cfg)[0]) {
-        VjoErr e = {VJO_E_NO_KEY, 0, 0, NULL, cfg.dictionary};
+    if (!vjo_config_dict_ready(&cfg)) {
+        VjoErr e = {cfg.dictionary == VJO_DICT_HACHIDORI ? VJO_E_NO_HOST : VJO_E_NO_KEY,
+                    0, 0, NULL, cfg.dictionary};
         size_t mark = vjo_arena_mark(&scratch);
         view_publish(1, NULL, vjo_err_text(&scratch, VJO_STAGE_DICT, &e), 1);
         vjo_arena_release(&scratch, mark);
@@ -506,7 +507,7 @@ static void on_job_done(void)
  * them: it is open, or opens from the background result (auto). */
 static int want_lookup(void)
 {
-    return vjo_config_api_key(&cfg)[0] && (ov != OV_CLOSED || cfg.ocr_mode == VJO_OCR_AUTO) &&
+    return vjo_config_dict_ready(&cfg) && (ov != OV_CLOSED || cfg.ocr_mode == VJO_OCR_AUTO) &&
            now_us() >= dict_backoff.until;
 }
 

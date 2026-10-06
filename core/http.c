@@ -29,7 +29,7 @@ int vjo_http_send(VjoConn *c, const VjoHttpRequest *req)
                          "Connection: close\r\n"
                          "%s"
                          "\r\n",
-                         req->method, req->path, req->host, req->content_type,
+                         req->method, req->path, req->host_header ? req->host_header : req->host, req->content_type,
                          (unsigned long)req->body_len,
                          req->extra_headers ? req->extra_headers : "");
     int rc;

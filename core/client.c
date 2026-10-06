@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "jiten.h"
+#include "hachidori.h"
 #include "jpdb.h"
 #include "port.h"
 #include "textfilter.h"
@@ -118,6 +119,12 @@ int vjo_dict_lookup(VjoArena *a, const VjoPlatform *p, const VjoConfig *cfg, con
     memset(err, 0, sizeof(*err));
     memset(res, 0, sizeof(*res));
     err->dict = cfg->dictionary;
+    if (cfg->dictionary == VJO_DICT_HACHIDORI) {
+        int rc = vjo_hachidori_lookup(a, p, cfg, text, res, err);
+        if (rc)
+            memset(res, 0, sizeof(*res));
+        return rc;
+    }
     if (!*key)
         return err->rc = VJO_E_NO_KEY;
     body.json = be->build_request(a, text);
@@ -246,6 +253,12 @@ const char *vjo_err_text(VjoArena *a, int stage, const VjoErr *err)
         vjo_buf_printf(&b, "%s API key is not set. Add %s to ux0:data/VitaJPOverlay/config.ini", dict, key);
         break;
     case VJO_E_NET:
+    case VJO_E_NO_HOST:
+        if (err->rc == VJO_E_NO_HOST) {
+            vjo_buf_puts(&b, "Hachidori relay host is not set or invalid. Set hachidori_host = HOST[:PORT] in "
+                             "ux0:data/VitaJPOverlay/config.ini (default port 19633; trusted LAN only).");
+            break;
+        }
         vjo_buf_printf(&b, "%s failed: no network connection", what);
         break;
     case VJO_E_TLS:
@@ -259,7 +272,7 @@ const char *vjo_err_text(VjoArena *a, int stage, const VjoErr *err)
         vjo_buf_printf(&b, "%s failed: response too large", what);
         break;
     case VJO_E_STATUS:
-        if (stage == VJO_STAGE_DICT && (err->http_status == 401 || err->http_status == 403))
+        if (stage == VJO_STAGE_DICT && key && (err->http_status == 401 || err->http_status == 403))
             vjo_buf_printf(&b, "%s rejected the API key (HTTP %d). Check %s in config.ini", dict,
                            err->http_status, key);
         else if (stage == VJO_STAGE_DICT && err->http_status == 429)

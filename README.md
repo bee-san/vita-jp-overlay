@@ -235,9 +235,12 @@ cmake -S vita -B build/vita && cmake --build build/vita --target release
 
 
 The host tests cover relay configuration, HTTP requests, reply parsing,
-structured definitions and Unicode token positions. To exercise the CLI over
-Hachidori Relay's actual HTTP and WebSocket servers, with a deterministic
-browser-side dictionary fixture (Node 22 and Python 3.9+):
+structured definitions and Unicode token positions. CTest also compiles the
+actual Vita worker against host platform stubs, covering manual, background
+and subtitle lookup gates, lookup completion, errors, modes and retry backoff.
+This is not a physical Vita test. To exercise the CLI over Hachidori Relay's
+actual HTTP and WebSocket servers, with a deterministic browser-side
+dictionary fixture (Node 22 and Python 3.9+):
 
 ```bash
 git clone --branch v0.0.5 --depth 1 https://github.com/bee-san/hachidori-anki .refs/hachidori-anki

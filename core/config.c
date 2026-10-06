@@ -39,6 +39,16 @@ const char *vjo_config_api_key(const VjoConfig *c)
     return c->dictionary == VJO_DICT_HACHIDORI ? "" : c->api_key[c->dictionary];
 }
 
+int vjo_config_dict_ready(const VjoConfig *c)
+{
+    if (c->dictionary == VJO_DICT_HACHIDORI) {
+        char host[64];
+        int port;
+        return vjo_hachidori_endpoint(c->hachidori_host, host, sizeof(host), &port) == 0;
+    }
+    return vjo_config_api_key(c)[0] != '\0';
+}
+
 static const struct {
     const char *key, *def; /* defaults: the Lapis note type */
 } anki_fields[VJO_ANKI_FIELD_COUNT] = {

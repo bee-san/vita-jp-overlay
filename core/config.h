@@ -69,6 +69,8 @@ const char *vjo_dict_name(int dictionary); /* "jpdb.io" | "jiten.moe" */
 int vjo_dict_find(const char *id);
 /* API key of the selected dictionary ("" if unset). */
 const char *vjo_config_api_key(const VjoConfig *c);
+/* Selected dictionary has a valid relay endpoint or its required cloud key. */
+int vjo_config_dict_ready(const VjoConfig *c);
 
 /* anki_host (or the saved anki_host.txt): "" = off, "auto" = search the
  * network, or host[:port]. For VJO_ANKI_MANUAL, host (cap bytes) and port

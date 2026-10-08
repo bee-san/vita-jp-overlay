@@ -314,7 +314,11 @@ static int run_local_ocr(VjoArena *a, VjoOverlayData *out, uint32_t *checksum)
     char *text = vjo_arena_alloc(a, VJO_OCR_TEXT_CAP);
     if (!text) return VJO_E_OOM;
     uid = sceKernelAllocMemBlock("VjoOCR", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, VJO_OCR_HEAP_BYTES, NULL);
-    if (uid < 0) return VJO_E_OOM;
+    if (uid < 0) {
+        /* The main unknown on hardware: is this much free in SceShell? */
+        vjo_log("ncnn workspace memblock (%u MiB) failed 0x%08X", VJO_OCR_HEAP_BYTES >> 20, uid);
+        return VJO_E_OOM;
+    }
     if (sceKernelGetMemBlockBase(uid, &workspace) < 0 || !workspace) {
         sceKernelFreeMemBlock(uid);
         return VJO_E_OOM;
@@ -768,9 +772,10 @@ static void activate_game(SceUID pid, const char *tid, int mode)
     backoff_note(&ocr_backoff, 0);
     backoff_note(&dict_backoff, 0);
     vjoSetGameActive(pid, mode);
-    vjo_log("game %s started: dictionary %s (key %s), trigger %s, subtitles %s, ocr_mode %s", title_id,
+    vjo_log("game %s started: dictionary %s (key %s), trigger %s, subtitles %s, ocr %s, ocr_mode %s", title_id,
             vjo_dict_name(cfg.dictionary), vjo_config_api_key(&cfg)[0] ? "set" : "MISSING",
             vjo_trigger_name(cfg.toggle_button), vjo_trigger_name(cfg.subtitle_button),
+            cfg.ocr_backend == VJO_OCR_NCNN ? "ncnn" : "lens",
             cfg.ocr_mode == VJO_OCR_AUTO ? "auto" : "on_press");
 }
 

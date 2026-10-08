@@ -244,13 +244,7 @@ static void reset_runtime(void)
 
 static void setup(void)
 {
-    if (!test_dir[0]) {
-        snprintf(test_dir, sizeof(test_dir), "/tmp/vjo-queue-tests-XXXXXX");
-        TEST_ASSERT(mkdtemp(test_dir) != NULL);
-        TEST_ASSERT(chdir(test_dir) == 0);
-        mkdir("ux0:", 0777);
-        mkdir("ux0:data", 0777);
-    }
+    TEST_ASSERT(test_dir[0] != '\0'); /* created by main */
     clear_files();
     reset_runtime();
 }
@@ -624,11 +618,47 @@ TEST_LIST = {
     {NULL, NULL}
 };
 
+static pid_t test_dir_owner;
+static void remove_tree(const char *path)
+{
+    char child[1024];
+    struct stat st;
+    struct dirent *e;
+    DIR *d;
+    if (lstat(path, &st) < 0)
+        return;
+    if (S_ISDIR(st.st_mode) && (d = opendir(path))) {
+        while ((e = readdir(d))) {
+            if (strcmp(e->d_name, ".") && strcmp(e->d_name, "..")) {
+                snprintf(child, sizeof(child), "%s/%s", path, e->d_name);
+                remove_tree(child);
+            }
+        }
+        closedir(d);
+    }
+    remove(path);
+}
+/* acutest runs each test in a child that also exits through atexit. */
+static void remove_test_dir(void)
+{
+    if (getpid() == test_dir_owner && chdir("/") == 0)
+        remove_tree(test_dir);
+}
+
 /* Invoked only by test_anki_restart.py; normal invocations still run acutest. */
 int main(int argc, char **argv)
 {
-    if (argc < 2 || strcmp(argv[1], "--restart-step"))
+    if (argc < 2 || strcmp(argv[1], "--restart-step")) {
+        /* One storage directory for every test (setup empties it). */
+        snprintf(test_dir, sizeof(test_dir), "/tmp/vjo-queue-tests-XXXXXX");
+        if (!mkdtemp(test_dir))
+            return 2;
+        test_dir_owner = getpid();
+        atexit(remove_test_dir);
+        if (chdir(test_dir) < 0 || mkdir("ux0:data", 0777) < 0)
+            return 2;
         return acutest_main(argc, argv);
+    }
     if (argc < 4 || chdir(argv[2]) < 0)
         return 2;
     mkdir("ux0:data", 0777);

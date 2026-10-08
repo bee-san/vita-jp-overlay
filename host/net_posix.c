@@ -7,6 +7,7 @@
 #include <netdb.h>
 #include <poll.h>
 #include <stdio.h>
+#include <sys/stat.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -148,11 +149,40 @@ static void posix_on_response(void *ud, const char *host, const char *body, size
     fclose(f);
 }
 
+/* No stdio buffering: local_dict.c owns its two bounded page caches. */
+static int local_read(void *ctx, uint64_t off, void *dst, size_t n)
+{
+    int fd = (int)(intptr_t)ctx;
+    uint8_t *out = dst;
+    while (n) {
+        ssize_t got = pread(fd, out, n, (off_t)off);
+        if (got < 0 && errno == EINTR) continue;
+        if (got <= 0) return -1;
+        out += got; off += (size_t)got; n -= (size_t)got;
+    }
+    return 0;
+}
+
+static void local_close(void *ctx) { close((int)(intptr_t)ctx); }
+
+static int local_open(void *ud, const char *path, VjoFile *out)
+{
+    struct stat st;
+    int fd = open(path, O_RDONLY);
+    (void)ud;
+    if (fd < 0) return -1;
+    if (fstat(fd, &st) || st.st_size < 0 || !S_ISREG(st.st_mode)) { close(fd); return -1; }
+    out->ctx = (void *)(intptr_t)fd; out->size = (uint64_t)st.st_size;
+    out->read = local_read; out->close = local_close;
+    return 0;
+}
+
 void posix_platform_init(PosixPlatform *pp, VjoPlatform *p)
 {
     memset(p, 0, sizeof(*p));
     p->ud = pp;
     p->connect = posix_connect;
+    p->file_open = local_open;
     p->disconnect = posix_disconnect;
     p->random = posix_random;
     p->unix_time = posix_time;

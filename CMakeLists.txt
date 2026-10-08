@@ -18,7 +18,7 @@ set(CORE_SRC
   core/arena.c core/pb.c core/utf.c core/lens.c core/json.c core/jpdb.c
   core/textfilter.c core/entries.c core/jiten.c core/config.c core/regions.c
   core/http.c core/tls.c core/tls_roots.c core/client.c core/styled.c core/jpegsw.c
-  core/base64.c core/anki.c core/net.c core/hachidori.c)
+  core/base64.c core/anki.c core/net.c core/hachidori.c core/local_dict.c)
 add_library(vjo_core STATIC ${CORE_SRC})
 target_include_directories(vjo_core PUBLIC core include)
 target_link_libraries(vjo_core PUBLIC bearssl)
@@ -58,3 +58,9 @@ target_include_directories(vjo-shell-worker-tests PRIVATE third_party/acutest/in
 target_compile_options(vjo-shell-worker-tests PRIVATE -Wall -Wextra -Wno-unused-parameter)
 target_link_libraries(vjo-shell-worker-tests vjo_host)
 add_test(NAME shell_worker COMMAND vjo-shell-worker-tests)
+
+# End-to-end ZIP conversion and disk lookup, using the actual CLI/runtime.
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME local_dictionary COMMAND ${CMAKE_COMMAND} -E env
+  "VJO_CLI=$<TARGET_FILE:vjo-cli>" ${Python3_EXECUTABLE} -m unittest discover
+  -s ${CMAKE_SOURCE_DIR}/tools/tests -v)

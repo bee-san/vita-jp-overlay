@@ -2,6 +2,7 @@
  * the network stack), resolver DNS, RTC time and the kernel RNG; plus the
  * LAN probing used to find Anki. */
 #include <psp2/kernel/clib.h>
+#include <psp2/io/fcntl.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/rng.h>
 #include <psp2/kernel/threadmgr.h>
@@ -235,10 +236,40 @@ static void vita_log(void *ud, const char *msg)
     vjo_log("%s", msg);
 }
 
+/* Called only by the lookup worker. Each request owns and closes its handles. */
+static int local_read(void *ctx, uint64_t off, void *dst, size_t n)
+{
+    SceUID fd = (SceUID)(intptr_t)ctx;
+    uint8_t *out = dst;
+    if (off > INT64_MAX || sceIoLseek(fd, (SceOff)off, SCE_SEEK_SET) != (SceOff)off) return -1;
+    while (n) {
+        int got = sceIoRead(fd, out, (SceSize)n);
+        if (got <= 0) return -1;
+        out += got; n -= (size_t)got;
+    }
+    return 0;
+}
+
+static void local_close(void *ctx) { sceIoClose((SceUID)(intptr_t)ctx); }
+
+static int local_open(void *ud, const char *path, VjoFile *out)
+{
+    SceUID fd = sceIoOpen(path, SCE_O_RDONLY, 0);
+    SceOff size;
+    (void)ud;
+    if (fd < 0) return -1;
+    size = sceIoLseek(fd, 0, SCE_SEEK_END);
+    if (size < 0) { sceIoClose(fd); return -1; }
+    out->ctx = (void *)(intptr_t)fd; out->size = (uint64_t)size;
+    out->read = local_read; out->close = local_close;
+    return 0;
+}
+
 void vjo_platform_vita(VjoPlatform *p)
 {
     sceClibMemset(p, 0, sizeof(*p));
     p->connect = vita_connect;
+    p->file_open = local_open;
     p->disconnect = vita_disconnect;
     p->random = vita_random;
     p->unix_time = vita_time;

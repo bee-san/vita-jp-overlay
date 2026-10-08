@@ -31,6 +31,8 @@ enum {
     VJO_E_ANKI = -109,      /* AnkiConnect reported an error (VjoErr.detail) */
     VJO_E_NOT_FOUND = -110, /* no AnkiConnect found on the network */
     VJO_E_ANKI_DUPLICATE = -111, /* AnkiConnect: the note is already in the deck */
+    VJO_E_LOCAL_IO = -113, /* cannot open/read a local dictionary */
+    VJO_E_LOCAL_FORMAT = -114, /* incompatible/corrupt .vjdict */
     VJO_E_NO_HOST = -112,   /* relay host unset or invalid */
 };
 

@@ -5,6 +5,7 @@
 
 #include "jiten.h"
 #include "hachidori.h"
+#include "local_dict.h"
 #include "jpdb.h"
 #include "port.h"
 #include "textfilter.h"
@@ -119,6 +120,8 @@ int vjo_dict_lookup(VjoArena *a, const VjoPlatform *p, const VjoConfig *cfg, con
     memset(err, 0, sizeof(*err));
     memset(res, 0, sizeof(*res));
     err->dict = cfg->dictionary;
+    if (cfg->dictionary == VJO_DICT_LOCAL)
+        return vjo_local_lookup(a, p, cfg, text, res, err);
     if (cfg->dictionary == VJO_DICT_HACHIDORI) {
         int rc = vjo_hachidori_lookup(a, p, cfg, text, res, err);
         if (rc)
@@ -268,7 +271,18 @@ const char *vjo_err_text(VjoArena *a, int stage, const VjoErr *err)
     case VJO_E_OOM:
         vjo_buf_printf(&b, "%s failed: not enough memory", what);
         break;
+    case VJO_E_LOCAL_IO:
+        vjo_buf_puts(&b, "Cannot read local dictionaries. Check the .vjdict files and local_dictionaries in config.ini.");
+        if (err->detail) vjo_buf_printf(&b, " %s", err->detail);
+        break;
+    case VJO_E_LOCAL_FORMAT:
+        vjo_buf_puts(&b, "Invalid or incomplete local dictionary. Reconvert the Yomitan ZIP and copy the complete .vjdict file again.");
+        break;
     case VJO_E_TOO_LARGE:
+        if (stage == VJO_STAGE_DICT && err->dict == VJO_DICT_LOCAL) {
+            vjo_buf_puts(&b, "Local lookup exceeds the text/result limit. Select a smaller OCR region or enable fewer dictionaries.");
+            break;
+        }
         vjo_buf_printf(&b, "%s failed: response too large", what);
         break;
     case VJO_E_STATUS:

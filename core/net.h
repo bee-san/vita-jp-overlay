@@ -9,6 +9,7 @@
 #include "arena.h"
 #include "conn.h"
 #include "http.h"
+#include "file.h"
 
 typedef struct {
     void *ud;
@@ -21,6 +22,8 @@ typedef struct {
     void (*random)(void *ud, void *buf, size_t n);
     uint64_t (*unix_time)(void *ud);
     void (*log)(void *ud, const char *msg); /* optional */
+    /* Local dictionary files: optional for network-only platforms. */
+    int (*file_open)(void *ud, const char *path, VjoFile *out);
     /* optional: raw response bodies (host CLI --record) */
     void (*on_response)(void *ud, const char *host, const char *body, size_t len);
 #ifdef VJO_HOST

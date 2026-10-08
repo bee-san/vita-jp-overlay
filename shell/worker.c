@@ -355,9 +355,22 @@ static void start_job(const char *why, int lookup)
 
 /* ---------------- control thread ---------------- */
 
+static int same_dictionary(const VjoConfig *a, const VjoConfig *b)
+{
+    if (a->dictionary != b->dictionary) return 0;
+    if (a->dictionary == VJO_DICT_LOCAL)
+        return !sceClibStrcmp(a->local_dictionary_dir, b->local_dictionary_dir) &&
+               !sceClibStrcmp(a->local_dictionaries, b->local_dictionaries);
+    if (a->dictionary == VJO_DICT_HACHIDORI)
+        return !sceClibStrcmp(a->hachidori_host, b->hachidori_host);
+    return !sceClibStrcmp(vjo_config_api_key(a), vjo_config_api_key(b));
+}
+
 static void apply_config(void)
 {
+    VjoConfig previous = cfg;
     vjo_config_load(&cfg, &scratch);
+    if (!same_dictionary(&previous, &cfg)) cache_ok = 0;
     vjo_log_configure(&cfg);
     vjo_anki_configure(&cfg);
     if (vjoSetTriggers(cfg.toggle_button, cfg.subtitle_button) < 0)
@@ -484,7 +497,7 @@ static void on_job_done(void)
     /* Publish the new arena; the old one becomes the next job's target. */
     vjo_view_lock();
     active = idx;
-    cache_ok = d->err.rc == VJO_OK && job_lookup; /* the overlay needs the lookup */
+    cache_ok = d->err.rc == VJO_OK && job_lookup && same_dictionary(&job_cfg, &cfg); /* the overlay needs the lookup */
     cache_checksum = job_checksum;
     vjo_view_unlock();
     if (subtitles)
@@ -494,7 +507,7 @@ static void on_job_done(void)
         ov = OV_OPEN;
         st.size = sizeof(st);
         vjoGetState(&st);
-        if (job_checksum != st.checksum || !job_lookup) {
+        if (job_checksum != st.checksum || !job_lookup || !same_dictionary(&job_cfg, &cfg)) {
             start_job(job_lookup ? "result was for an earlier screen" : "the running job was OCR only", 1);
             return;
         }

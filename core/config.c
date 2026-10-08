@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "port.h"
+#include "local_dict.h"
 #include "textfilter.h"
 #include "utf.h"
 
@@ -22,6 +23,7 @@ static const VjoDictInfo dicts[VJO_DICT_COUNT] = {
     [VJO_DICT_JPDB] = {"jpdb", "jpdb.io", "jpdb_api_key", "VJO_JPDB_KEY"},
     [VJO_DICT_JITEN] = {"jiten", "jiten.moe", "jiten_api_key", "VJO_JITEN_KEY"},
     [VJO_DICT_HACHIDORI] = {"hachidori", "Hachidori relay", NULL, NULL},
+    [VJO_DICT_LOCAL] = {"local", "Local dictionaries", NULL, NULL},
 };
 
 const VjoDictInfo *vjo_dict_info(int dictionary)
@@ -36,11 +38,14 @@ const char *vjo_dict_name(int dictionary)
 
 const char *vjo_config_api_key(const VjoConfig *c)
 {
-    return c->dictionary == VJO_DICT_HACHIDORI ? "" : c->api_key[c->dictionary];
+    return c->dictionary == VJO_DICT_HACHIDORI || c->dictionary == VJO_DICT_LOCAL ? "" : c->api_key[c->dictionary];
 }
 
 int vjo_config_dict_ready(const VjoConfig *c)
 {
+    /* File availability is checked by the worker, without blocking the UI thread. */
+    if (c->dictionary == VJO_DICT_LOCAL)
+        return 1;
     if (c->dictionary == VJO_DICT_HACHIDORI) {
         char host[64];
         int port;
@@ -66,6 +71,8 @@ void vjo_config_defaults(VjoConfig *c)
 {
     memset(c, 0, sizeof(*c));
     c->dictionary = VJO_DICT_HACHIDORI;
+    vjo_snprintf(c->local_dictionary_dir, sizeof(c->local_dictionary_dir), "ux0:data/VitaJPOverlay/dictionaries");
+    vjo_snprintf(c->local_dictionaries, sizeof(c->local_dictionaries), "main.vjdict");
     c->non_japanese_filter = VJO_FILTER_LINES;
     c->font_size_ja = 18;
     c->font_size_en = 14;
@@ -83,13 +90,18 @@ const char *vjo_config_default_text(void)
 {
     return "; Vita JP Overlay settings. Changes apply the next time the overlay opens.\n"
            "\n"
-           "; Dictionary used for word lookups: hachidori | jpdb | jiten\n"
+           "; Dictionary used for word lookups: hachidori | local | jpdb | jiten\n"
            "dictionary = hachidori\n"
            "\n"
            "; Hachidori relay computer: host[:port], default port 19633 (no API key)\n"
            "; Plain HTTP: use only on a trusted LAN. Anki and a sharing Hachidori host\n"
            "; with dictionaries must be running; enable Sharing > Also with my other computers.\n"
            "hachidori_host =\n"
+           "\n"
+           "; Local Yomitan dictionaries: convert on a computer, then copy .vjdict files here.\n"
+           "local_dictionary_dir = ux0:data/VitaJPOverlay/dictionaries\n"
+           "; Up to 8 filenames, separated by commas, in priority order.\n"
+           "local_dictionaries = main.vjdict\n"
            "\n"
            "; jpdb.io API key (needed for dictionary = jpdb): jpdb.io -> Settings -> API key\n"
            "jpdb_api_key =\n"
@@ -336,6 +348,8 @@ typedef struct {
     {#name, offsetof(VjoConfig, name), sizeof(((VjoConfig *)0)->name), 0, raw, valid, expected, quiet}
 static const StrSetting str_settings[] = {
     CHECKED_SETTING(hachidori_host, 0, valid_hachidori_host, "host[:port], not a URL", 0),
+    STR_SETTING(local_dictionary_dir, 1, 1),
+    CHECKED_SETTING(local_dictionaries, 0, vjo_local_names_valid, "1-8 relative .vjdict filenames separated by commas", 1),
     STR_SETTING(log_host, 0, 0),
     CHECKED_SETTING(anki_host, 0, valid_anki_host, "empty, auto, or IP[:port]", 0),
     STR_SETTING(anki_deck, 1, 1),
@@ -470,7 +484,7 @@ void vjo_config_parse(VjoConfig *c, const char *text, size_t len)
         (unsigned char)text[2] == 0xBF)
         i = 3;
     while (i < len) {
-        char line[512], key[64], val[sizeof(((VjoConfig *)0)->anki_audio_url)]; /* the longest value */
+        char line[1024], key[64], val[sizeof(((VjoConfig *)0)->local_dictionaries)]; /* the longest value */
         size_t n = 0, s, e, eq;
         int cut = 0;
         while (i < len && text[i] != '\n') {

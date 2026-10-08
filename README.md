@@ -1,9 +1,11 @@
-# Vita JP Overlay with Hachidori Relay
+# Vita JP Overlay with local dictionaries and Hachidori Relay
 
 This [bee-san fork](https://github.com/bee-san/vita-jp-overlay) of
 [Dartv/vita-jp-overlay](https://github.com/Dartv/vita-jp-overlay) uses your
 [Hachidori](https://github.com/bee-san/hachidori) dictionaries through
 [Hachidori Relay](https://github.com/bee-san/hachidori-anki) by default.
+It also supports **locally installed Yomitan dictionaries** with bounded-memory,
+disk-backed lookup. See [Local dictionaries](docs/local-dictionaries.md).
 Text recognition still uses Google Lens. Jiten and JPDB remain optional backends.
 No dictionary API key is needed for Hachidori.
 
@@ -15,8 +17,10 @@ The idea comes from [meikidroid](https://github.com/rtr46/meikidroid)
 
 - A PS Vita on firmware 3.60 to 3.74 with HENkaku Ensō or h-encore.
 - Wi-Fi.
-- A computer running Anki with Hachidori Relay v0.0.4 or newer, and a current
-  Hachidori browser extension with dictionaries and network sharing enabled.
+- For local dictionaries: a computer with Python 3.9+ to convert dictionary ZIPs
+  once, then copy the resulting files to the Vita. The computer can be off while playing.
+- For Hachidori Relay: a computer running Anki with Hachidori Relay v0.0.4 or newer,
+  and a current Hachidori browser extension with dictionaries and network sharing enabled.
 - An API key only if you explicitly select the optional Jiten or JPDB backend.
 
 ## Installing
@@ -26,7 +30,7 @@ The idea comes from [meikidroid](https://github.com/rtr46/meikidroid)
 1. Download the **VitaJPOverlay** artifact from a successful run in this fork's
    [Actions](https://github.com/bee-san/vita-jp-overlay/actions) page. Extract the
    artifact wrapper to get `VitaJPOverlay-<version>.zip`, then extract that zip.
-   Upstream release zips do not contain this fork's Hachidori backend.
+   Upstream release zips do not contain this fork's local or Hachidori backends.
 2. Copy the zip's `ur0` folder to the root of `ur0:` on the Vita. VitaShell's FTP server or
   USB mode both work. You should end up with:
   - `ur0:tai/VitaJPOverlay_Kernel.skprx`
@@ -59,6 +63,28 @@ tools/install_ftp.sh --set dictionary=hachidori --set hachidori_host=192.168.1.2
 It backs up and patches the taiHEN config files, uploads the plugins and writes `config.ini`.
 Running it again later keeps your settings. `--uninstall` removes the plugin lines and
 `--status` prints the plugin logs.
+
+## Local dictionary setup
+
+Convert a Yomitan term dictionary ZIP on your computer:
+
+```sh
+python3 tools/convert_dictionary.py Jitendex.zip -o main.vjdict
+```
+
+Copy `main.vjdict` to `ux0:data/VitaJPOverlay/dictionaries/`, then set:
+
+```ini
+dictionary = local
+local_dictionaries = main.vjdict
+```
+
+You can enable up to eight dictionary files or combine multiple ZIPs. The
+converter and FTP installer are included in the fork's build ZIP. See the
+[installation guide and memory limits](docs/local-dictionaries.md).
+Dictionary lookup needs no computer or internet; **Google Lens OCR still needs
+internet**. The existing Hachidori Relay default is preserved until you select
+`local` (or use `tools/install_dictionary.py --enable`).
 
 ## Hachidori Relay setup
 
@@ -134,8 +160,10 @@ All settings live in `ux0:data/VitaJPOverlay/config.ini`. The area to read (□ 
 
 | Key                   | Values                                                              | Default    | What it does                                                                                 |
 | --------------------- | ------------------------------------------------------------------- | ---------- | -------------------------------------------------------------------------------------------- |
-| `dictionary`          | `hachidori`, `jiten`, `jpdb`                                        | `hachidori` | Which dictionary looks up the words.                                                        |
+| `dictionary`          | `hachidori`, `local`, `jiten`, `jpdb`                                        | `hachidori` | Which dictionary looks up the words.                                                        |
 | `hachidori_host`       | `HOST[:PORT]`                                                       | empty      | Hachidori Relay computer; HTTP API port defaults to 19633.                                   |
+| `local_dictionary_dir` | directory path | `ux0:data/VitaJPOverlay/dictionaries` | Folder holding converted `.vjdict` files. |
+| `local_dictionaries` | comma-separated filenames | `main.vjdict` | Up to 8 files, in priority order; see the local dictionary guide. |
 | `jiten_api_key`       | text                                                                | empty      | Your jiten.moe API key.                                                                      |
 | `jpdb_api_key`        | text                                                                | empty      | Your jpdb.io API key.                                                                        |
 | `non_japanese_filter` | `lines`, `none`                                                     | `lines`    | Drop recognized lines with no kana or kanji.                                                 |
@@ -184,6 +212,9 @@ All settings live in `ux0:data/VitaJPOverlay/config.ini`. The area to read (□ 
 
 - The chosen area of the screen is sent to Google Lens for text recognition. In `auto` mode,
 and while subtitles are on, that happens every time the area changes while a game is running.
+- With `dictionary = local`, dictionary lookup stays on the Vita. No dictionary
+  request is sent to a computer or cloud service. Google Lens OCR still sends
+  the selected screen crop as described above.
 - With `dictionary = hachidori`, recognised text is sent to your configured
   Hachidori Relay computer over plain HTTP. Dictionary lookups stay on that
   computer. No dictionary API key is sent, and a relay failure never falls back
@@ -259,6 +290,9 @@ cross-build. Its **VitaJPOverlay** artifact contains the installable zip.
 These tests do not replace testing on a physical Vita.
 
 ## Credits
+
+- [Yomichan](https://github.com/FooSoft/yomichan) for the GPL-3.0 Japanese
+  deinflection rules; the pinned source and attribution are in `third_party/yomichan/`.
 
 - [meikidroid](https://github.com/rtr46/meikidroid) by rtr46 for the idea.
 - [jmdict-vita](https://github.com/shoui520/jmdict-vita) by shoui520 for rich-text layout.

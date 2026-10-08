@@ -392,7 +392,7 @@ static void test_entries(void)
     TEST_CHECK(!strcmp(l.entries[1].text, "が 50\nindicates subject"));
     TEST_CHECK(!strcmp(l.entries[2].text, "好き 99999\nliked"));
     TEST_CHECK(!strcmp(vjo_render_highlight(&A, &l, 0), "【猫】が\n好き"));
-    TEST_CHECK(!strcmp(vjo_render_highlight(&A, &l, 1), "猫【が\n】好き"));
+    TEST_CHECK(!strcmp(vjo_render_highlight(&A, &l, 1), "猫【が】\n好き"));
     TEST_CHECK(!strcmp(vjo_render_highlight(&A, &l, 2), "猫が\n【好き】"));
     TEST_CHECK(!strcmp(vjo_entries_body(&A, &l),
                        "猫 (ねこ) 1500\ncat\nfeline\n\nが 50\nindicates subject\n\n好き 99999\nliked"));

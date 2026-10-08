@@ -250,7 +250,37 @@ static void test_subtitles_on_press_stay_ocr_only(void)
     TEST_CHECK(job_running && !job_lookup && (posted_events & NET_EV_JOB));
 }
 
+static void test_local_worker_and_config_changes(void)
+{
+    setup("dictionary = local\nlocal_dictionaries = main.vjdict\n");
+    TEST_CHECK(vjo_config_dict_ready(&cfg));
+    TEST_CHECK(!vjo_config_api_key(&cfg)[0]);
+    open_overlay();
+    TEST_CHECK(job_running && job_lookup && !g_view.status_is_error);
+    job_running = 0;
+    ov = OV_CLOSED;
+    posted_events = 0;
+    stable_pending = 1;
+    auto_prefetch();
+    TEST_CHECK(job_running && job_lookup && (posted_events & NET_EV_JOB));
+
+    cache_ok = 1;
+    strcpy(loaded_config.local_dictionaries, "new.vjdict");
+    apply_config();
+    TEST_CHECK(!cache_ok);
+    TEST_CHECK(!same_dictionary(&job_cfg, &cfg));
+
+    /* Reopening during an old lookup must schedule a fresh lookup. */
+    ov = OV_OPEN_OLD_JOB;
+    job_checksum = kernel_state.checksum;
+    cache_data[job_idx].err.rc = VJO_OK;
+    cache_data[job_idx].failed_stage = VJO_STAGE_NONE;
+    on_job_done();
+    TEST_CHECK(job_running && job_lookup && same_dictionary(&job_cfg, &cfg));
+}
+
 TEST_LIST = {
+    {"local_worker_and_config_changes", test_local_worker_and_config_changes},
     {"manual_relay_without_keys", test_manual_relay_without_keys},
     {"background_relay_without_keys", test_background_relay_without_keys},
     {"subtitles_auto_relay_lookup", test_subtitles_auto_relay_lookup},

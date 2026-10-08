@@ -562,6 +562,8 @@ static void strip_show_result(const VjoOverlayData *d)
     vjo_arena_release(&scratch, mark);
 }
 
+static int want_lookup(void);
+
 /* The network thread finished the job. */
 static void on_job_done(void)
 {
@@ -572,10 +574,15 @@ static void on_job_done(void)
     job_done = 0;
     job_text_ready = 0;
     if (job_cancelled(NULL)) {
+        /* The result is for an earlier region or game. Redo it for whoever
+         * still waits: the overlay, or the subtitles (on_command's own job
+         * was skipped while this one ran; the strip still shows busy). */
         cache_ok = 0;
-        if (ov != OV_CLOSED && game_active()) {
-            ov = OV_OPEN;
-            start_job("capture context changed", 1);
+        if (game_active() && (ov != OV_CLOSED || subtitles)) {
+            int lookup = ov != OV_CLOSED || want_lookup();
+            if (ov != OV_CLOSED)
+                ov = OV_OPEN;
+            start_job("capture context changed", lookup);
         }
         return;
     }

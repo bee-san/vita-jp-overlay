@@ -329,9 +329,27 @@ static void test_ocr_context_changes(void)
     TEST_CHECK(!job_running && !cache_ok && active == -1 && !g_view.open);
 }
 
+static void test_region_change_redoes_subtitle_job(void)
+{
+    setup("dictionary = local\nocr_backend = ncnn\n");
+    set_subtitles(1);
+    TEST_ASSERT(job_running && !job_lookup);
+    /* A new region while that job runs: on_command cannot start its own. */
+    pending_cmd = VJO_CMD_SET_REGION;
+    pending_rect = (VjoRect){0, 0, 0x8000, 0x4000};
+    on_command();
+    TEST_CHECK(job_running && job_cancelled(NULL));
+    posted_events = 0;
+    on_job_done();
+    /* Not left busy with the old region's text: the job is redone. */
+    TEST_CHECK(job_running && !job_lookup && !job_cancelled(NULL) && (posted_events & NET_EV_JOB));
+    TEST_CHECK(g_view.strip_on && g_view.strip_busy && !g_view.open);
+}
+
 TEST_LIST = {
     {"ncnn_manual_and_no_fallback", test_ncnn_manual_and_no_fallback},
     {"ocr_context_changes", test_ocr_context_changes},
+    {"region_change_redoes_subtitle_job", test_region_change_redoes_subtitle_job},
     {"local_worker_and_config_changes", test_local_worker_and_config_changes},
     {"manual_relay_without_keys", test_manual_relay_without_keys},
     {"background_relay_without_keys", test_background_relay_without_keys},

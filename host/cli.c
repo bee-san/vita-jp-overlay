@@ -9,7 +9,8 @@
  *
  * --anki checks every entry against AnkiConnect (duplicates in the deck)
  * and --anki-add adds entry N (1-based, as --nav numbers them), with the
- * picture if given; the other anki_* settings come from --config.
+ * picture if given and the word's audio (anki_audio_url); the other anki_*
+ * settings come from --config.
  *
  * The API key may also come from $VJO_JPDB_KEY / $VJO_JITEN_KEY. --replay runs
  * the same pipeline on a fixture dir's recorded responses (see replay.h). */
@@ -88,27 +89,35 @@ static int run_anki(VjoArena *a, VjoArena *fa, const VjoPlatform *p, const VjoCo
         printf("%d: %s%s\n", i + 1, l->entries[i].vocab->spelling, marks[i] ? " ✓ in Anki" : "");
     if (add) {
         VjoAnkiNote n;
-        char name[40] = "";
-        size_t jlen = 0;
-        const uint8_t *jpeg = NULL;
+        VjoAnkiMedia m;
+        struct timeval tv;
+        uint64_t now;
+        char name[40];
+        memset(&m, 0, sizeof(m));
+        gettimeofday(&tv, NULL);
+        now = (uint64_t)tv.tv_sec * 1000u + (uint64_t)(tv.tv_usec / 1000);
         if (vjo_anki_note_from_entry(a, l, add - 1, &n) < 0) {
             fprintf(stderr, "--anki-add: no entry %d\n", add);
             return 1;
         }
         if (picture) {
-            struct timeval tv;
-            if (!(jpeg = (const uint8_t *)vjo_read_file(fa, picture, &jlen))) {
+            if (!(m.picture = (const uint8_t *)vjo_read_file(fa, picture, &m.picture_len))) {
                 fprintf(stderr, "cannot read %s\n", picture);
                 return 1;
             }
-            gettimeofday(&tv, NULL);
-            vjo_anki_picture_name(name, sizeof(name), (uint32_t)tv.tv_sec, (uint32_t)(tv.tv_usec / 1000));
+            vjo_anki_media_name(name, sizeof(name), now, "jpg");
+            m.picture_name = name;
         }
-        if (vjo_anki_add(a, p, host, port, cfg, &n, jpeg, jlen, name, &err)) {
+        if (vjo_anki_audio_enabled(cfg)) {
+            vjo_anki_find_audio(a, p, cfg, &n, now, &m, &err);
+            printf("audio: %s\n", m.audio_url ? m.audio_url : vjo_anki_audio_err_text(a, &err));
+        }
+        if (vjo_anki_add(a, p, host, port, cfg, &n, &m, &err)) {
             printf("add %s: %s\n", n.spelling, vjo_anki_err_text(a, &err));
             return 1;
         }
-        printf("Added: %s%s%s\n", n.spelling, jpeg ? " with " : "", name);
+        printf("Added: %s%s%s%s%s\n", n.spelling, m.picture_name ? " with " : "", m.picture_name ? m.picture_name : "",
+               m.audio_name ? " and " : "", m.audio_name ? m.audio_name : "");
     }
     return rc ? 1 : 0;
 }
@@ -116,7 +125,9 @@ static int run_anki(VjoArena *a, VjoArena *fa, const VjoPlatform *p, const VjoCo
 static void usage(void)
 {
     fprintf(stderr,
-            "usage: vjo-cli IMAGE.jpg [--dict jpdb|jiten] [--api-key KEY | --config FILE]\n"
+            "usage: vjo-cli IMAGE.jpg [--dict hachidori|local|jpdb|jiten] [--api-key KEY | --config FILE]\n"
+            "               [--local-dir DIR] [--local-dicts main.vjdict,extra.vjdict]\n"
+            "               [--hachidori HOST[:PORT]] (plain HTTP, trusted LAN; no key)\n"
             "               [--filter lines|none] [--record DIR] [--nav] [--stats] [-v]\n"
             "       vjo-cli --text TEXT [options]\n"
             "       vjo-cli --replay DIR [options]\n"
@@ -134,6 +145,7 @@ int main(int argc, char **argv)
     VjoOverlayData d;
     const char *image = NULL, *text = NULL, *replay = NULL, *config = NULL, *key = NULL, *dict = NULL;
     const char *anki = NULL, *anki_deck = NULL, *picture = NULL;
+    const char *hachidori = NULL, *local_dir = NULL, *local_dicts = NULL;
     int nav = 0, stats = 0, anki_add = 0, rc;
 
     memset(mem, 0xA5, sizeof(mem)); /* like a reused arena on the Vita */
@@ -149,6 +161,12 @@ int main(int argc, char **argv)
             config = argv[++i];
         else if (!strcmp(s, "--dict") && more)
             dict = argv[++i];
+        else if (!strcmp(s, "--local-dir") && more)
+            local_dir = argv[++i];
+        else if (!strcmp(s, "--local-dicts") && more)
+            local_dicts = argv[++i];
+        else if (!strcmp(s, "--hachidori") && more)
+            hachidori = argv[++i];
         else if (!strcmp(s, "--filter") && more)
             cfg.non_japanese_filter = strcmp(argv[++i], "none") ? 1 : 0;
         else if (!strcmp(s, "--record") && more)
@@ -205,8 +223,26 @@ int main(int argc, char **argv)
         if (cfg.dictionary < 0)
             usage();
     }
-    if (!key)
-        key = getenv(vjo_dict_info(cfg.dictionary)->key_env); /* VJO_JPDB_KEY, VJO_JITEN_KEY */
+    if (hachidori) {
+        char host[64];
+        int port;
+        if (strlen(hachidori) >= sizeof(cfg.hachidori_host) ||
+            vjo_hachidori_endpoint(hachidori, host, sizeof(host), &port) < 0) {
+            fprintf(stderr, "--hachidori: expected HOST[:PORT], not a URL\n");
+            return 2;
+        }
+        snprintf(cfg.hachidori_host, sizeof(cfg.hachidori_host), "%s", hachidori);
+    }
+    if (local_dir) {
+        if (strlen(local_dir) >= sizeof(cfg.local_dictionary_dir)) usage();
+        snprintf(cfg.local_dictionary_dir, sizeof(cfg.local_dictionary_dir), "%s", local_dir);
+    }
+    if (local_dicts) {
+        if (strlen(local_dicts) >= sizeof(cfg.local_dictionaries)) usage();
+        snprintf(cfg.local_dictionaries, sizeof(cfg.local_dictionaries), "%s", local_dicts);
+    }
+    if (!key && vjo_dict_info(cfg.dictionary)->key_env)
+        key = getenv(vjo_dict_info(cfg.dictionary)->key_env);
     if (key)
         snprintf(cfg.api_key[cfg.dictionary], sizeof(cfg.api_key[cfg.dictionary]), "%s", key);
 

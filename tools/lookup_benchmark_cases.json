@@ -1,0 +1,9 @@
+[
+  {"name": "exact", "text": "図書館"},
+  {"name": "reading", "text": "としょかん"},
+  {"name": "polite_negative", "text": "食べませんでした"},
+  {"name": "dialogue", "text": "今日は学校に行って、友達と話しました。"},
+  {"name": "inflected", "text": "彼女の名前を思い出せなかった。"},
+  {"name": "repeated", "text": "猫。猫。猫。猫。猫。"},
+  {"name": "unknown", "text": "霻霻霻霻霻霻霻霻"}
+]

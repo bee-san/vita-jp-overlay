@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "port.h"
+#include "local_dict.h"
 #include "textfilter.h"
 #include "utf.h"
 
@@ -21,6 +22,8 @@ const char *vjo_trigger_name(int trigger)
 static const VjoDictInfo dicts[VJO_DICT_COUNT] = {
     [VJO_DICT_JPDB] = {"jpdb", "jpdb.io", "jpdb_api_key", "VJO_JPDB_KEY"},
     [VJO_DICT_JITEN] = {"jiten", "jiten.moe", "jiten_api_key", "VJO_JITEN_KEY"},
+    [VJO_DICT_HACHIDORI] = {"hachidori", "Hachidori relay", NULL, NULL},
+    [VJO_DICT_LOCAL] = {"local", "Local dictionaries", NULL, NULL},
 };
 
 const VjoDictInfo *vjo_dict_info(int dictionary)
@@ -35,7 +38,20 @@ const char *vjo_dict_name(int dictionary)
 
 const char *vjo_config_api_key(const VjoConfig *c)
 {
-    return c->api_key[c->dictionary];
+    return c->dictionary == VJO_DICT_HACHIDORI || c->dictionary == VJO_DICT_LOCAL ? "" : c->api_key[c->dictionary];
+}
+
+int vjo_config_dict_ready(const VjoConfig *c)
+{
+    /* File availability is checked by the worker, without blocking the UI thread. */
+    if (c->dictionary == VJO_DICT_LOCAL)
+        return 1;
+    if (c->dictionary == VJO_DICT_HACHIDORI) {
+        char host[64];
+        int port;
+        return vjo_hachidori_endpoint(c->hachidori_host, host, sizeof(host), &port) == 0;
+    }
+    return vjo_config_api_key(c)[0] != '\0';
 }
 
 static const struct {
@@ -48,12 +64,15 @@ static const struct {
     [VJO_ANKI_SENTENCE] = {"anki_field_sentence", "Sentence"},
     [VJO_ANKI_PICTURE] = {"anki_field_picture", "Picture"},
     [VJO_ANKI_FREQUENCY] = {"anki_field_frequency", "FreqSort"},
+    [VJO_ANKI_AUDIO] = {"anki_field_audio", "ExpressionAudio"},
 };
 
 void vjo_config_defaults(VjoConfig *c)
 {
     memset(c, 0, sizeof(*c));
-    c->dictionary = VJO_DICT_JITEN;
+    c->dictionary = VJO_DICT_HACHIDORI;
+    vjo_snprintf(c->local_dictionary_dir, sizeof(c->local_dictionary_dir), "ux0:data/VitaJPOverlay/dictionaries");
+    vjo_snprintf(c->local_dictionaries, sizeof(c->local_dictionaries), "main.vjdict");
     c->non_japanese_filter = VJO_FILTER_LINES;
     c->font_size_ja = 18;
     c->font_size_en = 14;
@@ -71,8 +90,18 @@ const char *vjo_config_default_text(void)
 {
     return "; Vita JP Overlay settings. Changes apply the next time the overlay opens.\n"
            "\n"
-           "; Dictionary used for word lookups: jpdb | jiten\n"
-           "dictionary = jiten\n"
+           "; Dictionary used for word lookups: hachidori | local | jpdb | jiten\n"
+           "dictionary = hachidori\n"
+           "\n"
+           "; Hachidori relay computer: host[:port], default port 19633 (no API key)\n"
+           "; Plain HTTP: use only on a trusted LAN. Anki and a sharing Hachidori host\n"
+           "; with dictionaries must be running; enable Sharing > Also with my other computers.\n"
+           "hachidori_host =\n"
+           "\n"
+           "; Local Yomitan dictionaries: convert on a computer, then copy .vjdict files here.\n"
+           "local_dictionary_dir = ux0:data/VitaJPOverlay/dictionaries\n"
+           "; Up to 8 filenames, separated by commas, in priority order.\n"
+           "local_dictionaries = main.vjdict\n"
            "\n"
            "; jpdb.io API key (needed for dictionary = jpdb): jpdb.io -> Settings -> API key\n"
            "jpdb_api_key =\n"
@@ -126,44 +155,112 @@ const char *vjo_config_default_text(void)
            "anki_field_definition = MainDefinition\n"
            "anki_field_sentence = Sentence\n"
            "anki_field_picture = Picture\n"
-           "anki_field_frequency = FreqSort\n";
+           "anki_field_frequency = FreqSort\n"
+           "anki_field_audio = ExpressionAudio\n"
+           "\n"
+           "; Word audio: a Yomitan audio source URL with {term} and {reading} (empty = off)\n"
+           "anki_audio_url =\n";
 }
 
-int vjo_anki_endpoint(const char *setting, char *host, size_t cap, int *port)
+/* host[:port], the n bytes at s: a name or IP address, and a port
+ * (default_port when there is none). Returns 0, or -1 when invalid. */
+static int host_port(const char *s, size_t n, char *host, size_t cap, int default_port, int *port)
 {
-    const char *colon = strchr(setting, ':');
-    size_t n = colon ? (size_t)(colon - setting) : strlen(setting);
+    const char *colon = memchr(s, ':', n);
+    size_t hn = colon ? (size_t)(colon - s) : n;
     int v = 0;
-    if (!*setting)
-        return VJO_ANKI_OFF;
-    if (vjo_ieq(setting, "auto"))
-        return VJO_ANKI_AUTO;
-    if (n == 0 || n >= cap)
+    if (hn == 0 || hn >= cap)
         return -1;
-    for (size_t i = 0; i < n; i++) {
-        char ch = setting[i];
+    for (size_t i = 0; i < hn; i++) {
+        char ch = s[i];
         if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '.' ||
               ch == '-'))
             return -1;
     }
     if (colon) {
-        const char *s = colon + 1;
-        if (!*s)
+        const char *p = colon + 1, *end = s + n;
+        if (p == end)
             return -1;
-        for (; *s; s++) {
-            if (*s < '0' || *s > '9')
+        for (; p < end; p++) {
+            if (*p < '0' || *p > '9')
                 return -1;
-            v = v * 10 + (*s - '0');
+            v = v * 10 + (*p - '0');
             if (v > 65535)
                 return -1;
         }
         if (v == 0)
             return -1;
     }
-    *port = colon ? v : VJO_ANKI_PORT;
-    memcpy(host, setting, n);
-    host[n] = '\0';
+    *port = colon ? v : default_port;
+    memcpy(host, s, hn);
+    host[hn] = '\0';
+    return 0;
+}
+
+int vjo_anki_endpoint(const char *setting, char *host, size_t cap, int *port)
+{
+    if (!*setting)
+        return VJO_ANKI_OFF;
+    if (vjo_ieq(setting, "auto"))
+        return VJO_ANKI_AUTO;
+    if (host_port(setting, strlen(setting), host, cap, VJO_ANKI_PORT, port) < 0)
+        return -1;
     return VJO_ANKI_MANUAL;
+}
+
+int vjo_hachidori_endpoint(const char *setting, char *host, size_t cap, int *port)
+{
+    int rc;
+    size_t label = 0;
+    if (!setting || vjo_ieq(setting, "auto"))
+        return -1;
+    rc = vjo_anki_endpoint(setting, host, cap, port);
+    if (rc != VJO_ANKI_MANUAL)
+        return -1;
+    /* DNS labels must not be empty or start/end with a hyphen. */
+    for (size_t i = 0; ; i++) {
+        char ch = host[i];
+        if (ch == '.' || ch == '\0') {
+            if (!label || host[i - 1] == '-')
+                return -1;
+            label = 0;
+            if (!ch)
+                break;
+        } else {
+            if (!label && ch == '-')
+                return -1;
+            label++;
+        }
+    }
+    if (!strchr(setting, ':'))
+        *port = VJO_HACHIDORI_PORT;
+    return 0;
+}
+
+int vjo_anki_audio_endpoint(const char *url, char *host, int *port, int *tls, const char **path)
+{
+    size_t n = 0;
+    int term = 0;
+    if (!strncmp(url, "https://", 8)) {
+        *tls = 1;
+        url += 8;
+    } else if (!strncmp(url, "http://", 7)) {
+        *tls = 0;
+        url += 7;
+    } else {
+        return -1;
+    }
+    while (url[n] && url[n] != '/' && url[n] != '?')
+        n++;
+    for (const char *s = url + n; *s; s++) {
+        if ((unsigned char)*s <= ' ' || (unsigned char)*s >= 0x7F || *s == '#')
+            return -1; /* not one URL (a space, a fragment), or not ASCII */
+        term |= !strncmp(s, "{term}", 6);
+    }
+    if (!term || host_port(url, n, host, VJO_HOST_MAX, *tls ? 443 : 80, port) < 0)
+        return -1;
+    *path = url + n;
+    return 0;
 }
 
 static void warn(VjoConfig *c, const char *fmt, const char *a, const char *b)
@@ -206,28 +303,59 @@ static int api_key_dict(const char *key)
     if (vjo_ieq(key, "api_key")) /* the old name of jpdb_api_key (tools/migrate_config.py RENAMED) */
         return VJO_DICT_JPDB;
     for (int i = 0; i < VJO_DICT_COUNT; i++)
-        if (vjo_ieq(key, dicts[i].key_setting))
+        if (dicts[i].key_setting && vjo_ieq(key, dicts[i].key_setting))
             return i;
     return -1;
 }
 
-/* Plain string settings. Deck, note type, tags and field names may
- * contain ';' and '#' (raw: no inline comment). */
+static int valid_hachidori_host(const char *v)
+{
+    char host[64];
+    int port;
+    return !*v || vjo_hachidori_endpoint(v, host, sizeof(host), &port) == 0;
+}
+
+static int valid_anki_host(const char *v)
+{
+    char host[64];
+    int port;
+    return vjo_anki_endpoint(v, host, sizeof(host), &port) >= 0;
+}
+
+static int valid_audio_url(const char *v)
+{
+    char host[VJO_HOST_MAX];
+    const char *path;
+    int port, tls;
+    return !*v || vjo_anki_audio_endpoint(v, host, &port, &tls, &path) == 0;
+}
+
+/* Plain string settings. Deck, note type, tags, field names and the
+ * audio URL may contain ';' and '#' (raw: no inline comment). */
 typedef struct {
     const char *key;
     size_t offset, size;
     int required; /* an empty value keeps the default, with a warning */
     int raw;
+    int (*valid)(const char *v); /* NULL = anything; an invalid value turns the setting off ("") */
+    const char *expected;        /* the warning's description of a valid value */
+    int quiet;                   /* the warning leaves out the value (long, or secret) */
 } StrSetting;
 
 #define STR_SETTING(name, required, raw) \
-    {#name, offsetof(VjoConfig, name), sizeof(((VjoConfig *)0)->name), required, raw}
+    {#name, offsetof(VjoConfig, name), sizeof(((VjoConfig *)0)->name), required, raw, NULL, NULL, 0}
+#define CHECKED_SETTING(name, raw, valid, expected, quiet) \
+    {#name, offsetof(VjoConfig, name), sizeof(((VjoConfig *)0)->name), 0, raw, valid, expected, quiet}
 static const StrSetting str_settings[] = {
+    CHECKED_SETTING(hachidori_host, 0, valid_hachidori_host, "host[:port], not a URL", 0),
+    STR_SETTING(local_dictionary_dir, 1, 1),
+    CHECKED_SETTING(local_dictionaries, 0, vjo_local_names_valid, "1-8 relative .vjdict filenames separated by commas", 1),
     STR_SETTING(log_host, 0, 0),
-    STR_SETTING(anki_host, 0, 0),
+    CHECKED_SETTING(anki_host, 0, valid_anki_host, "empty, auto, or IP[:port]", 0),
     STR_SETTING(anki_deck, 1, 1),
     STR_SETTING(anki_note_type, 1, 1),
     STR_SETTING(anki_tags, 0, 1),
+    CHECKED_SETTING(anki_audio_url, 1, valid_audio_url, "empty, or http(s)://host[:port]/path with {term}", 1),
 };
 #define N_STR_SETTINGS ((int)(sizeof(str_settings) / sizeof(str_settings[0])))
 
@@ -284,8 +412,7 @@ static void set_trigger(VjoConfig *c, const char *key, const char *val, int *dst
 static void set_kv(VjoConfig *c, const char *key, const char *val)
 {
     const StrSetting *ss;
-    char host[64];
-    int d, port;
+    int d;
     if (vjo_ieq(key, "dictionary")) {
         d = vjo_dict_find(val);
         if (d >= 0)
@@ -325,9 +452,15 @@ static void set_kv(VjoConfig *c, const char *key, const char *val)
             warn(c, "%s: empty (keeping %s)", key, dst);
         else
             set_str(c, key, val, dst, ss->size);
-        if (dst == c->anki_host && vjo_anki_endpoint(c->anki_host, host, sizeof(host), &port) < 0) {
-            warn(c, "%s: invalid value '%s' (empty, auto, or IP[:port])", key, val);
-            c->anki_host[0] = '\0';
+        if (ss->valid && !ss->valid(dst)) {
+            if (ss->quiet) {
+                warn(c, "%s: invalid value (%s)", key, ss->expected);
+            } else {
+                char what[96];
+                vjo_snprintf(what, sizeof(what), "'%s' (%s)", val, ss->expected);
+                warn(c, "%s: invalid value %s", key, what);
+            }
+            dst[0] = '\0';
         }
     } else if ((d = anki_field_index(key)) >= 0) {
         set_str(c, key, val, c->anki_field[d], sizeof(c->anki_field[d]));
@@ -351,11 +484,14 @@ void vjo_config_parse(VjoConfig *c, const char *text, size_t len)
         (unsigned char)text[2] == 0xBF)
         i = 3;
     while (i < len) {
-        char line[256], key[64], val[192];
+        char line[1024], key[64], val[sizeof(((VjoConfig *)0)->local_dictionaries)]; /* the longest value */
         size_t n = 0, s, e, eq;
+        int cut = 0;
         while (i < len && text[i] != '\n') {
             if (n < sizeof(line) - 1)
                 line[n++] = text[i];
+            else
+                cut = 1;
             i++;
         }
         i++;
@@ -382,11 +518,13 @@ void vjo_config_parse(VjoConfig *c, const char *text, size_t len)
         memcpy(key, line + s, e - s);
         key[e - s] = '\0';
 
-        /* Inline comment in the value: ';' or '#' preceded by whitespace. */
+        /* Inline comment in the value: ';' or '#' preceded by whitespace
+         * (then a cut only shortened the comment). */
         if (!keeps_comment_chars(key)) {
             for (e = eq + 1; e < n; e++) {
                 if ((line[e] == ';' || line[e] == '#') && is_space(line[e - 1])) {
                     n = e;
+                    cut = 0;
                     break;
                 }
             }
@@ -397,8 +535,10 @@ void vjo_config_parse(VjoConfig *c, const char *text, size_t len)
         e = n;
         while (e > s && is_space(line[e - 1]))
             e--;
-        if (e - s >= sizeof(val))
-            e = s + sizeof(val) - 1;
+        if (cut || e - s >= sizeof(val)) {
+            warn(c, "%s: value too long%s", key, "");
+            continue;
+        }
         memcpy(val, line + s, e - s);
         val[e - s] = '\0';
         set_kv(c, key, val);

@@ -392,7 +392,7 @@ static void test_entries(void)
     TEST_CHECK(!strcmp(l.entries[1].text, "が 50\nindicates subject"));
     TEST_CHECK(!strcmp(l.entries[2].text, "好き 99999\nliked"));
     TEST_CHECK(!strcmp(vjo_render_highlight(&A, &l, 0), "【猫】が\n好き"));
-    TEST_CHECK(!strcmp(vjo_render_highlight(&A, &l, 1), "猫【が\n】好き"));
+    TEST_CHECK(!strcmp(vjo_render_highlight(&A, &l, 1), "猫【が】\n好き"));
     TEST_CHECK(!strcmp(vjo_render_highlight(&A, &l, 2), "猫が\n【好き】"));
     TEST_CHECK(!strcmp(vjo_entries_body(&A, &l),
                        "猫 (ねこ) 1500\ncat\nfeline\n\nが 50\nindicates subject\n\n好き 99999\nliked"));
@@ -452,8 +452,8 @@ static void fg_game_running(VjoForeground *f)
     TEST_CHECK(fg_process_event(f, SHELL, PROCEV_RESUME) == 0); /* the shell never is the game */
     TEST_CHECK(fg_process_event(f, GAME, PROCEV_STARTUP) == IEV_GAME_START);
     TEST_CHECK(fg_is(f, GAME, 0, 0));
-    TEST_CHECK(fg_set_game_active(f, GAME, 1, &iev) == 0 && iev == IEV_ACTIVATE);
-    TEST_CHECK(fg_is(f, GAME, 1, 0));
+    TEST_CHECK(fg_set_game_active(f, GAME, VJO_GAME, &iev) == 0 && iev == IEV_ACTIVATE);
+    TEST_CHECK(fg_is(f, GAME, VJO_GAME, 0));
     TEST_CHECK(fg_process_event(f, GAME, PROCEV_RESUME) == 0); /* already the foreground */
 }
 
@@ -467,12 +467,12 @@ static void test_foreground(void)
     fg_game_running(&f);
     TEST_CHECK(fg_process_event(&f, APP, PROCEV_STARTUP) == IEV_GAME_START);
     TEST_CHECK(fg_is(&f, APP, 0, GAME));
-    TEST_CHECK(fg_set_game_active(&f, GAME, 1, &iev) < 0 && iev == 0); /* not the foreground */
+    TEST_CHECK(fg_set_game_active(&f, GAME, VJO_GAME, &iev) < 0 && iev == 0); /* not the foreground */
     TEST_CHECK(fg_is(&f, APP, 0, GAME));
-    TEST_CHECK(fg_set_game_active(&f, APP, 0, &iev) == 0 && iev == IEV_GAME_START);
+    TEST_CHECK(fg_set_game_active(&f, APP, VJO_GAME_NONE, &iev) == 0 && iev == IEV_GAME_START);
     TEST_CHECK(fg_is(&f, GAME, 0, 0));
-    TEST_CHECK(fg_set_game_active(&f, GAME, 1, &iev) == 0 && iev == IEV_ACTIVATE);
-    TEST_CHECK(fg_is(&f, GAME, 1, 0));
+    TEST_CHECK(fg_set_game_active(&f, GAME, VJO_GAME, &iev) == 0 && iev == IEV_ACTIVATE);
+    TEST_CHECK(fg_is(&f, GAME, VJO_GAME, 0));
 
     /* The newcomer exits before it is classified: back to the game. */
     fg_game_running(&f);
@@ -487,7 +487,7 @@ static void test_foreground(void)
     TEST_CHECK(fg_process_event(&f, APP, PROCEV_STARTUP) == IEV_GAME_START);
     TEST_CHECK(fg_process_event(&f, GAME, PROCEV_SUSPEND) == 0);
     TEST_CHECK(fg_is(&f, APP, 0, 0));
-    TEST_CHECK(fg_set_game_active(&f, APP, 0, &iev) == 0 && iev == 0);
+    TEST_CHECK(fg_set_game_active(&f, APP, VJO_GAME_NONE, &iev) == 0 && iev == 0);
     TEST_CHECK(fg_is(&f, APP, 0, 0));
     TEST_CHECK(fg_process_event(&f, GAME, PROCEV_RESUME) == IEV_GAME_START);
     TEST_CHECK(fg_is(&f, GAME, 0, 0));
@@ -501,9 +501,9 @@ static void test_foreground(void)
     TEST_CHECK(fg_process_event(&f, APP, PROCEV_STARTUP) == IEV_GAME_START);
     TEST_CHECK(fg_process_event(&f, APP2, PROCEV_STARTUP) == IEV_GAME_START);
     TEST_CHECK(fg_is(&f, APP2, 0, GAME));
-    TEST_CHECK(fg_set_game_active(&f, APP, 0, &iev) < 0 && iev == 0);
+    TEST_CHECK(fg_set_game_active(&f, APP, VJO_GAME_NONE, &iev) < 0 && iev == 0);
     TEST_CHECK(fg_is(&f, APP2, 0, GAME));
-    TEST_CHECK(fg_set_game_active(&f, APP2, 0, &iev) == 0 && iev == IEV_GAME_START);
+    TEST_CHECK(fg_set_game_active(&f, APP2, VJO_GAME_NONE, &iev) == 0 && iev == IEV_GAME_START);
     TEST_CHECK(fg_is(&f, GAME, 0, 0));
     TEST_CHECK(fg_process_event(&f, APP, PROCEV_EXIT) == 0);
     TEST_CHECK(fg_is(&f, GAME, 0, 0));
@@ -513,20 +513,34 @@ static void test_foreground(void)
      * classifies itself as not a game. */
     fg_game_running(&f);
     TEST_CHECK(fg_process_event(&f, SHELL, PROCEV_EXIT) == 0);
-    TEST_CHECK(fg_is(&f, GAME, 1, 0));
+    TEST_CHECK(fg_is(&f, GAME, VJO_GAME, 0));
     TEST_CHECK(fg_process_event(&f, SHELL2, PROCEV_STARTUP) == IEV_GAME_START);
     TEST_CHECK(fg_is(&f, SHELL2, 0, GAME));
     f.shell_pid = SHELL2; /* vjoRegisterShell */
-    TEST_CHECK(fg_set_game_active(&f, SHELL2, 0, &iev) == 0 && iev == IEV_GAME_START);
+    TEST_CHECK(fg_set_game_active(&f, SHELL2, VJO_GAME_NONE, &iev) == 0 && iev == IEV_GAME_START);
     TEST_CHECK(fg_is(&f, GAME, 0, 0));
     TEST_CHECK(fg_process_event(&f, SHELL2, PROCEV_RESUME) == 0);
-    TEST_CHECK(fg_set_game_active(&f, GAME, 1, &iev) == 0 && iev == IEV_ACTIVATE);
-    TEST_CHECK(fg_is(&f, GAME, 1, 0));
+    TEST_CHECK(fg_set_game_active(&f, GAME, VJO_GAME, &iev) == 0 && iev == IEV_ACTIVATE);
+    TEST_CHECK(fg_is(&f, GAME, VJO_GAME, 0));
 
-    /* The game exits with nothing behind it; pid 0 is never the foreground. */
+    /* A static framebuffer game keeps its mode until a system app opens over
+     * it: it comes back inactive, to be re-classified by the shell. */
+    fg_game_running(&f);
+    TEST_CHECK(fg_set_game_active(&f, GAME, VJO_GAME_STATIC_FB, &iev) == 0 && iev == IEV_ACTIVATE);
+    TEST_CHECK(fg_is(&f, GAME, VJO_GAME_STATIC_FB, 0));
+    TEST_CHECK(fg_process_event(&f, APP, PROCEV_STARTUP) == IEV_GAME_START);
+    TEST_CHECK(fg_is(&f, APP, 0, GAME));
+    TEST_CHECK(fg_set_game_active(&f, APP, VJO_GAME_NONE, &iev) == 0 && iev == IEV_GAME_START);
+    TEST_CHECK(fg_is(&f, GAME, 0, 0));
+    TEST_CHECK(fg_set_game_active(&f, GAME, VJO_GAME_STATIC_FB, &iev) == 0 && iev == IEV_ACTIVATE);
     TEST_CHECK(fg_process_event(&f, GAME, PROCEV_EXIT) == IEV_GAME_EXIT);
     TEST_CHECK(fg_is(&f, 0, 0, 0));
-    TEST_CHECK(fg_set_game_active(&f, 0, 1, &iev) < 0);
+
+    /* The game exits with nothing behind it; pid 0 is never the foreground. */
+    fg_game_running(&f);
+    TEST_CHECK(fg_process_event(&f, GAME, PROCEV_EXIT) == IEV_GAME_EXIT);
+    TEST_CHECK(fg_is(&f, 0, 0, 0));
+    TEST_CHECK(fg_set_game_active(&f, 0, VJO_GAME, &iev) < 0);
 }
 
 /* ---------- config / regions ---------- */
@@ -549,7 +563,7 @@ static void test_config(void)
                       "log_file = on\n"
                       "bogus = 1\n";
     vjo_config_defaults(&c);
-    TEST_CHECK(c.dictionary == VJO_DICT_JITEN && c.font_size_ja == 18 && c.font_size_en == 14 &&
+    TEST_CHECK(c.dictionary == VJO_DICT_HACHIDORI && c.font_size_ja == 18 && c.font_size_en == 14 &&
                c.toggle_button == VJO_TRIGGER_L_R);
     vjo_config_parse(&c, ini, strlen(ini));
     TEST_CHECK(c.dictionary == VJO_DICT_JPDB);
@@ -576,7 +590,7 @@ static void test_config(void)
         vjo_config_defaults(&d);
         vjo_config_parse(&d, t, strlen(t));
         TEST_CHECK(d.n_warnings == 0);
-        TEST_CHECK(d.dictionary == VJO_DICT_JITEN && d.ocr_mode == VJO_OCR_AUTO && d.api_key[VJO_DICT_JPDB][0] == 0 &&
+        TEST_CHECK(d.dictionary == VJO_DICT_HACHIDORI && d.ocr_mode == VJO_OCR_AUTO && d.api_key[VJO_DICT_JPDB][0] == 0 &&
                    d.font_size_ja == 18 && d.font_size_en == 14 &&
                    d.toggle_button == VJO_TRIGGER_L_R && d.subtitle_button == VJO_TRIGGER_SELECT_R);
     }

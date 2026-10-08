@@ -18,7 +18,7 @@ set(CMAKE_C_EXTENSIONS ON)
 include("$ENV{VITASDK}/share/vita.cmake" REQUIRED)
 
 set(ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
-set(VJO_VERSION "0.3")
+set(VJO_VERSION "0.5-local.2")
 
 # ---------------- kernel ----------------
 add_executable(VitaJPOverlay_Kernel
@@ -64,7 +64,7 @@ add_library(vjo_core_vita STATIC
   ${ROOT}/core/jpdb.c ${ROOT}/core/textfilter.c ${ROOT}/core/entries.c ${ROOT}/core/jiten.c
   ${ROOT}/core/config.c ${ROOT}/core/regions.c ${ROOT}/core/http.c ${ROOT}/core/tls.c
   ${ROOT}/core/tls_roots.c ${ROOT}/core/client.c ${ROOT}/core/styled.c ${ROOT}/core/jpegsw.c
-  ${ROOT}/core/base64.c ${ROOT}/core/anki.c ${ROOT}/core/net.c)
+  ${ROOT}/core/base64.c ${ROOT}/core/anki.c ${ROOT}/core/net.c ${ROOT}/core/hachidori.c ${ROOT}/core/local_dict.c)
 target_include_directories(vjo_core_vita PUBLIC ${ROOT}/core ${ROOT}/include)
 target_link_libraries(vjo_core_vita PUBLIC vjo_bearssl)
 target_compile_options(vjo_core_vita PRIVATE -O2 -Wall -Wextra -Wno-unused-parameter -fno-builtin -fshort-wchar
@@ -132,6 +132,10 @@ add_custom_target(release
   COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_BINARY_DIR}/vitajpoverlay.rco ${STAGE}/ur0/data/VitaJPOverlay/
   COMMAND ${CMAKE_COMMAND} -E copy ${ROOT}/README.md ${ROOT}/LICENSE ${STAGE}/
   COMMAND ${CMAKE_COMMAND} -E copy ${ROOT}/docs/config.example.ini ${STAGE}/config.ini
-  COMMAND ${CMAKE_COMMAND} -E chdir ${STAGE} ${CMAKE_COMMAND} -E tar cf ${CMAKE_CURRENT_BINARY_DIR}/VitaJPOverlay-${VJO_VERSION}.zip --format=zip ur0 config.ini README.md LICENSE
+  COMMAND ${CMAKE_COMMAND} -E make_directory ${STAGE}/tools ${STAGE}/docs/benchmarks
+  COMMAND ${CMAKE_COMMAND} -E copy ${ROOT}/tools/convert_dictionary.py ${ROOT}/tools/install_dictionary.py ${STAGE}/tools/
+  COMMAND ${CMAKE_COMMAND} -E copy ${ROOT}/docs/local-dictionaries.md ${ROOT}/docs/lookup-performance.md ${STAGE}/docs/
+  COMMAND ${CMAKE_COMMAND} -E copy ${ROOT}/docs/benchmarks/local-lookup-jitendex.json ${STAGE}/docs/benchmarks/
+  COMMAND ${CMAKE_COMMAND} -E chdir ${STAGE} ${CMAKE_COMMAND} -E tar cf ${CMAKE_CURRENT_BINARY_DIR}/VitaJPOverlay-${VJO_VERSION}.zip --format=zip ur0 config.ini README.md LICENSE tools docs
   DEPENDS VitaJPOverlay_Kernel.skprx-self VitaJPOverlay_Shell.suprx-self vjo_rco
   COMMENT "Packaging VitaJPOverlay-${VJO_VERSION}.zip")

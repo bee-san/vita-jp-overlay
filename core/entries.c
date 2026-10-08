@@ -26,13 +26,15 @@ char *vjo_entry_format(VjoArena *a, const VjoVocab *v)
 
 /* Byte offset in `filtered` of UTF-16 index pos16 of the newline-stripped
  * text (the same removal rule as vjo_strip_newlines). */
-static int u16_to_byte(const char *filtered, size_t len, int pos16)
+static int u16_to_byte(const char *filtered, size_t len, int pos16, int end_offset)
 {
     size_t i = 0;
     int u = 0;
     while (i < len) {
         size_t start = i;
         uint32_t cp;
+        if (end_offset && u >= pos16)
+            return (int)start;
         if (filtered[i] == '\n' || (filtered[i] == '\r' && i + 1 < len && filtered[i + 1] == '\n')) {
             i++;
             continue;
@@ -87,8 +89,8 @@ int vjo_entries_build(VjoArena *a, const char *filtered, const VjoDictResult *r,
              * overflow); u16_to_byte maps positions past the text to its end. */
             int pos = e->first_pos16;
             int end = len16 <= 0 ? pos : len16 > INT_MAX - pos ? INT_MAX : pos + len16;
-            int bs = u16_to_byte(filtered, flen, pos) - (int)lead;
-            int be = u16_to_byte(filtered, flen, end) - (int)lead;
+            int bs = u16_to_byte(filtered, flen, pos, 0) - (int)lead;
+            int be = u16_to_byte(filtered, flen, end, 1) - (int)lead;
             int hl = (int)strlen(header);
             if (bs < 0)
                 bs = 0;

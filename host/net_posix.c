@@ -7,6 +7,7 @@
 #include <netdb.h>
 #include <poll.h>
 #include <stdio.h>
+#include <sys/stat.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -60,7 +61,7 @@ static int connect_timed(int fd, const struct sockaddr *addr, socklen_t len, int
     return rc;
 }
 
-static int posix_connect(void *ud, const char *host, int port, int timeout_us, VjoConn *out)
+static int posix_connect(void *ud, const char *host, int port, int timeout_us, int io_timeout_us, VjoConn *out)
 {
     struct addrinfo hints, *res, *ai;
     char portstr[8];
@@ -74,6 +75,10 @@ static int posix_connect(void *ud, const char *host, int port, int timeout_us, V
         return VJO_E_NET;
     for (ai = res; ai; ai = ai->ai_next) {
         struct timeval tv = {20, 0};
+        if (io_timeout_us > 0) {
+            tv.tv_sec = io_timeout_us / 1000000;
+            tv.tv_usec = io_timeout_us % 1000000;
+        }
         fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
         if (fd < 0)
             continue;
@@ -144,11 +149,40 @@ static void posix_on_response(void *ud, const char *host, const char *body, size
     fclose(f);
 }
 
+/* No stdio buffering: local_dict.c owns its bounded page cache. */
+static int local_read(void *ctx, uint64_t off, void *dst, size_t n)
+{
+    int fd = (int)(intptr_t)ctx;
+    uint8_t *out = dst;
+    while (n) {
+        ssize_t got = pread(fd, out, n, (off_t)off);
+        if (got < 0 && errno == EINTR) continue;
+        if (got <= 0) return -1;
+        out += got; off += (size_t)got; n -= (size_t)got;
+    }
+    return 0;
+}
+
+static void local_close(void *ctx) { close((int)(intptr_t)ctx); }
+
+static int local_open(void *ud, const char *path, VjoFile *out)
+{
+    struct stat st;
+    int fd = open(path, O_RDONLY);
+    (void)ud;
+    if (fd < 0) return -1;
+    if (fstat(fd, &st) || st.st_size < 0 || !S_ISREG(st.st_mode)) { close(fd); return -1; }
+    out->ctx = (void *)(intptr_t)fd; out->size = (uint64_t)st.st_size;
+    out->read = local_read; out->close = local_close;
+    return 0;
+}
+
 void posix_platform_init(PosixPlatform *pp, VjoPlatform *p)
 {
     memset(p, 0, sizeof(*p));
     p->ud = pp;
     p->connect = posix_connect;
+    p->file_open = local_open;
     p->disconnect = posix_disconnect;
     p->random = posix_random;
     p->unix_time = posix_time;

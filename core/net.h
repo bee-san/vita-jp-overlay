@@ -9,16 +9,21 @@
 #include "arena.h"
 #include "conn.h"
 #include "http.h"
+#include "file.h"
 
 typedef struct {
     void *ud;
-    /* Opens a TCP connection, giving up after timeout_us (0 = the
-     * platform's default); returns VJO_OK or VJO_E_NET. */
-    int (*connect)(void *ud, const char *host, int port, int timeout_us, VjoConn *out);
+    /* Opens a TCP connection, giving up after timeout_us (DNS included
+     * where the platform can), with reads and writes that each give up
+     * after io_timeout_us (0 = the platform's default for either); returns
+     * VJO_OK or VJO_E_NET. */
+    int (*connect)(void *ud, const char *host, int port, int timeout_us, int io_timeout_us, VjoConn *out);
     void (*disconnect)(void *ud, VjoConn *c);
     void (*random)(void *ud, void *buf, size_t n);
     uint64_t (*unix_time)(void *ud);
     void (*log)(void *ud, const char *msg); /* optional */
+    /* Local dictionary files: optional for network-only platforms. */
+    int (*file_open)(void *ud, const char *path, VjoFile *out);
     /* optional: raw response bodies (host CLI --record) */
     void (*on_response)(void *ud, const char *host, const char *body, size_t len);
 #ifdef VJO_HOST

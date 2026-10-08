@@ -355,9 +355,22 @@ static void start_job(const char *why, int lookup)
 
 /* ---------------- control thread ---------------- */
 
+static int same_dictionary(const VjoConfig *a, const VjoConfig *b)
+{
+    if (a->dictionary != b->dictionary) return 0;
+    if (a->dictionary == VJO_DICT_LOCAL)
+        return !sceClibStrcmp(a->local_dictionary_dir, b->local_dictionary_dir) &&
+               !sceClibStrcmp(a->local_dictionaries, b->local_dictionaries);
+    if (a->dictionary == VJO_DICT_HACHIDORI)
+        return !sceClibStrcmp(a->hachidori_host, b->hachidori_host);
+    return !sceClibStrcmp(vjo_config_api_key(a), vjo_config_api_key(b));
+}
+
 static void apply_config(void)
 {
+    VjoConfig previous = cfg;
     vjo_config_load(&cfg, &scratch);
+    if (!same_dictionary(&previous, &cfg)) cache_ok = 0;
     vjo_log_configure(&cfg);
     vjo_anki_configure(&cfg);
     if (vjoSetTriggers(cfg.toggle_button, cfg.subtitle_button) < 0)
@@ -390,8 +403,9 @@ static void open_overlay(void)
         return;
     }
     apply_config(); /* settings are re-read on every open */
-    if (!vjo_config_api_key(&cfg)[0]) {
-        VjoErr e = {VJO_E_NO_KEY, 0, 0, NULL, cfg.dictionary};
+    if (!vjo_config_dict_ready(&cfg)) {
+        VjoErr e = {cfg.dictionary == VJO_DICT_HACHIDORI ? VJO_E_NO_HOST : VJO_E_NO_KEY,
+                    0, 0, NULL, cfg.dictionary};
         size_t mark = vjo_arena_mark(&scratch);
         view_publish(1, NULL, vjo_err_text(&scratch, VJO_STAGE_DICT, &e), 1);
         vjo_arena_release(&scratch, mark);
@@ -483,7 +497,7 @@ static void on_job_done(void)
     /* Publish the new arena; the old one becomes the next job's target. */
     vjo_view_lock();
     active = idx;
-    cache_ok = d->err.rc == VJO_OK && job_lookup; /* the overlay needs the lookup */
+    cache_ok = d->err.rc == VJO_OK && job_lookup && same_dictionary(&job_cfg, &cfg); /* the overlay needs the lookup */
     cache_checksum = job_checksum;
     vjo_view_unlock();
     if (subtitles)
@@ -493,7 +507,7 @@ static void on_job_done(void)
         ov = OV_OPEN;
         st.size = sizeof(st);
         vjoGetState(&st);
-        if (job_checksum != st.checksum || !job_lookup) {
+        if (job_checksum != st.checksum || !job_lookup || !same_dictionary(&job_cfg, &cfg)) {
             start_job(job_lookup ? "result was for an earlier screen" : "the running job was OCR only", 1);
             return;
         }
@@ -506,7 +520,7 @@ static void on_job_done(void)
  * them: it is open, or opens from the background result (auto). */
 static int want_lookup(void)
 {
-    return vjo_config_api_key(&cfg)[0] && (ov != OV_CLOSED || cfg.ocr_mode == VJO_OCR_AUTO) &&
+    return vjo_config_dict_ready(&cfg) && (ov != OV_CLOSED || cfg.ocr_mode == VJO_OCR_AUTO) &&
            now_us() >= dict_backoff.until;
 }
 
@@ -625,14 +639,21 @@ static int lookup_title(SceUID pid, char *tid, int size)
     return ret < 0 ? ret : -1;
 }
 
-static int is_excluded_title(const char *tid)
+/* vjoSetGameActive's mode for a title: system apps, SceShell and VitaShell
+ * (Select starts its FTP server) are not games. The PSP emulator, where
+ * Adrenaline's games run, is one with a static framebuffer; all its games
+ * share its title ID, so one region. */
+static int title_game_mode(const char *tid)
 {
-    /* System apps, SceShell, and VitaShell (Select starts its FTP server). */
-    return !sceClibStrncmp(tid, "NPXS", 4) || !sceClibStrncmp(tid, "main", 4) ||
-           !sceClibStrncmp(tid, "VITASHELL", 9);
+    if (!sceClibStrcmp(tid, "NPXS10028"))
+        return VJO_GAME_STATIC_FB;
+    if (!sceClibStrncmp(tid, "NPXS", 4) || !sceClibStrncmp(tid, "main", 4) ||
+        !sceClibStrncmp(tid, "VITASHELL", 9))
+        return VJO_GAME_NONE;
+    return VJO_GAME;
 }
 
-static void activate_game(SceUID pid, const char *tid)
+static void activate_game(SceUID pid, const char *tid, int mode)
 {
     sceClibSnprintf(title_id, sizeof(title_id), "%s", tid);
     if (mem_uid < 0)
@@ -641,7 +662,7 @@ static void activate_game(SceUID pid, const char *tid)
     push_region();
     backoff_note(&ocr_backoff, 0);
     backoff_note(&dict_backoff, 0);
-    vjoSetGameActive(pid, 1);
+    vjoSetGameActive(pid, mode);
     vjo_log("game %s started: dictionary %s (key %s), trigger %s, subtitles %s, ocr_mode %s", title_id,
             vjo_dict_name(cfg.dictionary), vjo_config_api_key(&cfg)[0] ? "set" : "MISSING",
             vjo_trigger_name(cfg.toggle_button), vjo_trigger_name(cfg.subtitle_button),
@@ -655,15 +676,17 @@ static void classify_pending(void)
     int ret = lookup_title(pid, tid, sizeof(tid));
     if (ret == 0) {
         pending_pid = 0;
-        if (is_excluded_title(tid)) {
-            vjoSetGameActive(pid, 0);
+        int mode = title_game_mode(tid);
+        if (mode == VJO_GAME_NONE) {
+            vjo_log("%s: system app, not a game", tid);
+            vjoSetGameActive(pid, VJO_GAME_NONE);
         } else {
-            activate_game(pid, tid);
+            activate_game(pid, tid, mode);
         }
     } else if (now_us() - pending_since > CLASSIFY_TIMEOUT_US) {
         pending_pid = 0;
         vjo_log("no title ID for 0x%X (0x%08X): treating it as a game", pid, ret);
-        activate_game(pid, "GAME");
+        activate_game(pid, "GAME", VJO_GAME);
     }
 }
 

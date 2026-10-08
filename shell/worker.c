@@ -1,5 +1,5 @@
 /* Control thread (kernel events, overlay state, auto/on-press policy) and
- * network thread (capture -> JPEG -> Lens -> dictionary). */
+ * worker thread (capture -> Lens or local ncnn -> dictionary). */
 #include <psp2/appmgr.h>
 #include <psp2/kernel/clib.h>
 #include <psp2/kernel/sysmem.h>
@@ -8,6 +8,7 @@
 
 #include "../core/jpegsw.h"
 #include "../core/regions.h"
+#include "../core/local_ocr.h"
 #include "shell.h"
 
 /* Memory: two result arenas (the overlay shows one while the network thread
@@ -23,6 +24,11 @@
 #define BACKOFF_MAX_US    60000000LL
 #define JPEG_QUALITY      80
 #define SUBTITLE_GAP_US   1000000LL /* between subtitle jobs */
+#ifdef VJO_WITH_NCNN
+#define JOB_STACK_BYTES  0x40000 /* recursive graph traversal and ARM kernels */
+#else
+#define JOB_STACK_BYTES  0x10000
+#endif
 
 VjoView g_view;
 
@@ -48,6 +54,8 @@ static VjoConfig cfg;      /* control thread */
 static VjoConfig job_cfg;  /* snapshot used by the network thread */
 static VjoPlatform plat;
 static char title_id[12];   /* set while a game is active ("" otherwise) */
+static int region_selected, job_region_selected;
+static unsigned capture_generation, job_generation;
 
 /* Control-thread state. The overlay and the network job are independent: an
  * auto job runs while the overlay is closed, the overlay can open while a
@@ -232,13 +240,11 @@ static int raw_rows(void *ud, uint32_t row, uint32_t n, uint8_t *dst)
     return vjoReadRaw(row, n, dst);
 }
 
-int vjo_capture_jpeg(VjoArena *a, uint32_t flags, int quality, VjoBuf *out, VjoState *st)
+/* Caller holds capture_lock until it finishes reading the captured rows. */
+static int wait_capture(uint32_t flags, VjoState *st)
 {
     int seq, rc = VJO_OK;
-    int64_t deadline, t0;
-
-    /* Held until the last row is read: another request would invalidate them. */
-    sceKernelLockMutex(capture_lock, 1, NULL);
+    int64_t deadline;
     seq = vjoRequestCapture(flags);
     if (seq < 0) {
         vjo_log("capture request failed %d", seq);
@@ -266,6 +272,17 @@ int vjo_capture_jpeg(VjoArena *a, uint32_t flags, int quality, VjoBuf *out, VjoS
         rc = st->capture_result == VJO_ERR_NO_MEMORY ? VJO_E_OOM : VJO_E_SOURCE;
         goto out;
     }
+out:
+    return rc;
+}
+
+int vjo_capture_jpeg(VjoArena *a, uint32_t flags, int quality, VjoBuf *out, VjoState *st)
+{
+    int rc;
+    int64_t t0;
+    sceKernelLockMutex(capture_lock, 1, NULL);
+    rc = wait_capture(flags, st);
+    if (rc) goto out;
     t0 = now_us();
     if (vjo_jpeg_encode(a, st->width, st->height, st->raw_stride, raw_rows, NULL, quality, out) < 0) {
         rc = out->oom ? VJO_E_OOM : VJO_E_SOURCE;
@@ -278,6 +295,49 @@ out:
     return rc;
 }
 
+static int job_cancelled(void *ud)
+{
+    (void)ud;
+    return !running || job_generation != __atomic_load_n(&capture_generation, __ATOMIC_ACQUIRE);
+}
+
+static int run_local_ocr(VjoArena *a, VjoOverlayData *out, uint32_t *checksum)
+{
+    int rc = VJO_E_OCR_UNAVAILABLE;
+#ifdef VJO_WITH_NCNN
+    VjoState st;
+    void *workspace = NULL;
+    SceUID uid;
+    VjoOcrStats stats = {0};
+    if (!job_region_selected) return VJO_E_OCR_REGION;
+    if (job_cancelled(NULL)) return VJO_E_CANCELLED;
+    char *text = vjo_arena_alloc(a, VJO_OCR_TEXT_CAP);
+    if (!text) return VJO_E_OOM;
+    uid = sceKernelAllocMemBlock("VjoOCR", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, VJO_OCR_HEAP_BYTES, NULL);
+    if (uid < 0) return VJO_E_OOM;
+    if (sceKernelGetMemBlockBase(uid, &workspace) < 0 || !workspace) {
+        sceKernelFreeMemBlock(uid);
+        return VJO_E_OOM;
+    }
+    sceKernelLockMutex(capture_lock, 1, NULL);
+    rc = wait_capture(0, &st);
+    if (!rc) {
+        VjoOcrImage image = {NULL, st.width, st.height, raw_rows, job_cancelled};
+        if (st.raw_stride != st.width * 4) rc = VJO_E_SOURCE;
+        else rc = vjo_local_ocr(&plat, job_cfg.ocr_model_dir, &image, workspace,
+                                VJO_OCR_HEAP_BYTES, text, VJO_OCR_TEXT_CAP, &stats);
+        *checksum = st.capture_checksum;
+    }
+    sceKernelUnlockMutex(capture_lock, 1);
+    sceKernelFreeMemBlock(uid); /* before dictionary lookup or publishing */
+    vjo_log("ncnn rc=%d lines=%u tensor heap peak=%u KiB", rc, stats.lines, (unsigned)(stats.heap_peak >> 10));
+    if (!rc) rc = vjo_overlay_ocr_text(a, &job_cfg, text, out);
+#else
+    (void)a; (void)out; (void)checksum;
+#endif
+    return rc;
+}
+
 static int run_job(VjoArena *a, VjoOverlayData *out, uint32_t *checksum)
 {
     VjoState st;
@@ -287,6 +347,14 @@ static int run_job(VjoArena *a, VjoOverlayData *out, uint32_t *checksum)
 
     sceClibMemset(out, 0, sizeof(*out));
     out->list.header = "";
+    if (job_cfg.ocr_backend == VJO_OCR_NCNN) {
+        int rc = run_local_ocr(a, out, checksum);
+        if (rc) {
+            out->failed_stage = VJO_STAGE_OCR;
+            return out->err.rc = rc;
+        }
+        goto recognized;
+    }
     vjo_buf_init(&jb, a);
     st.capture_checksum = 0;
     if ((out->err.rc = vjo_capture_jpeg(a, 0, JPEG_QUALITY, &jb, &st)) != VJO_OK) {
@@ -303,6 +371,11 @@ static int run_job(VjoArena *a, VjoOverlayData *out, uint32_t *checksum)
     src.size = (uint32_t)jb.len;
     if (vjo_overlay_ocr(a, &plat, &job_cfg, &src, out))
         return out->err.rc;
+recognized:
+    if (job_cancelled(NULL)) {
+        out->failed_stage = VJO_STAGE_OCR;
+        return out->err.rc = VJO_E_CANCELLED;
+    }
     __sync_synchronize(); /* the sentence is visible before job_text_ready */
     job_text_ready = 1;
     return job_lookup ? vjo_overlay_lookup(a, &plat, &job_cfg, out) : VJO_OK;
@@ -343,6 +416,8 @@ static void start_job(const char *why, int lookup)
     job_lookup = lookup;
     job_idx = active == 0 ? 1 : 0;
     job_cfg = cfg; /* the control thread may reload cfg while the job runs */
+    job_region_selected = region_selected;
+    job_generation = __atomic_load_n(&capture_generation, __ATOMIC_ACQUIRE);
     job_done = 0;
     job_text_ready = 0;
     job_running = 1;
@@ -366,11 +441,23 @@ static int same_dictionary(const VjoConfig *a, const VjoConfig *b)
     return !sceClibStrcmp(vjo_config_api_key(a), vjo_config_api_key(b));
 }
 
+static int same_pipeline(const VjoConfig *a, const VjoConfig *b)
+{
+    return same_dictionary(a, b) && a->ocr_backend == b->ocr_backend &&
+           a->non_japanese_filter == b->non_japanese_filter &&
+           !sceClibStrcmp(a->ocr_model_dir, b->ocr_model_dir);
+}
+
+static int auto_mode(void)
+{
+    return cfg.ocr_backend == VJO_OCR_LENS && cfg.ocr_mode == VJO_OCR_AUTO;
+}
+
 static void apply_config(void)
 {
     VjoConfig previous = cfg;
     vjo_config_load(&cfg, &scratch);
-    if (!same_dictionary(&previous, &cfg)) cache_ok = 0;
+    if (!same_pipeline(&previous, &cfg)) cache_ok = 0;
     vjo_log_configure(&cfg);
     vjo_anki_configure(&cfg);
     if (vjoSetTriggers(cfg.toggle_button, cfg.subtitle_button) < 0)
@@ -383,6 +470,7 @@ static void push_region(void)
 {
     VjoRect r;
     int found = vjo_region_load(title_id, &r, &scratch);
+    region_selected = found && r.w && r.h;
     vjoSetRegion(found && r.w ? &r : NULL);
     vjo_log("region: %s%s", found == VJO_REGION_GAME ? "this game's" : found ? "all games'" : "none",
             found && r.w ? "" : ", full screen");
@@ -417,13 +505,13 @@ static void open_overlay(void)
         view_publish(1, NULL, "Not enough memory to capture the screen", 1);
         return;
     }
-    if (cfg.ocr_mode == VJO_OCR_AUTO && cache_ok && active >= 0 && cache_checksum == st.checksum) {
+    if (auto_mode() && cache_ok && active >= 0 && cache_checksum == st.checksum) {
         vjo_log("open: background result");
         view_show_cache();
         return;
     }
     /* Why the background result can't be used (auto mode tuning). */
-    if (cfg.ocr_mode == VJO_OCR_AUTO)
+    if (auto_mode())
         vjo_log("open: %s (stable %u)",
                 job_running ? "background job still running"
                 : !cache_ok || active < 0 ? "no background result"
@@ -483,6 +571,14 @@ static void on_job_done(void)
     job_running = 0;
     job_done = 0;
     job_text_ready = 0;
+    if (job_cancelled(NULL)) {
+        cache_ok = 0;
+        if (ov != OV_CLOSED && game_active()) {
+            ov = OV_OPEN;
+            start_job("capture context changed", 1);
+        }
+        return;
+    }
     ocr_failed = d->failed_stage == VJO_STAGE_OCR;
     backoff_note(&ocr_backoff, ocr_failed);
     if (!ocr_failed && job_lookup)
@@ -497,7 +593,7 @@ static void on_job_done(void)
     /* Publish the new arena; the old one becomes the next job's target. */
     vjo_view_lock();
     active = idx;
-    cache_ok = d->err.rc == VJO_OK && job_lookup && same_dictionary(&job_cfg, &cfg); /* the overlay needs the lookup */
+    cache_ok = d->err.rc == VJO_OK && job_lookup && same_pipeline(&job_cfg, &cfg); /* the overlay needs the lookup */
     cache_checksum = job_checksum;
     vjo_view_unlock();
     if (subtitles)
@@ -507,7 +603,7 @@ static void on_job_done(void)
         ov = OV_OPEN;
         st.size = sizeof(st);
         vjoGetState(&st);
-        if (job_checksum != st.checksum || !job_lookup || !same_dictionary(&job_cfg, &cfg)) {
+        if (job_checksum != st.checksum || !job_lookup || !same_pipeline(&job_cfg, &cfg)) {
             start_job(job_lookup ? "result was for an earlier screen" : "the running job was OCR only", 1);
             return;
         }
@@ -520,7 +616,7 @@ static void on_job_done(void)
  * them: it is open, or opens from the background result (auto). */
 static int want_lookup(void)
 {
-    return vjo_config_dict_ready(&cfg) && (ov != OV_CLOSED || cfg.ocr_mode == VJO_OCR_AUTO) &&
+    return vjo_config_dict_ready(&cfg) && (ov != OV_CLOSED || auto_mode()) &&
            now_us() >= dict_backoff.until;
 }
 
@@ -531,6 +627,7 @@ static void on_job_text(void)
     __sync_synchronize(); /* pairs with the network thread's barrier */
     sentence = cache_data[job_idx].sentence;
     job_text_ready = 0;
+    if (job_cancelled(NULL) || !same_pipeline(&job_cfg, &cfg)) return;
     vjo_log("subtitle text ready in %d ms", (int)((now_us() - job_started_us) / 1000));
     if (subtitles && sentence)
         strip_publish(sentence, VJO_STRIP_SENTENCE, 1);
@@ -557,7 +654,7 @@ static void set_subtitles(int on)
         strip_publish("Not enough memory to capture the screen", VJO_STRIP_ERROR, 0);
         return;
     }
-    if (!job_running && d && d->sentence && cache_checksum == st.checksum) {
+    if (!job_running && cache_ok && d && d->sentence && cache_checksum == st.checksum) {
         strip_publish(d->sentence, VJO_STRIP_SENTENCE, 0);
         return;
     }
@@ -607,6 +704,7 @@ static void on_command(void)
         if (vjo_region_save(title_id, cmd == VJO_CMD_SET_REGION ? &r : NULL, &scratch) < 0)
             vjo_log("region.ini: write failed");
         push_region();
+        __atomic_add_fetch(&capture_generation, 1, __ATOMIC_RELEASE);
         cache_ok = 0;
         close_overlay();
         if (subtitles)
@@ -692,6 +790,7 @@ static void classify_pending(void)
 
 static void on_game_exit(void)
 {
+    __atomic_add_fetch(&capture_generation, 1, __ATOMIC_RELEASE);
     pending_pid = 0;
     close_overlay();
     if (subtitles)
@@ -705,6 +804,8 @@ static void on_game_exit(void)
 /* A new foreground process: classified by classify_pending. */
 static void on_game_start(void)
 {
+    __atomic_add_fetch(&capture_generation, 1, __ATOMIC_RELEASE);
+    cache_ok = 0;
     VjoState st;
     stable_pending = 0;
     if (subtitles) /* over a game, without its exit: the strip goes */
@@ -728,7 +829,7 @@ static void on_trigger(void)
  * overlay) and the subtitles' refresh (whatever ocr_mode says). */
 static int background_wanted(void)
 {
-    return subtitles || (cfg.ocr_mode == VJO_OCR_AUTO && want_lookup());
+    return cfg.ocr_backend == VJO_OCR_LENS && (subtitles || (auto_mode() && want_lookup()));
 }
 
 static int background_throttled(void)
@@ -820,7 +921,7 @@ int vjo_worker_start(void)
     apply_config(); /* logging, the trigger and Anki are set up before the first game */
     vjo_log("Vita JP Overlay shell started (kernel API %d)", ver);
 
-    net_thread = sceKernelCreateThread("VjoNet", net_main, 0x10000100, 0x10000, 0, 0, NULL);
+    net_thread = sceKernelCreateThread("VjoNet", net_main, 0x10000100, JOB_STACK_BYTES, 0, 0, NULL);
     ctl_thread = sceKernelCreateThread("VjoControl", ctl_main, 0x10000100, 0x4000, 0, 0, NULL);
     if (net_thread < 0 || ctl_thread < 0) {
         vjo_worker_stop();

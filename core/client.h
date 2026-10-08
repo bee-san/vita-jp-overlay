@@ -27,7 +27,7 @@ typedef struct {
 enum { VJO_STAGE_NONE = 0, VJO_STAGE_OCR = 1, VJO_STAGE_DICT = 2 }; /* OCR, then dictionary */
 
 typedef struct {
-    const char *ocr_text;   /* Lens text (vjo_lens_text) */
+    const char *ocr_text;   /* recognized UTF-8 text */
     const char *filtered;   /* after non_japanese_filter */
     const char *sentence;   /* filtered, trimmed: the header's text (and the subtitle) */
     VjoEntryList list;      /* header + entries */
@@ -66,6 +66,9 @@ int vjo_dict_lookup(VjoArena *a, const VjoPlatform *p, const VjoConfig *cfg, con
 int vjo_overlay_ocr(VjoArena *a, const VjoPlatform *p, const VjoConfig *cfg,
                     const VjoJpegSource *src, VjoOverlayData *out);
 int vjo_overlay_lookup(VjoArena *a, const VjoPlatform *p, const VjoConfig *cfg, VjoOverlayData *out);
+/* Already recognized text -> filter/sentence, without a dictionary request.
+ * text must remain valid for the lifetime of out (normally in a). */
+int vjo_overlay_ocr_text(VjoArena *a, const VjoConfig *cfg, const char *text, VjoOverlayData *out);
 
 /* OCR text -> filter -> vjo_overlay_lookup. */
 int vjo_overlay_from_text(VjoArena *a, const VjoPlatform *p, const VjoConfig *cfg,

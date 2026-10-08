@@ -1,7 +1,9 @@
 # Host build: portable core, BearSSL, the vjo-cli tool and unit tests.
 # The Vita build lives in vita/CMakeLists.txt.
 cmake_minimum_required(VERSION 3.16)
-project(vita_jp_overlay_host C)
+project(vita_jp_overlay_host C CXX)
+option(VJO_WITH_NCNN "Build the CPU-only local mobile OCR recognizer" ON)
+set(VJO_ROOT ${CMAKE_CURRENT_SOURCE_DIR})
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -18,12 +20,19 @@ set(CORE_SRC
   core/arena.c core/pb.c core/utf.c core/lens.c core/json.c core/jpdb.c
   core/textfilter.c core/entries.c core/jiten.c core/config.c core/regions.c
   core/http.c core/tls.c core/tls_roots.c core/client.c core/styled.c core/jpegsw.c
-  core/base64.c core/anki.c core/net.c core/hachidori.c core/local_dict.c)
+  core/base64.c core/anki.c core/net.c core/hachidori.c core/local_dict.c core/ocr_lines.c)
 add_library(vjo_core STATIC ${CORE_SRC})
 target_include_directories(vjo_core PUBLIC core include)
 target_link_libraries(vjo_core PUBLIC bearssl)
 target_compile_definitions(vjo_core PUBLIC VJO_HOST=1)
 target_compile_options(vjo_core PRIVATE -Wall -Wextra -Wno-unused-parameter)
+if(VJO_WITH_NCNN)
+  include(cmake/LocalOCR.cmake)
+  target_compile_definitions(vjo_core PUBLIC VJO_WITH_NCNN=1)
+  target_link_libraries(vjo_ocr PUBLIC vjo_core)
+  add_executable(vjo-ocr host/ocr_tool.c)
+  target_link_libraries(vjo-ocr vjo_ocr vjo_host)
+endif()
 
 add_library(vjo_host STATIC host/net_posix.c host/render.c host/replay.c)
 target_include_directories(vjo_host PUBLIC host)
@@ -57,10 +66,21 @@ add_executable(vjo-shell-worker-tests host/tests/test_shell_worker.c)
 target_include_directories(vjo-shell-worker-tests PRIVATE third_party/acutest/include host/tests/vita_stubs)
 target_compile_options(vjo-shell-worker-tests PRIVATE -Wall -Wextra -Wno-unused-parameter)
 target_link_libraries(vjo-shell-worker-tests vjo_host)
+if(VJO_WITH_NCNN)
+  target_link_libraries(vjo-shell-worker-tests vjo_ocr)
+endif()
 add_test(NAME shell_worker COMMAND vjo-shell-worker-tests)
 
 # End-to-end ZIP conversion and disk lookup, using the actual CLI/runtime.
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
+if(VJO_WITH_NCNN)
+  add_executable(vjo-ocr-tests host/tests/test_ocr.c)
+  target_include_directories(vjo-ocr-tests PRIVATE third_party/acutest/include)
+  target_link_libraries(vjo-ocr-tests vjo_ocr)
+  add_test(NAME local_ocr_unit COMMAND vjo-ocr-tests)
+  add_test(NAME local_ocr_model COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/test_local_ocr.py
+    --cli $<TARGET_FILE:vjo-ocr> --model ${VJO_OCR_ASSETS})
+endif()
 add_test(NAME local_dictionary COMMAND ${CMAKE_COMMAND} -E env
   "VJO_CLI=$<TARGET_FILE:vjo-cli>" "VJO_BENCH=$<TARGET_FILE:vjo-local-bench>" ${Python3_EXECUTABLE} -m unittest discover
   -s ${CMAKE_SOURCE_DIR}/tools/tests -v)

@@ -68,6 +68,9 @@ static void setup(const char *ini)
     vjo_config_defaults(&loaded_config);
     vjo_config_parse(&loaded_config, ini, strlen(ini));
     cfg = loaded_config;
+    running = 1;
+    region_selected = job_region_selected = 0;
+    capture_generation = job_generation = 0;
     memset(&g_view, 0, sizeof(g_view));
     memset(cache_data, 0, sizeof(cache_data));
     memset(&ocr_backoff, 0, sizeof(ocr_backoff));
@@ -279,7 +282,56 @@ static void test_local_worker_and_config_changes(void)
     TEST_CHECK(job_running && job_lookup && same_dictionary(&job_cfg, &cfg));
 }
 
+static void test_ncnn_manual_and_no_fallback(void)
+{
+    setup("dictionary = local\nocr_backend = ncnn\nocr_mode = auto\n");
+    TEST_CHECK(cfg.ocr_backend == VJO_OCR_NCNN);
+    stable_pending = 1;
+    auto_prefetch();
+    TEST_CHECK(!job_running && !posted_events);
+    subtitles = 1;
+    TEST_CHECK(!background_wanted());
+    subtitles = 0;
+    open_overlay();
+    TEST_ASSERT(job_running && job_lookup);
+    uint32_t checksum = 0;
+    int rc = run_job(&results[job_idx], &cache_data[job_idx], &checksum);
+#ifdef VJO_WITH_NCNN
+    TEST_CHECK(rc == VJO_E_OCR_REGION);
+    job_region_selected = 1; /* stubbed SDK refuses the workspace */
+    rc = run_job(&results[job_idx], &cache_data[job_idx], &checksum);
+    TEST_CHECK(rc == VJO_E_OOM);
+#else
+    TEST_CHECK(rc == VJO_E_OCR_UNAVAILABLE);
+#endif
+    TEST_CHECK(!relay_connections && !job_text_ready);
+    TEST_CHECK(cache_data[job_idx].failed_stage == VJO_STAGE_OCR);
+    /* The public JPEG API must also refuse Lens for a local configuration. */
+    VjoOverlayData out;
+    TEST_CHECK(vjo_overlay_ocr(&results[job_idx], &plat, &cfg, NULL, &out) == VJO_E_OCR_UNAVAILABLE);
+    TEST_CHECK(!relay_connections && out.failed_stage == VJO_STAGE_OCR);
+}
+
+static void test_ocr_context_changes(void)
+{
+    setup("dictionary = local\n");
+    cache_ok = 1;
+    loaded_config.ocr_backend = VJO_OCR_NCNN;
+    apply_config();
+    TEST_CHECK(!cache_ok);
+    open_overlay();
+    TEST_ASSERT(job_running);
+    unsigned old_generation = job_generation;
+    on_game_exit();
+    TEST_CHECK(job_cancelled(NULL) && capture_generation != old_generation);
+    cache_data[job_idx].sentence = "old game";
+    on_job_text(); on_job_done();
+    TEST_CHECK(!job_running && !cache_ok && active == -1 && !g_view.open);
+}
+
 TEST_LIST = {
+    {"ncnn_manual_and_no_fallback", test_ncnn_manual_and_no_fallback},
+    {"ocr_context_changes", test_ocr_context_changes},
     {"local_worker_and_config_changes", test_local_worker_and_config_changes},
     {"manual_relay_without_keys", test_manual_relay_without_keys},
     {"background_relay_without_keys", test_background_relay_without_keys},

@@ -211,9 +211,16 @@ int vjo_overlay_lookup(VjoArena *a, const VjoPlatform *p, const VjoConfig *cfg, 
 int vjo_overlay_from_text(VjoArena *a, const VjoPlatform *p, const VjoConfig *cfg,
                           const char *ocr_text, VjoOverlayData *out)
 {
-    if (filter_text(a, cfg, ocr_text, out))
+    if (vjo_overlay_ocr_text(a, cfg, ocr_text, out))
         return out->err.rc;
     return vjo_overlay_lookup(a, p, cfg, out);
+}
+
+int vjo_overlay_ocr_text(VjoArena *a, const VjoConfig *cfg, const char *text, VjoOverlayData *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->list.header = "";
+    return filter_text(a, cfg, text, out);
 }
 
 int vjo_overlay_ocr(VjoArena *a, const VjoPlatform *p, const VjoConfig *cfg,
@@ -223,6 +230,13 @@ int vjo_overlay_ocr(VjoArena *a, const VjoPlatform *p, const VjoConfig *cfg,
     const char *text = NULL;
     memset(out, 0, sizeof(*out));
     out->list.header = "";
+    /* This API accepts JPEG for Lens. Local OCR requires the raw-pixel
+     * runner; never upload a JPEG when the caller selected local OCR. */
+    if (cfg->ocr_backend != VJO_OCR_LENS) {
+        out->failed_stage = VJO_STAGE_OCR;
+        out->err.detail = "Local OCR requires raw pixels. Use vjo-ocr for host tests.";
+        return out->err.rc = VJO_E_OCR_UNAVAILABLE;
+    }
     if (vjo_lens_ocr(a, p, src, &lr, &text, &out->err)) {
         out->failed_stage = VJO_STAGE_OCR;
         return out->err.rc;
@@ -245,7 +259,7 @@ const char *vjo_err_text(VjoArena *a, int stage, const VjoErr *err)
     char what[48];
     VjoBuf b;
     if (stage == VJO_STAGE_OCR)
-        vjo_snprintf(what, sizeof(what), "Text recognition (Google Lens)");
+        vjo_snprintf(what, sizeof(what), "Text recognition");
     else
         vjo_snprintf(what, sizeof(what), "%s lookup", dict);
     vjo_buf_init(&b, a);
@@ -277,6 +291,21 @@ const char *vjo_err_text(VjoArena *a, int stage, const VjoErr *err)
         break;
     case VJO_E_LOCAL_FORMAT:
         vjo_buf_puts(&b, "Invalid or incomplete local dictionary. Reconvert the Yomitan ZIP and copy the complete .vjdict file again.");
+        break;
+    case VJO_E_OCR_MODEL:
+        vjo_buf_puts(&b, "Local OCR model is missing or invalid. Run tools/prepare_ocr.py and copy the complete model to ocr_model_dir.");
+        break;
+    case VJO_E_OCR_REGION:
+        vjo_buf_puts(&b, "Local OCR needs a tight dialogue region with horizontal white text. Select a region, excluding portraits and menus.");
+        break;
+    case VJO_E_OCR_UNAVAILABLE:
+        vjo_buf_puts(&b, err->detail ? err->detail : "This build has no local OCR. Install a build with ncnn or set ocr_backend = lens.");
+        break;
+    case VJO_E_CANCELLED:
+        vjo_buf_puts(&b, "Text recognition cancelled.");
+        break;
+    case VJO_E_OCR_INFERENCE:
+        vjo_buf_puts(&b, "Local OCR failed. Try a smaller dialogue region; see log.txt for details.");
         break;
     case VJO_E_TOO_LARGE:
         if (stage == VJO_STAGE_DICT && err->dict == VJO_DICT_LOCAL) {

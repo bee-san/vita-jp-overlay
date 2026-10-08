@@ -2,7 +2,8 @@
 
 Local lookup reads dictionaries from the Vita's storage. It needs no running
 computer, dictionary API key, Hachidori Relay, or dictionary network request.
-**Screen recognition still uses Google Lens and requires internet.** Anki and
+Screen recognition defaults to Google Lens and requires internet. Select the
+experimental [local ncnn OCR](local-ocr.md) for offline recognition. Anki and
 optional Anki audio retain their existing network requirements.
 
 ## Convert and install

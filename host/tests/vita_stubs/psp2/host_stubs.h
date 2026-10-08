@@ -16,6 +16,7 @@ typedef unsigned int SceSize;
 #define sceClibMemset memset
 #define sceClibSnprintf snprintf
 #define sceClibStrnlen strnlen
+#define sceClibStrcmp strcmp
 #define sceClibStrncmp strncmp
 uint64_t sceKernelGetProcessTimeWide(void);
 int sceKernelSetEventFlag(SceUID uid, unsigned int bits);

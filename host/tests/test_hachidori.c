@@ -36,9 +36,9 @@ static struct {
     VjoMemConn conn;
     int n, next, port, disconnected;
 } F;
-static int connect_fake(void *ud, const char *host, int port, int timeout, VjoConn *out)
+static int connect_fake(void *ud, const char *host, int port, int timeout, int io_timeout, VjoConn *out)
 {
-    (void)ud; (void)timeout;
+    (void)ud; (void)timeout; (void)io_timeout;
     if (F.next >= F.n) return VJO_E_NET;
     snprintf(F.host, sizeof(F.host), "%s", host);
     F.port = port;

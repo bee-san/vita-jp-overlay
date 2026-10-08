@@ -213,7 +213,7 @@ static int send_body(void *ud, VjoConn *c)
 int vjo_hachidori_lookup(VjoArena *a, const VjoPlatform *p, const VjoConfig *cfg,
                          const char *text, VjoDictResult *res, VjoErr *err)
 {
-    char host[64], authority[80];
+    char host[64];
     int port, units = 0, count = 0, pos = 0;
     size_t len = strlen(text), off = 0;
     if (vjo_hachidori_endpoint(cfg->hachidori_host, host, sizeof(host), &port) < 0)
@@ -233,7 +233,6 @@ int vjo_hachidori_lookup(VjoArena *a, const VjoPlatform *p, const VjoConfig *cfg
     res->tokens = (VjoToken *)vjo_arena_zalloc(a, (size_t)count * sizeof(VjoToken));
     if (!res->vocab || !res->tokens)
         return err->rc = VJO_E_OOM;
-    vjo_snprintf(authority, sizeof(authority), "%s:%d", host, port);
     for (off = 0; off < len; ) {
         VjoHttpRequest req;
         VjoHttpResponse resp;
@@ -247,7 +246,7 @@ int vjo_hachidori_lookup(VjoArena *a, const VjoPlatform *p, const VjoConfig *cfg
         vjo_json_write_string(&body, text + off);
         vjo_buf_putc(&body, '}');
         memset(&req, 0, sizeof(req));
-        req.method = "POST"; req.host = host; req.host_header = authority;
+        req.method = "POST"; req.host = host; req.host_port = port == 80 ? 0 : port;
         req.path = "/termEntries"; req.content_type = "application/json; charset=utf-8";
         req.ud = vjo_buf_cstr(&body); req.body_len = body.len;
         req.write_body = send_body; req.connect_timeout_us = 3000000;

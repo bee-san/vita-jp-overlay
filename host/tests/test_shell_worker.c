@@ -41,7 +41,7 @@ static uint8_t result_mem[2][RESULT_ARENA_SIZE];
 static VjoMemConn relay_conn;
 static char relay_reply[1024], relay_request[4096];
 static int relay_connections;
-static int connect_relay(void *ud, const char *host, int port, int timeout, VjoConn *out)
+static int connect_relay(void *ud, const char *host, int port, int timeout, int io_timeout, VjoConn *out)
 {
     const char *json = "{\"index\":0,\"originalTextLength\":1,\"dictionaryEntries\":[{"
         "\"headwords\":[{\"term\":\"猫\",\"reading\":\"ねこ\"}],"

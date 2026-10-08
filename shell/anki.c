@@ -319,6 +319,7 @@ static void do_add(unsigned seq, int entry)
     VjoAnkiMedia media = {0};
     char picture_name[40], msg[sizeof(g_view.anki_status)];
     int ok = 0, marked = 0, rc, want_picture;
+    int64_t t0 = now_us();
 
     vjo_view_lock();
     if (g_view.open && g_view.list_seq == seq && g_view.list && entry >= 0 && entry < g_view.list->n_entries) {
@@ -343,6 +344,8 @@ static void do_add(unsigned seq, int entry)
         }
     }
     rc = vjo_queue_save(&arena, &note, &media);
+    vjo_log("anki: save %s rc=%d, %u-byte screenshot, %d ms", note.spelling, rc, (unsigned)media.picture_len,
+            (int)((now_us() - t0) / 1000));
     if (rc < 0) {
         publish(seq, "Card NOT saved: check ux0 space/access, or card size (32 KiB text)", VJO_ANKI_STATUS_ERROR, -1);
         return;
@@ -372,6 +375,7 @@ static void do_sync(void)
 {
     int sent = 0, duplicates = 0, no_audio = 0, rc;
     char id[VJO_QUEUE_ID_SIZE], tag[64], msg[128];
+    int64_t t0 = now_us();
     if (!acfg.anki_host[0]) {
         publish(0, "Set anki_host in config.ini, then reopen and press △; cards stay queued", VJO_ANKI_STATUS_ERROR, -1);
         return;
@@ -424,6 +428,8 @@ static void do_sync(void)
         }
         if (rc != VJO_OK) {
             const char *why = op.audio_error ? vjo_anki_audio_err_text(&arena, &err) : vjo_anki_err_text(&arena, &err);
+            vjo_log("anki: send %.8s failed rc=%d%s: %s", id, err.rc, op.audio_error ? " (audio source)" : "",
+                    err.detail ? err.detail : why ? why : "");
             sceClibSnprintf(msg, sizeof(msg), "%d sent; rest kept: %s", sent, why ? why : "not enough memory");
             publish(0, msg, VJO_ANKI_STATUS_ERROR, -1);
             break;
@@ -436,7 +442,9 @@ static void do_sync(void)
         no_audio |= op.no_audio;
         refresh_count();
     }
-    refresh_count();
+    rc = refresh_count();
+    vjo_log("anki: sync %d sent, %d duplicates, %d pending, %d ms", sent, duplicates, rc,
+            (int)((now_us() - t0) / 1000));
     vjo_view_lock();
     g_view.anki_syncing = 0;
     g_view.anki_version++;

@@ -2,6 +2,7 @@
  * AnkiConnect replies. The arena is the actual Vita-sized 384 KiB allocation. */
 #include <dirent.h>
 #include <errno.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #define main acutest_main
 #include "acutest.h"
@@ -13,9 +14,17 @@
 #include "../../shell/anki_queue.c"
 
 VjoView g_view;
+static char last_log[256];
 void vjo_view_lock(void) {}
 void vjo_view_unlock(void) {}
-void vjo_log(const char *fmt, ...) {}
+/* Formats like the Vita's, so every log call's arguments are exercised. */
+void vjo_log(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(last_log, sizeof(last_log), fmt, ap);
+    va_end(ap);
+}
 void vjo_platform_vita(VjoPlatform *p) {}
 uint64_t sceKernelGetProcessTimeWide(void) { return 1000; }
 int sceKernelSetEventFlag(SceUID uid, unsigned bits) { return 0; }
@@ -199,6 +208,17 @@ static void clear_files(void)
     }
     closedir(d);
 }
+static int files_ending(const char *suffix)
+{
+    DIR *d = opendir(QUEUE_DIR);
+    struct dirent *e;
+    int n = 0;
+    if (!d) return -1;
+    while ((e = readdir(d)))
+        n += ends_with(e->d_name, suffix);
+    closedir(d);
+    return n;
+}
 static void reset_runtime(void)
 {
     memset(memory, 0xA5, sizeof(memory));
@@ -281,8 +301,12 @@ static void test_storage_failures(void)
         fail_sync = mode == 2;
         fail_close = mode == 3;
         vjo_arena_reset(&arena);
+        last_log[0] = '\0';
         TEST_CHECK(vjo_queue_save(&arena, &note, &m) == -1);
+        TEST_CHECK(strstr(last_log, "anki queue: ") && strstr(last_log, " failed 0x")); /* status.txt */
+        TEST_MSG("mode %d log: %s", mode, last_log);
         TEST_CHECK(vjo_queue_count() == 0); /* .tmp is never a pending card */
+        TEST_CHECK(files_ending(".tmp") == 0); /* and a failed one is removed */
         fail_close = fail_rename = fail_sync = 0;
     }
     write_budget = -1;

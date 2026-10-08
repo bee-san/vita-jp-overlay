@@ -18,6 +18,9 @@ set(CMAKE_C_EXTENSIONS ON)
 include("$ENV{VITASDK}/share/vita.cmake" REQUIRED)
 
 set(ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
+set(VJO_ROOT ${ROOT})
+set(VJO_BUILD_VITA ON)
+option(VJO_WITH_NCNN "Build the CPU-only local mobile OCR recognizer" ON)
 set(VJO_VERSION "0.5-local.2")
 
 # ---------------- kernel ----------------
@@ -64,11 +67,17 @@ add_library(vjo_core_vita STATIC
   ${ROOT}/core/jpdb.c ${ROOT}/core/textfilter.c ${ROOT}/core/entries.c ${ROOT}/core/jiten.c
   ${ROOT}/core/config.c ${ROOT}/core/regions.c ${ROOT}/core/http.c ${ROOT}/core/tls.c
   ${ROOT}/core/tls_roots.c ${ROOT}/core/client.c ${ROOT}/core/styled.c ${ROOT}/core/jpegsw.c
-  ${ROOT}/core/base64.c ${ROOT}/core/anki.c ${ROOT}/core/anki_queue.c ${ROOT}/core/net.c ${ROOT}/core/hachidori.c ${ROOT}/core/local_dict.c)
+  ${ROOT}/core/base64.c ${ROOT}/core/anki.c ${ROOT}/core/anki_queue.c ${ROOT}/core/net.c ${ROOT}/core/hachidori.c ${ROOT}/core/local_dict.c
+  ${ROOT}/core/ocr_lines.c)
 target_include_directories(vjo_core_vita PUBLIC ${ROOT}/core ${ROOT}/include)
 target_link_libraries(vjo_core_vita PUBLIC vjo_bearssl)
 target_compile_options(vjo_core_vita PRIVATE -O2 -Wall -Wextra -Wno-unused-parameter -fno-builtin -fshort-wchar
   -ffunction-sections -fdata-sections)
+if(VJO_WITH_NCNN)
+  include(${ROOT}/cmake/LocalOCR.cmake)
+  target_compile_definitions(vjo_core_vita PUBLIC VJO_WITH_NCNN=1)
+  target_link_libraries(vjo_ocr PUBLIC vjo_core_vita)
+endif()
 
 add_executable(VitaJPOverlay_Shell
   ${ROOT}/shell/boot.c
@@ -83,6 +92,9 @@ add_executable(VitaJPOverlay_Shell
   ${ROOT}/shell/files.c
   ${ROOT}/shell/libc_shim.c)
 add_dependencies(VitaJPOverlay_Shell vjo_kernel_stubs)
+if(VJO_WITH_NCNN)
+  target_link_libraries(VitaJPOverlay_Shell vjo_ocr ncnn)
+endif()
 target_compile_options(VitaJPOverlay_Shell PRIVATE -O2 -Wall -Wno-unused-parameter -fno-builtin -fshort-wchar
   "$<$<COMPILE_LANGUAGE:CXX>:-fno-rtti;-fno-exceptions;-Wno-sign-compare;-Wno-unused-function>"
   "-D__declspec(x)=")
@@ -133,10 +145,12 @@ add_custom_target(release
   COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_BINARY_DIR}/vitajpoverlay.rco ${STAGE}/ur0/data/VitaJPOverlay/
   COMMAND ${CMAKE_COMMAND} -E copy ${ROOT}/README.md ${ROOT}/LICENSE ${STAGE}/
   COMMAND ${CMAKE_COMMAND} -E copy ${ROOT}/docs/config.example.ini ${STAGE}/config.ini
-  COMMAND ${CMAKE_COMMAND} -E make_directory ${STAGE}/tools ${STAGE}/docs/benchmarks
-  COMMAND ${CMAKE_COMMAND} -E copy ${ROOT}/tools/convert_dictionary.py ${ROOT}/tools/install_dictionary.py ${STAGE}/tools/
-  COMMAND ${CMAKE_COMMAND} -E copy ${ROOT}/docs/local-dictionaries.md ${ROOT}/docs/lookup-performance.md ${STAGE}/docs/
+  COMMAND ${CMAKE_COMMAND} -E make_directory ${STAGE}/tools ${STAGE}/docs/benchmarks ${STAGE}/third_party
+  COMMAND ${CMAKE_COMMAND} -E copy ${ROOT}/tools/convert_dictionary.py ${ROOT}/tools/install_dictionary.py ${ROOT}/tools/prepare_ocr.py ${STAGE}/tools/
+  COMMAND ${CMAKE_COMMAND} -E copy ${ROOT}/docs/local-dictionaries.md ${ROOT}/docs/local-ocr.md ${ROOT}/docs/lookup-performance.md ${STAGE}/docs/
   COMMAND ${CMAKE_COMMAND} -E copy ${ROOT}/docs/benchmarks/local-lookup-jitendex.json ${STAGE}/docs/benchmarks/
-  COMMAND ${CMAKE_COMMAND} -E chdir ${STAGE} ${CMAKE_COMMAND} -E tar cf ${CMAKE_CURRENT_BINARY_DIR}/VitaJPOverlay-${VJO_VERSION}.zip --format=zip ur0 config.ini README.md LICENSE tools docs
+  COMMAND ${CMAKE_COMMAND} -E copy ${ROOT}/third_party/README.md ${STAGE}/third_party/
+  COMMAND ${CMAKE_COMMAND} -E copy_directory ${ROOT}/third_party/licenses ${STAGE}/third_party/licenses
+  COMMAND ${CMAKE_COMMAND} -E chdir ${STAGE} ${CMAKE_COMMAND} -E tar cf ${CMAKE_CURRENT_BINARY_DIR}/VitaJPOverlay-${VJO_VERSION}.zip --format=zip ur0 config.ini README.md LICENSE tools docs third_party
   DEPENDS VitaJPOverlay_Kernel.skprx-self VitaJPOverlay_Shell.suprx-self vjo_rco
   COMMENT "Packaging VitaJPOverlay-${VJO_VERSION}.zip")

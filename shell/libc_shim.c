@@ -13,3 +13,4 @@ int strcmp(const char *a, const char *b) { return sceClibStrcmp(a, b); }
 int strncmp(const char *a, const char *b, size_t n) { return sceClibStrncmp(a, b, n); }
 char *strchr(const char *s, int c) { return sceClibStrchr(s, c); }
 char *strstr(const char *h, const char *n) { return sceClibStrstr(h, n); }
+int abs(int n) { return n < 0 ? -n : n; }

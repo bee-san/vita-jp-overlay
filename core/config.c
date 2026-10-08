@@ -79,6 +79,8 @@ void vjo_config_defaults(VjoConfig *c)
     c->toggle_button = VJO_TRIGGER_L_R;
     c->subtitle_button = VJO_TRIGGER_SELECT_R;
     c->ocr_mode = VJO_OCR_AUTO;
+    c->ocr_backend = VJO_OCR_LENS;
+    vjo_snprintf(c->ocr_model_dir, sizeof(c->ocr_model_dir), "ux0:data/VitaJPOverlay/ocr");
     vjo_snprintf(c->anki_deck, sizeof(c->anki_deck), "Default");
     vjo_snprintf(c->anki_note_type, sizeof(c->anki_note_type), "Lapis");
     vjo_snprintf(c->anki_tags, sizeof(c->anki_tags), "vita-jp-overlay");
@@ -127,7 +129,13 @@ const char *vjo_config_default_text(void)
            "; acts on release.\n"
            "subtitle_button = select+r\n"
            "\n"
-           "; auto: recognize text in the background when the region changes (instant overlay)\n"
+           "; OCR: lens (online) | ncnn (experimental CPU-only PP-OCRv5 mobile)\n"
+           "; ncnn requires the model download and a selected dialogue region; see docs/local-ocr.md.\n"
+           "; Local OCR runs only on a button press, including subtitle refresh. No cloud fallback.\n"
+           "ocr_backend = lens\n"
+           "ocr_model_dir = ux0:data/VitaJPOverlay/ocr\n"
+           "\n"
+           "; auto: recognize text in the background when the region changes (Lens only)\n"
            "; on_press: recognize only when the overlay is opened\n"
            "ocr_mode = auto\n"
            "\n"
@@ -349,6 +357,7 @@ typedef struct {
 static const StrSetting str_settings[] = {
     CHECKED_SETTING(hachidori_host, 0, valid_hachidori_host, "host[:port], not a URL", 0),
     STR_SETTING(local_dictionary_dir, 1, 1),
+    STR_SETTING(ocr_model_dir, 1, 1),
     CHECKED_SETTING(local_dictionaries, 0, vjo_local_names_valid, "1-8 relative .vjdict filenames separated by commas", 1),
     STR_SETTING(log_host, 0, 0),
     CHECKED_SETTING(anki_host, 0, valid_anki_host, "empty, auto, or IP[:port]", 0),
@@ -439,6 +448,13 @@ static void set_kv(VjoConfig *c, const char *key, const char *val)
         set_trigger(c, key, val, &c->toggle_button);
     } else if (vjo_ieq(key, "subtitle_button")) {
         set_trigger(c, key, val, &c->subtitle_button);
+    } else if (vjo_ieq(key, "ocr_backend")) {
+        if (vjo_ieq(val, "lens"))
+            c->ocr_backend = VJO_OCR_LENS;
+        else if (vjo_ieq(val, "ncnn"))
+            c->ocr_backend = VJO_OCR_NCNN;
+        else
+            warn(c, "%s: invalid value '%s'", key, val);
     } else if (vjo_ieq(key, "ocr_mode")) {
         if (vjo_ieq(val, "auto"))
             c->ocr_mode = VJO_OCR_AUTO;

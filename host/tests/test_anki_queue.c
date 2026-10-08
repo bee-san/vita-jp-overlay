@@ -216,6 +216,8 @@ static void reset_runtime(void)
     running = 1;
     vjo_config_defaults(&acfg);
     strcpy(acfg.anki_host, "anki.local");
+    saved_host[0] = '\0';
+    saved_port = saved_loaded = scanned = 0;
     n_replies = n_connect = n_sent = 0;
 }
 
@@ -463,6 +465,25 @@ static void test_audio_waits_for_sync(void)
     TEST_CHECK(vjo_queue_count() == 0 && n_connect == 2);
 }
 
+static void test_audio_failure_keeps_auto_host(void)
+{
+    const char *offline[] = {EMPTY, NULL};
+    setup();
+    strcpy(acfg.anki_host, "auto");
+    strcpy(acfg.anki_audio_url, "http://anki.local:8765/audio?term={term}");
+    strcpy(saved_host, "anki.local"); /* anki_host.txt from an earlier search */
+    saved_port = 8765;
+    saved_loaded = 1;
+    save_note("猫");
+    network(2, offline);
+    do_sync();
+    /* Anki answered findNotes, so a down audio source is no reason to
+     * search the network again, and the message names the audio source. */
+    TEST_CHECK(vjo_queue_count() == 1 && n_connect == 2 && !scanned);
+    TEST_CHECK(strstr(g_view.anki_status, "0 sent; rest kept: audio source offline") != NULL);
+    TEST_MSG("status: %s", g_view.anki_status);
+}
+
 static void test_invalid_record_and_size_limits(void)
 {
     VjoAnkiNote decoded, huge = note;
@@ -566,6 +587,7 @@ TEST_LIST = {
     {"save button with no Anki host", test_save_button_offline},
     {"100-card queue bounded memory", test_large_queue_bounded_memory},
     {"audio waits for sync", test_audio_waits_for_sync},
+    {"audio failure keeps the auto host", test_audio_failure_keeps_auto_host},
     {"invalid records and size limits", test_invalid_record_and_size_limits},
     {"retry failed directory flush", test_retry_failed_directory_flush},
     {NULL, NULL}

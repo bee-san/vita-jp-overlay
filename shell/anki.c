@@ -274,8 +274,11 @@ static int op_add(const char *host, int port, void *ud, VjoErr *err)
         return VJO_OK;
     if (vjo_anki_audio_enabled(&acfg) &&
         vjo_anki_find_audio(&arena, &plat, &acfg, o->note, unix_ms(), o->media, err)) {
+        /* Keep the card while the audio source is down. Anki has just
+         * answered findNotes, so this must not look like a stale host to
+         * with_anki (no network search); err keeps the audio cause. */
         o->audio_error = 1;
-        return err->rc; /* keep the card if the configured audio source is down */
+        return VJO_E_ANKI;
     }
     o->no_audio = vjo_anki_audio_enabled(&acfg) && !o->media->audio_url;
     return vjo_anki_add(&arena, &plat, host, port, &acfg, o->note, o->media, err);

@@ -189,6 +189,8 @@ All settings live in `ux0:data/VitaJPOverlay/config.ini`. The area to read (□ 
 
 **× saves locally; △ sends to Anki.** You can queue cards with Wi-Fi off or Anki closed, including before `anki_host` is configured. The queue survives closing the game and rebooting the Vita. Saving and opening the overlay make no Anki or audio requests.
 
+Wait for **Saved offline** (or **Already queued**) before restarting or powering off. Those confirmations come only after the file data and directory changes have been flushed to `ux0:`. On the next boot, opening the overlay recounts the queue from disk; nothing is sent until you press △. If shutdown interrupts “Saving card…”, the latest unconfirmed card may need to be saved again, but previously confirmed cards are not rewritten. If it interrupts sync after Anki accepted a card, its saved tag lets the next manual sync finish without adding it twice.
+
 Each card keeps the word, reading, definitions, sentence/highlight, frequency rank, and an optional captured screenshot. Furigana is generated when sending. The overlay shows the pending count and “Queued offline”; after a completed sync, queued words in the current list get a green √. While a sync is running, × is disabled.
 
 When you are back on your home network, open Anki on your computer, open the Vita overlay, and press **△**. You can do this even when the current screen has no dictionary entries. Set up the connection as follows:
@@ -290,6 +292,8 @@ cmake -S vita -B build/vita && cmake --build build/vita --target release
 ```
 
 
+
+The Anki restart suite runs each save, recovery, and sync in a fresh process, with a local AnkiConnect HTTP test server surviving client restarts. It checks abrupt exits during JPEG/JSON writes, flushes, renames, and confirmed-send cleanup, plus lost replies and replay of an unflushed deletion. These are host crash simulations; physical Vita/SD2Vita restart and power-loss testing remains a hardware validation step.
 
 The host tests cover relay configuration, HTTP requests, reply parsing,
 structured definitions and Unicode token positions. CTest also compiles the

@@ -3,7 +3,11 @@
 #include <dirent.h>
 #include <errno.h>
 #include <stdlib.h>
+#define main acutest_main
 #include "acutest.h"
+#undef main
+#include "net_posix.h"
+#include "json.h"
 #include "replay.h"
 #include "../../shell/anki.c"
 #include "../../shell/anki_queue.c"
@@ -25,7 +29,31 @@ int vjo_file_write(const char *path, const void *data, size_t len) { return 0; }
 static DIR *directory;
 static char directory_path[256], test_dir[128];
 static int write_budget, short_io, fail_rename, fail_sync, fail_remove, fail_close, fail_scan;
-int sceIoOpen(const char *p, int flags, unsigned mode) { return open(p, flags, mode); }
+static int fail_mount_sync, mount_sync_calls, write_fd = -1;
+static char write_path[256], last_rename[256];
+static const char *crash_point;
+
+/* Restart tests run this executable in independent processes. _exit deliberately
+ * skips worker shutdown and cleanup at the selected storage boundary. */
+static void crash_at(const char *point)
+{
+    if (crash_point && !strcmp(crash_point, point))
+        _exit(86);
+}
+static int ends_with(const char *s, const char *suffix)
+{
+    size_t n = strlen(s), k = strlen(suffix);
+    return n >= k && !strcmp(s + n - k, suffix);
+}
+int sceIoOpen(const char *p, int flags, unsigned mode)
+{
+    int fd = open(p, flags, mode);
+    if (fd >= 0 && (flags & O_WRONLY)) {
+        write_fd = fd;
+        snprintf(write_path, sizeof(write_path), "%s", p);
+    }
+    return fd;
+}
 int sceIoClose(int fd) { int rc = close(fd); return fail_close ? -1 : rc; }
 int sceIoRead(int fd, void *p, size_t n) { return (int)read(fd, p, short_io && n > 7 ? 7 : n); }
 int sceIoWrite(int fd, const void *p, size_t n)
@@ -38,7 +66,12 @@ int sceIoWrite(int fd, const void *p, size_t n)
         n = 7;
     if (write_budget > 0)
         write_budget -= (int)n;
-    return (int)write(fd, p, n);
+    int wrote = (int)write(fd, p, n);
+    if (wrote > 0 && fd == write_fd) {
+        if (ends_with(write_path, ".jpg.tmp")) crash_at("jpeg_partial");
+        if (ends_with(write_path, ".json.tmp")) crash_at("json_partial");
+    }
+    return wrote;
 }
 SceOff sceIoLseek(int fd, SceOff off, int whence) { return lseek(fd, off, whence); }
 int sceIoMkdir(const char *p, unsigned mode) { return mkdir(p, mode); }
@@ -49,10 +82,49 @@ int sceIoGetstat(const char *p, SceIoStat *st)
     if (!rc) st->st_mode = s.st_mode;
     return rc;
 }
-int sceIoRename(const char *from, const char *to) { return fail_rename ? -1 : rename(from, to); }
-int sceIoRemove(const char *p) { return fail_remove ? -1 : unlink(p); }
-int sceIoSyncByFd(int fd, int flag) { return fail_sync ? -1 : fsync(fd); }
-int sceIoSync(const char *device, unsigned flags) { return fail_sync ? -1 : 0; }
+int sceIoRename(const char *from, const char *to)
+{
+    int rc = fail_rename ? -1 : rename(from, to);
+    if (!rc) {
+        snprintf(last_rename, sizeof(last_rename), "%s", to);
+        if (ends_with(to, ".jpg")) crash_at("jpeg_renamed");
+        if (ends_with(to, ".json")) crash_at("json_renamed");
+    }
+    return rc;
+}
+int sceIoRemove(const char *p)
+{
+    int rc;
+    if (ends_with(p, ".json")) crash_at("before_json_remove");
+    if (ends_with(p, ".jpg")) crash_at("before_jpeg_remove");
+    rc = fail_remove ? -1 : unlink(p);
+    if (!rc && ends_with(p, ".json")) crash_at("after_json_remove");
+    return rc;
+}
+int sceIoSyncByFd(int fd, int flag)
+{
+    int rc = fail_sync ? -1 : fsync(fd);
+    if (!rc && fd == write_fd) {
+        if (ends_with(write_path, ".jpg.tmp")) crash_at("jpeg_flushed");
+        if (ends_with(write_path, ".json.tmp")) crash_at("json_flushed");
+    }
+    return rc;
+}
+int sceIoSync(const char *device, unsigned flags)
+{
+    /* Model the mount-level metadata barrier with real directory fsyncs. */
+    const char *dirs[] = {QUEUE_DIR, VJO_DATA_DIR, "ux0:data"};
+    mount_sync_calls++;
+    if (fail_sync || fail_mount_sync) return -1;
+    for (unsigned i = 0; i < sizeof(dirs) / sizeof(*dirs); i++) {
+        int fd = open(dirs[i], O_RDONLY | O_DIRECTORY);
+        if (fd < 0) return -1;
+        int rc = fsync(fd);
+        if (close(fd) < 0 || rc < 0) return -1;
+    }
+    if (ends_with(last_rename, ".json")) crash_at("json_committed");
+    return 0;
+}
 int sceIoDopen(const char *p)
 {
     TEST_ASSERT(!directory);
@@ -127,6 +199,26 @@ static void clear_files(void)
     }
     closedir(d);
 }
+static void reset_runtime(void)
+{
+    memset(memory, 0xA5, sizeof(memory));
+    vjo_arena_init(&arena, memory, sizeof(memory));
+    memset(&g_view, 0, sizeof(g_view));
+    memset(&plat, 0, sizeof(plat));
+    plat.connect = connect_fake;
+    plat.disconnect = disconnect_fake;
+    write_budget = -1;
+    short_io = fail_rename = fail_sync = fail_remove = fail_close = fail_scan = 0;
+    fail_mount_sync = mount_sync_calls = 0;
+    write_fd = -1;
+    write_path[0] = last_rename[0] = '\0';
+    crash_point = NULL;
+    running = 1;
+    vjo_config_defaults(&acfg);
+    strcpy(acfg.anki_host, "anki.local");
+    n_replies = n_connect = n_sent = 0;
+}
+
 static void setup(void)
 {
     if (!test_dir[0]) {
@@ -137,18 +229,7 @@ static void setup(void)
         mkdir("ux0:data", 0777);
     }
     clear_files();
-    memset(memory, 0xA5, sizeof(memory));
-    vjo_arena_init(&arena, memory, sizeof(memory));
-    memset(&g_view, 0, sizeof(g_view));
-    memset(&plat, 0, sizeof(plat));
-    plat.connect = connect_fake;
-    plat.disconnect = disconnect_fake;
-    write_budget = -1;
-    short_io = fail_rename = fail_sync = fail_remove = fail_close = fail_scan = 0;
-    running = 1;
-    vjo_config_defaults(&acfg);
-    strcpy(acfg.anki_host, "anki.local");
-    n_replies = n_connect = n_sent = 0;
+    reset_runtime();
 }
 static void save_note(const char *spelling)
 {
@@ -429,6 +510,32 @@ static void test_cleanup_retry(void)
     TEST_CHECK(vjo_queue_count() == 0 && n_connect == 1);
 }
 
+static void test_retry_failed_directory_flush(void)
+{
+    VjoAnkiMedia media = {0};
+    setup();
+    fail_mount_sync = 1; /* file data flushed and renamed, but directory flush failed */
+    TEST_CHECK(vjo_queue_save(&arena, &note, &media) == -1);
+    TEST_CHECK(vjo_queue_count() == 1); /* visible in cache is not yet an acknowledged save */
+    int barriers = mount_sync_calls;
+    vjo_arena_reset(&arena);
+    TEST_CHECK(vjo_queue_save(&arena, &note, &media) == -1);
+    TEST_CHECK(mount_sync_calls == barriers + 1);
+    fail_mount_sync = 0;
+    vjo_arena_reset(&arena);
+    TEST_CHECK(vjo_queue_save(&arena, &note, &media) == 1);
+    TEST_CHECK(mount_sync_calls == barriers + 2);
+    char id[VJO_QUEUE_ID_SIZE];
+    TEST_ASSERT(vjo_queue_first(id) == 1);
+    TEST_ASSERT(vjo_queue_archive_duplicate(id) == 0);
+    fail_mount_sync = 1;
+    vjo_arena_reset(&arena);
+    TEST_CHECK(vjo_queue_save(&arena, &note, &media) == -1);
+    fail_mount_sync = 0;
+    vjo_arena_reset(&arena);
+    TEST_CHECK(vjo_queue_save(&arena, &note, &media) == 2);
+}
+
 static void test_large_queue_bounded_memory(void)
 {
     const char *responses[200];
@@ -460,5 +567,60 @@ TEST_LIST = {
     {"100-card queue bounded memory", test_large_queue_bounded_memory},
     {"audio waits for sync", test_audio_waits_for_sync},
     {"invalid records and size limits", test_invalid_record_and_size_limits},
+    {"retry failed directory flush", test_retry_failed_directory_flush},
     {NULL, NULL}
 };
+
+/* Invoked only by test_anki_restart.py; normal invocations still run acutest. */
+int main(int argc, char **argv)
+{
+    if (argc < 2 || strcmp(argv[1], "--restart-step"))
+        return acutest_main(argc, argv);
+    if (argc < 4 || chdir(argv[2]) < 0)
+        return 2;
+    mkdir("ux0:data", 0777);
+    reset_runtime();
+    if (argc > 4 && argv[4][0]) crash_point = argv[4];
+    short_io = 1; /* genuinely incomplete writes at the *_partial checkpoints */
+    if (!strcmp(argv[3], "save") || !strcmp(argv[3], "save-other")) {
+        VjoAnkiNote n = note;
+        VjoAnkiMedia media = {jpeg, sizeof(jpeg), "capture.jpg", NULL, NULL};
+        if (!strcmp(argv[3], "save-other")) n.spelling = "犬";
+        memset(jpeg, 0xCC, sizeof(jpeg));
+        int rc = vjo_queue_save(&arena, &n, &media);
+        printf("{\"result\":%d,\"count\":%d}\n", rc, refresh_count());
+        return rc < 0 ? 1 : 0;
+    }
+    if (!strcmp(argv[3], "inspect")) {
+        char id[VJO_QUEUE_ID_SIZE], digest[VJO_QUEUE_ID_SIZE];
+        VjoAnkiNote restored;
+        VjoAnkiMedia media;
+        int count = refresh_count(), first = vjo_queue_first(id);
+        if (count < 0 || first < 0) return 3;
+        if (!first) {
+            puts("{\"count\":0}");
+            return 0;
+        }
+        if (vjo_queue_load(&arena, id, &restored, &media) < 0) return 4;
+        vjo_queue_id((const char *)media.picture, media.picture_len, digest);
+        const char *json = vjo_queue_encode(&arena, &restored, media.picture_len != 0);
+        if (!json) return 5;
+        printf("{\"count\":%d,\"id\":\"%s\",\"picture_len\":%u,"
+               "\"picture_hash\":\"%s\",\"note\":%s}\n", count, id,
+               (unsigned)media.picture_len, digest, json);
+        return 0;
+    }
+    if (!strcmp(argv[3], "sync") && argc == 6) {
+        PosixPlatform pp = {0};
+        posix_platform_init(&pp, &plat);
+        snprintf(acfg.anki_host, sizeof(acfg.anki_host), "%s", argv[5]);
+        do_sync();
+        VjoBuf b;
+        vjo_arena_reset(&arena);
+        vjo_buf_init(&b, &arena);
+        vjo_json_write_string(&b, g_view.anki_status);
+        printf("{\"count\":%d,\"status\":%s}\n", refresh_count(), vjo_buf_cstr(&b));
+        return 0;
+    }
+    return 2;
+}

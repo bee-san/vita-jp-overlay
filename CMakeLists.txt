@@ -66,6 +66,9 @@ add_test(NAME anki_queue COMMAND vjo-anki-queue-tests)
 
 # End-to-end ZIP conversion and disk lookup, using the actual CLI/runtime.
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
+# Each action is a fresh process; the Anki HTTP double survives client restarts.
+add_test(NAME anki_restart COMMAND ${Python3_EXECUTABLE}
+  ${CMAKE_SOURCE_DIR}/host/tests/test_anki_restart.py $<TARGET_FILE:vjo-anki-queue-tests>)
 add_test(NAME local_dictionary COMMAND ${CMAKE_COMMAND} -E env
   "VJO_CLI=$<TARGET_FILE:vjo-cli>" "VJO_BENCH=$<TARGET_FILE:vjo-local-bench>" ${Python3_EXECUTABLE} -m unittest discover
   -s ${CMAKE_SOURCE_DIR}/tools/tests -v)

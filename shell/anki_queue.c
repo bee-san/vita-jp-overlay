@@ -94,10 +94,12 @@ int vjo_queue_save(VjoArena *a, const VjoAnkiNote *note, const VjoAnkiMedia *med
     vjo_queue_id(json, strlen(json), id);
     path_for(path, id, "json");
     if (sceIoGetstat(path, &st) >= 0)
-        return 1; /* repeat ×: preserve the original card and screenshot */
+        /* A previous rename may be visible even though its final mount sync
+         * failed. Never acknowledge a retry until the directory is durable. */
+        return sceIoSync("ux0:", 0) < 0 ? -1 : 1;
     path_for(path, id, "duplicate.json");
     if (sceIoGetstat(path, &st) >= 0)
-        return 2; /* already retained after Anki refused this duplicate */
+        return sceIoSync("ux0:", 0) < 0 ? -1 : 2;
     if (media->picture_len) {
         path_for(path, id, "jpg");
         /* An orphan from an interrupted save is safe to replace (no JSON yet). */

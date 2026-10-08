@@ -114,6 +114,7 @@ int vjo_anki_note_from_entry(VjoArena *a, const VjoEntryList *l, int entry, VjoA
     char **m;
     if (!l || entry < 0 || entry >= l->n_entries)
         return -1;
+    memset(out, 0, sizeof(*out));
     e = &l->entries[entry];
     v = e->vocab;
     out->spelling = dup(a, v->spelling);
@@ -199,7 +200,7 @@ char *vjo_anki_can_add_request(VjoArena *a, const VjoConfig *cfg, const VjoEntry
 }
 
 /* "tags":[...] from tags separated by spaces. */
-static void put_tags(VjoBuf *b, const char *t)
+static void put_tags(VjoBuf *b, const char *t, const char *queue_tag)
 {
     int k = 0;
     vjo_buf_puts(b, "\"tags\":[");
@@ -215,6 +216,11 @@ static void put_tags(VjoBuf *b, const char *t)
             vjo_buf_putc(b, ',');
         vjo_json_write_stringn(b, t, len);
         t += len;
+    }
+    if (queue_tag) {
+        if (k)
+            vjo_buf_putc(b, ',');
+        vjo_json_write_string(b, queue_tag);
     }
     vjo_buf_putc(b, ']');
 }
@@ -285,7 +291,7 @@ int vjo_anki_add_request(VjoArena *a, const VjoConfig *cfg, const VjoAnkiNote *n
         vjo_json_write_string(&b, v[f]);
     }
     vjo_buf_puts(&b, "},");
-    put_tags(&b, cfg->anki_tags);
+    put_tags(&b, cfg->anki_tags, n->queue_tag);
     put_options(&b, cfg);
     if (m->audio_url && m->audio_name && *audio) {
         put_media(&b, "audio", m->audio_name, audio);
@@ -438,13 +444,17 @@ static int parse_reply(VjoArena *a, const char *json, size_t len, VjoJson *j, in
 {
     int r, e;
     *error = NULL;
-    if (vjo_json_parse(a, json, len, j) < 0 || !vjo_json_is_type(j, 0, JSMN_OBJECT))
+    if (vjo_json_parse(a, json, len, j) < 0 || !vjo_json_is_type(j, 0, JSMN_OBJECT) ||
+        vjo_json_skip(j, 0) != j->n)
         return VJO_E_PARSE;
     r = vjo_json_obj_get(j, 0, "result");
     e = vjo_json_obj_get(j, 0, "error");
     if (r < 0 || e < 0)
         return VJO_E_PARSE; /* not AnkiConnect */
-    if (!vjo_json_is_null(j, e)) {
+    if (!(vjo_json_is_type(j, e, JSMN_PRIMITIVE) && j->t[e].end - j->t[e].start == 4 &&
+          !memcmp(json + j->t[e].start, "null", 4))) {
+        if (!vjo_json_is_type(j, e, JSMN_STRING))
+            return VJO_E_PARSE;
         if (!(*error = vjo_json_str(a, j, e)))
             return VJO_E_OOM;
         return starts_with(*error, ERR_DUPLICATE) ? VJO_E_ANKI_DUPLICATE : VJO_E_ANKI;
@@ -567,25 +577,88 @@ int vjo_anki_check(VjoArena *a, const VjoPlatform *p, const char *host, int port
     return err->rc;
 }
 
+/* Note/deck IDs exceed a Vita long. Validate the decimal token without truncation. */
+static int positive_id(const VjoJson *j, int t)
+{
+    int len;
+    if (!vjo_json_is_type(j, t, JSMN_PRIMITIVE))
+        return 0;
+    len = j->t[t].end - j->t[t].start;
+    if (len < 1 || len > 19 || j->js[j->t[t].start] < '1' || j->js[j->t[t].start] > '9')
+        return 0;
+    for (int i = j->t[t].start + 1; i < j->t[t].end; i++)
+        if (j->js[i] < '0' || j->js[i] > '9')
+            return 0;
+    return 1;
+}
+
+static int call_id(VjoArena *a, const VjoPlatform *p, const char *host, int port,
+                    const VjoAnkiBody *body, VjoErr *err)
+{
+    VjoJson j;
+    int r;
+    if (call(a, p, host, port, body, &j, &r, err) == VJO_OK && !positive_id(&j, r))
+        err->rc = VJO_E_PARSE;
+    return err->rc;
+}
+
+int vjo_anki_find_queued(VjoArena *a, const VjoPlatform *p, const char *host, int port,
+                         const char *tag, int *found, VjoErr *err)
+{
+    VjoBuf b;
+    VjoAnkiBody body;
+    VjoJson j;
+    int r;
+    size_t mark = vjo_arena_mark(a);
+    *found = 0;
+    memset(err, 0, sizeof(*err));
+    vjo_buf_init(&b, a);
+    vjo_buf_puts(&b, "{\"action\":\"findNotes\",\"version\":6,\"params\":{\"query\":");
+    /* Tags are generated locally from hex IDs; JSON escaping still applies. */
+    {
+        VjoBuf query;
+        char *q;
+        vjo_buf_init(&query, a);
+        vjo_buf_puts(&query, "tag:");
+        vjo_buf_puts(&query, tag);
+        q = vjo_buf_cstr(&query);
+        if (!q)
+            return err->rc = VJO_E_OOM;
+        vjo_json_write_string(&b, q);
+    }
+    vjo_buf_puts(&b, "}}");
+    if (b.oom || !vjo_buf_cstr(&b))
+        return err->rc = VJO_E_OOM;
+    text_body(&body, (char *)b.data);
+    if (call(a, p, host, port, &body, &j, &r, err))
+        return err->rc;
+    if (!vjo_json_is_type(&j, r, JSMN_ARRAY))
+        return err->rc = VJO_E_PARSE;
+    for (int i = 0, t = r + 1; i < j.t[r].size; i++, t = vjo_json_skip(&j, t))
+        if (!positive_id(&j, t))
+            return err->rc = VJO_E_PARSE;
+    *found = j.t[r].size > 0;
+    vjo_arena_release(a, mark);
+    return VJO_OK;
+}
+
 int vjo_anki_add(VjoArena *a, const VjoPlatform *p, const char *host, int port, const VjoConfig *cfg,
                  const VjoAnkiNote *n, const VjoAnkiMedia *m, VjoErr *err)
 {
     VjoAnkiBody note, deck;
-    VjoJson j;
-    int r;
     char *create;
     memset(err, 0, sizeof(*err));
     if (vjo_anki_add_request(a, cfg, n, m, &note) < 0)
         return err->rc = VJO_E_OOM;
-    if (call(a, p, host, port, &note, &j, &r, err) != VJO_E_ANKI || !starts_with(err->detail, ERR_NO_DECK))
+    if (call_id(a, p, host, port, &note, err) != VJO_E_ANKI || !starts_with(err->detail, ERR_NO_DECK))
         return err->rc;
     /* The first note of a new deck. */
     if (!(create = create_deck_request(a, cfg->anki_deck)))
         return err->rc = VJO_E_OOM;
     text_body(&deck, create);
-    if (call(a, p, host, port, &deck, &j, &r, err))
+    if (call_id(a, p, host, port, &deck, err))
         return err->rc;
-    return call(a, p, host, port, &note, &j, &r, err);
+    return call_id(a, p, host, port, &note, err);
 }
 
 static int audio_lookup(VjoArena *a, const VjoPlatform *p, const char *audio_url, const VjoAnkiNote *n,

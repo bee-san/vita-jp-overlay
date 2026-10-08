@@ -138,9 +138,9 @@ const char *vjo_config_default_text(void)
            "log_file = off\n"
            "\n"
            "; ---- Anki (optional, see README) ----\n"
-           "; × in the overlay adds the selected word to Anki through AnkiConnect on a computer.\n"
+           "; × saves a card offline; △ sends the saved queue to AnkiConnect on a computer.\n"
            "\n"
-           "; The computer running Anki: empty = off, auto = search the local network,\n"
+           "; The computer running Anki: empty = queue only, auto = search when syncing,\n"
            "; or its IP address (optionally with :port, default 8765)\n"
            "anki_host =\n"
            "\n"
@@ -158,7 +158,7 @@ const char *vjo_config_default_text(void)
            "anki_field_frequency = FreqSort\n"
            "anki_field_audio = ExpressionAudio\n"
            "\n"
-           "; Word audio: a Yomitan audio source URL with {term} and {reading} (empty = off)\n"
+           "; Word audio (looked up on sync): Yomitan URL with {term} and {reading} (empty = off)\n"
            "anki_audio_url =\n";
 }
 

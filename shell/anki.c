@@ -1,12 +1,6 @@
-/* AnkiConnect thread: the duplicate pre-check of each new result, × adds
- * (with a screenshot of the whole game frame and the word's audio), and
- * finding Anki on the network for anki_host = auto. Nothing here runs
- * while anki_host is empty.
- *
- * Its memory is a memblock allocated when work arrives and freed when the
- * mailbox is empty. The result shown in the overlay is only read under the
- * view lock, after checking that it is still the published one (the
- * control thread frees result memory under that lock). */
+/* Anki worker: × commits a local card; △ explicitly drains the durable queue.
+ * Network work never runs as part of a save or a list refresh. One card at a
+ * time uses the existing 384 KiB transient arena. */
 #include <psp2/kernel/clib.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/sysmem.h>
@@ -15,6 +9,7 @@
 
 #include "../core/anki.h"
 #include "shell.h"
+#include "anki_queue.h"
 
 #define ANKI_MEM_SIZE (384 * 1024)
 #define PICTURE_QUALITY 75
@@ -28,8 +23,8 @@ static volatile int running;
 
 /* mailbox (box_lock) */
 static VjoConfig next_cfg;
-static int want_check, want_add;
-static unsigned check_seq, add_seq;
+static int want_check, want_add, want_sync;
+static unsigned add_seq;
 static int add_entry;
 
 /* Anki thread only */
@@ -54,7 +49,9 @@ void vjo_anki_configure(const VjoConfig *cfg)
         return;
     sceKernelLockMutex(box_lock, 1, NULL);
     next_cfg = *cfg;
+    want_check = 1;
     sceKernelUnlockMutex(box_lock, 1);
+    sceKernelSetEventFlag(evf, EV_WORK);
 }
 
 void vjo_anki_post_check(unsigned list_seq)
@@ -63,7 +60,7 @@ void vjo_anki_post_check(unsigned list_seq)
         return;
     sceKernelLockMutex(box_lock, 1, NULL);
     want_check = 1; /* replaces a queued one */
-    check_seq = list_seq;
+    (void)list_seq;
     sceKernelUnlockMutex(box_lock, 1);
     sceKernelSetEventFlag(evf, EV_WORK);
 }
@@ -73,11 +70,21 @@ void vjo_anki_post_add(unsigned list_seq, int entry)
     if (box_lock < 0)
         return;
     sceKernelLockMutex(box_lock, 1, NULL);
-    if (!want_add) { /* one at a time: a second × while adding is ignored */
+    if (!want_add && !want_sync) { /* ignore repeats while saving/syncing */
         want_add = 1;
         add_seq = list_seq;
         add_entry = entry;
     }
+    sceKernelUnlockMutex(box_lock, 1);
+    sceKernelSetEventFlag(evf, EV_WORK);
+}
+
+void vjo_anki_post_sync(void)
+{
+    if (box_lock < 0)
+        return;
+    sceKernelLockMutex(box_lock, 1, NULL);
+    want_sync = 1;
     sceKernelUnlockMutex(box_lock, 1);
     sceKernelSetEventFlag(evf, EV_WORK);
 }
@@ -89,7 +96,7 @@ void vjo_anki_post_add(unsigned list_seq, int entry)
 static void publish(unsigned seq, const char *msg, int kind, int mark_entry)
 {
     vjo_view_lock();
-    if (g_view.list_seq == seq) {
+    if (!seq || g_view.list_seq == seq) {
         if (mark_entry >= 0 && mark_entry < VJO_MAX_ENTRIES) {
             if (g_view.anki_marks_seq != seq) {
                 sceClibMemset(g_view.anki_mark, 0, sizeof(g_view.anki_mark));
@@ -104,12 +111,19 @@ static void publish(unsigned seq, const char *msg, int kind, int mark_entry)
     vjo_view_unlock();
 }
 
-static void publish_error(unsigned seq, const VjoErr *err)
+static void set_pending(int n)
 {
-    size_t mark = vjo_arena_mark(&arena);
-    int offline = err->rc == VJO_E_NET || err->rc == VJO_E_NOT_FOUND;
-    publish(seq, vjo_anki_err_text(&arena, err), offline ? VJO_ANKI_STATUS_DIM : VJO_ANKI_STATUS_ERROR, -1);
-    vjo_arena_release(&arena, mark);
+    vjo_view_lock();
+    g_view.anki_pending = n;
+    g_view.anki_version++;
+    vjo_view_unlock();
+}
+
+static int refresh_count(void)
+{
+    int n = vjo_queue_count();
+    set_pending(n);
+    return n;
 }
 
 /* ---------------- memory ---------------- */
@@ -243,65 +257,35 @@ static int with_anki(int may_scan, AnkiOp op, void *ud, VjoErr *err)
     return op(host, port, ud, err);
 }
 
-/* ---------------- pre-check ---------------- */
-
-typedef struct {
-    const char *json;
-    uint8_t *marks;
-    int n;
-} CheckOp;
-
-static int op_check(const char *host, int port, void *ud, VjoErr *err)
-{
-    CheckOp *c = (CheckOp *)ud;
-    return vjo_anki_check(&arena, &plat, host, port, c->json, c->marks, c->n, err);
-}
-
-static void do_check(unsigned seq)
-{
-    static uint8_t marks[VJO_MAX_ENTRIES];
-    CheckOp c = {NULL, marks, 0};
-    VjoErr err;
-    int n_marked = 0;
-    int64_t t0 = now_us();
-
-    vjo_view_lock();
-    if (g_view.open && g_view.list_seq == seq && g_view.list && g_view.list->n_entries > 0) {
-        c.n = g_view.list->n_entries < VJO_MAX_ENTRIES ? g_view.list->n_entries : VJO_MAX_ENTRIES;
-        c.json = vjo_anki_can_add_request(&arena, &acfg, g_view.list, c.n); /* NULL: no word field */
-    }
-    vjo_view_unlock();
-    if (!c.json)
-        return;
-    if (with_anki(0, op_check, &c, &err)) {
-        vjo_log("anki: check failed %d %s", err.rc, err.detail ? err.detail : "");
-        publish_error(seq, &err);
-        return;
-    }
-    vjo_view_lock();
-    if (g_view.list_seq == seq) {
-        sceClibMemset(g_view.anki_mark, 0, sizeof(g_view.anki_mark));
-        sceClibMemcpy(g_view.anki_mark, marks, (size_t)c.n);
-        g_view.anki_marks_seq = seq;
-        g_view.anki_status[0] = '\0';
-        g_view.anki_version++;
-    }
-    vjo_view_unlock();
-    for (int i = 0; i < c.n; i++)
-        n_marked += marks[i];
-    vjo_log("anki: check %d words, %d in Anki, %d ms", c.n, n_marked, (int)((now_us() - t0) / 1000));
-}
-
-/* ---------------- add ---------------- */
+/* ---------------- queue and sync ---------------- */
 
 typedef struct {
     const VjoAnkiNote *note;
-    const VjoAnkiMedia *media;
+    VjoAnkiMedia *media;
+    int audio_error, no_audio;
 } AddOp;
+
+static uint64_t unix_ms(void);
 
 static int op_add(const char *host, int port, void *ud, VjoErr *err)
 {
     AddOp *o = (AddOp *)ud;
+    int found;
+    o->audio_error = o->no_audio = 0;
+    /* Handles a lost addNote response or a crash before local acknowledgement. */
+    if (vjo_anki_find_queued(&arena, &plat, host, port, o->note->queue_tag, &found, err))
+        return err->rc;
+    if (found)
+        return VJO_OK;
+    if (vjo_anki_audio_enabled(&acfg) &&
+        vjo_anki_find_audio(&arena, &plat, &acfg, o->note, unix_ms(), o->media, err)) {
+        /* Keep the card while the audio source is down. Anki has just
+         * answered findNotes, so this must not look like a stale host to
+         * with_anki (no network search); err keeps the audio cause. */
+        o->audio_error = 1;
+        return VJO_E_ANKI;
+    }
+    o->no_audio = vjo_anki_audio_enabled(&acfg) && !o->media->audio_url;
     return vjo_anki_add(&arena, &plat, host, port, &acfg, o->note, o->media, err);
 }
 
@@ -337,11 +321,9 @@ static void take_screenshot(VjoAnkiMedia *m, char *name, size_t cap)
 static void do_add(unsigned seq, int entry)
 {
     VjoAnkiNote note;
-    VjoAnkiMedia media;
-    AddOp o = {&note, &media};
-    VjoErr err, audio_err;
+    VjoAnkiMedia media = {0};
     char picture_name[40], msg[sizeof(g_view.anki_status)];
-    int ok = 0, marked = 0, rc, want_picture, want_audio;
+    int ok = 0, marked = 0, rc, want_picture;
     int64_t t0 = now_us();
 
     vjo_view_lock();
@@ -350,44 +332,127 @@ static void do_add(unsigned seq, int entry)
         ok = marked || vjo_anki_note_from_entry(&arena, g_view.list, entry, &note) == 0;
     }
     vjo_view_unlock();
-    if (!ok)
-        return;
     if (marked)
-        return; /* the ✓ already says so */
-    publish(seq, "Adding…", VJO_ANKI_STATUS_DIM, -1);
-
-    sceClibMemset(&media, 0, sizeof(media));
-    want_picture = acfg.anki_field[VJO_ANKI_PICTURE][0] != '\0';
-    want_audio = vjo_anki_audio_enabled(&acfg);
-    if (want_picture) /* first: the frame of the × press */
-        take_screenshot(&media, picture_name, sizeof(picture_name));
-    if (want_audio) {
-        int64_t ta = now_us();
-        vjo_anki_find_audio(&arena, &plat, &acfg, &note, unix_ms(), &media, &audio_err);
-        vjo_log("anki: audio %s: %s (rc=%d) in %d ms", note.spelling,
-                media.audio_url ? media.audio_url : vjo_anki_audio_err_text(&arena, &audio_err), audio_err.rc,
-                (int)((now_us() - ta) / 1000));
-    }
-    rc = with_anki(1, op_add, &o, &err);
-    vjo_log("anki: add %s rc=%d %s in %d ms", note.spelling, rc, err.detail ? err.detail : "",
-            (int)((now_us() - t0) / 1000));
-    if (rc != VJO_OK && rc != VJO_E_ANKI_DUPLICATE) {
-        publish_error(seq, &err);
+        return;
+    if (!ok) {
+        publish(seq, "Could not copy card; please try again", VJO_ANKI_STATUS_ERROR, -1);
         return;
     }
-    /* The ✓ is the confirmation; only something missing is worth a line. */
-    msg[0] = '\0';
-    if (rc == VJO_OK) {
-        int no_picture = want_picture && !media.picture_len, no_audio = want_audio && !media.audio_url;
-        const char *why = no_audio ? vjo_anki_audio_err_text(&arena, &audio_err) : "";
-        if (no_picture && no_audio)
-            sceClibSnprintf(msg, sizeof(msg), "Added without a screenshot or audio (%s)", why);
-        else if (no_picture)
-            sceClibSnprintf(msg, sizeof(msg), "Added without a screenshot (the capture failed)");
-        else if (no_audio)
-            sceClibSnprintf(msg, sizeof(msg), "Added without audio (%s)", why);
+    publish(seq, "Saving card…", VJO_ANKI_STATUS_DIM, -1);
+    want_picture = acfg.anki_field[VJO_ANKI_PICTURE][0] != '\0';
+    if (want_picture) {
+        size_t mark = vjo_arena_mark(&arena);
+        take_screenshot(&media, picture_name, sizeof(picture_name));
+        if (!media.picture_len || media.picture_len > VJO_QUEUE_PICTURE_MAX) {
+            vjo_arena_release(&arena, mark);
+            sceClibMemset(&media, 0, sizeof(media));
+        }
     }
-    publish(seq, msg, VJO_ANKI_STATUS_DIM, entry);
+    rc = vjo_queue_save(&arena, &note, &media);
+    vjo_log("anki: save %s rc=%d, %u-byte screenshot, %d ms", note.spelling, rc, (unsigned)media.picture_len,
+            (int)((now_us() - t0) / 1000));
+    if (rc < 0) {
+        publish(seq, "Card NOT saved: check ux0 space/access, or card size (32 KiB text)", VJO_ANKI_STATUS_ERROR, -1);
+        return;
+    }
+    refresh_count();
+    if (rc == 2) {
+        publish(seq, "Already in Anki; previous duplicate saved for review", VJO_ANKI_STATUS_DIM, entry);
+        return;
+    }
+    sceClibSnprintf(msg, sizeof(msg), "%s%s; △ sends to Anki",
+                    rc == 1 ? "Already queued" : "Saved offline",
+                    want_picture && !media.picture_len ? " without screenshot (capture failed/too large)" : "");
+    publish(seq, msg, VJO_ANKI_STATUS_DIM, -1);
+    vjo_view_lock();
+    if (g_view.list_seq == seq && entry < VJO_MAX_ENTRIES) {
+        if (g_view.anki_marks_seq != seq) {
+            sceClibMemset(g_view.anki_mark, 0, sizeof(g_view.anki_mark));
+            g_view.anki_marks_seq = seq;
+        }
+        g_view.anki_mark[entry] = 2; /* queued, not yet in Anki */
+        g_view.anki_version++;
+    }
+    vjo_view_unlock();
+}
+
+static void do_sync(void)
+{
+    int sent = 0, duplicates = 0, no_audio = 0, rc;
+    char id[VJO_QUEUE_ID_SIZE], tag[64], msg[128];
+    int64_t t0 = now_us();
+    if (!acfg.anki_host[0]) {
+        publish(0, "Set anki_host in config.ini, then reopen and press △; cards stay queued", VJO_ANKI_STATUS_ERROR, -1);
+        return;
+    }
+    vjo_view_lock();
+    g_view.anki_syncing = 1;
+    g_view.anki_version++;
+    vjo_view_unlock();
+    while (running) {
+        VjoAnkiNote note;
+        VjoAnkiMedia media;
+        AddOp op = {&note, &media, 0, 0};
+        VjoErr err;
+        vjo_arena_reset(&arena);
+        rc = vjo_queue_first(id); /* the one directory scan per card */
+        if (rc < 0) {
+            publish(0, "Cannot read anki_queue; cards kept", VJO_ANKI_STATUS_ERROR, -1);
+            break;
+        }
+        set_pending(rc);
+        if (!rc) {
+            sceClibSnprintf(msg, sizeof(msg), "Sync complete: %d sent, %d duplicates kept%s", sent, duplicates,
+                            no_audio ? " (some words had no audio recording)" : "");
+            publish(0, msg, VJO_ANKI_STATUS_DIM, -1);
+            vjo_view_lock();
+            for (int i = 0; i < VJO_MAX_ENTRIES; i++)
+                if (g_view.anki_mark[i] == 2)
+                    g_view.anki_mark[i] = 1;
+            g_view.anki_version++;
+            vjo_view_unlock();
+            break;
+        }
+        if (vjo_queue_load(&arena, id, &note, &media) < 0) {
+            sceClibSnprintf(msg, sizeof(msg), "Cannot read queued card %.8s (damaged/too large/missing JPEG); kept", id);
+            publish(0, msg, VJO_ANKI_STATUS_ERROR, -1);
+            break;
+        }
+        sceClibSnprintf(tag, sizeof(tag), "vita_queue_%s", id);
+        note.queue_tag = tag;
+        sceClibSnprintf(msg, sizeof(msg), "Syncing to Anki… %d sent", sent);
+        publish(0, msg, VJO_ANKI_STATUS_DIM, -1);
+        rc = with_anki(1, op_add, &op, &err);
+        if (rc == VJO_E_ANKI_DUPLICATE) {
+            if (vjo_queue_archive_duplicate(id) < 0) {
+                publish(0, "Cannot finish archiving duplicate; local files kept", VJO_ANKI_STATUS_ERROR, -1);
+                break;
+            }
+            duplicates++;
+            continue;
+        }
+        if (rc != VJO_OK) {
+            const char *why = op.audio_error ? vjo_anki_audio_err_text(&arena, &err) : vjo_anki_err_text(&arena, &err);
+            vjo_log("anki: send %.8s failed rc=%d%s: %s", id, err.rc, op.audio_error ? " (audio source)" : "",
+                    err.detail ? err.detail : why ? why : "");
+            sceClibSnprintf(msg, sizeof(msg), "%d sent; rest kept: %s", sent, why ? why : "not enough memory");
+            publish(0, msg, VJO_ANKI_STATUS_ERROR, -1);
+            break;
+        }
+        if (vjo_queue_remove(id) < 0) {
+            publish(0, "Anki received card; local cleanup failed. △ safely retries", VJO_ANKI_STATUS_ERROR, -1);
+            break;
+        }
+        sent++;
+        no_audio |= op.no_audio;
+    }
+    rc = refresh_count();
+    vjo_log("anki: sync %d sent, %d duplicates, %d pending, %d ms", sent, duplicates, rc,
+            (int)((now_us() - t0) / 1000));
+    vjo_view_lock();
+    g_view.anki_syncing = 0;
+    g_view.anki_version++;
+    vjo_view_unlock();
 }
 
 /* ---------------- thread ---------------- */
@@ -402,31 +467,39 @@ static int anki_main(SceSize args, void *argp)
         if (bits & EV_QUIT)
             break;
         for (;;) {
-            int check = 0, add = 0, entry = 0;
-            unsigned cseq = 0, aseq = 0;
+            int check = 0, add = 0, sync = 0, entry = 0;
+            unsigned aseq = 0;
             sceKernelLockMutex(box_lock, 1, NULL);
             acfg = next_cfg;
-            if (want_check) {
-                check = 1;
-                cseq = check_seq;
-                want_check = 0;
-            } else if (want_add) {
+            if (want_add) {
                 add = 1;
                 aseq = add_seq;
                 entry = add_entry;
+            } else if (want_sync) {
+                sync = 1;
+            } else if (want_check) {
+                check = 1;
+                want_check = 0;
             }
             sceKernelUnlockMutex(box_lock, 1);
-            if (!check && !add)
+            if (!check && !add && !sync)
                 break;
             if (!running)
                 break;
-            if (acfg.anki_host[0] && mem_get() == 0) {
-                if (check)
-                    do_check(cseq);
-                else
+            if (check) {
+                refresh_count();
+            } else if (mem_get() == 0) {
+                if (add)
                     do_add(aseq, entry);
-            } else if (add && acfg.anki_host[0]) {
-                publish(aseq, "Anki: not enough memory", VJO_ANKI_STATUS_ERROR, -1);
+                else
+                    do_sync();
+            } else {
+                publish(add ? aseq : 0, "Anki: not enough memory; please try again", VJO_ANKI_STATUS_ERROR, -1);
+            }
+            if (sync) {
+                sceKernelLockMutex(box_lock, 1, NULL);
+                want_sync = 0;
+                sceKernelUnlockMutex(box_lock, 1);
             }
             if (add) {
                 sceKernelLockMutex(box_lock, 1, NULL);

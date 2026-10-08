@@ -111,13 +111,18 @@ static void publish(unsigned seq, const char *msg, int kind, int mark_entry)
     vjo_view_unlock();
 }
 
-static int refresh_count(void)
+static void set_pending(int n)
 {
-    int n = vjo_queue_count();
     vjo_view_lock();
     g_view.anki_pending = n;
     g_view.anki_version++;
     vjo_view_unlock();
+}
+
+static int refresh_count(void)
+{
+    int n = vjo_queue_count();
+    set_pending(n);
     return n;
 }
 
@@ -390,11 +395,12 @@ static void do_sync(void)
         AddOp op = {&note, &media, 0, 0};
         VjoErr err;
         vjo_arena_reset(&arena);
-        rc = vjo_queue_first(id);
+        rc = vjo_queue_first(id); /* the one directory scan per card */
         if (rc < 0) {
             publish(0, "Cannot read anki_queue; cards kept", VJO_ANKI_STATUS_ERROR, -1);
             break;
         }
+        set_pending(rc);
         if (!rc) {
             sceClibSnprintf(msg, sizeof(msg), "Sync complete: %d sent, %d duplicates kept%s", sent, duplicates,
                             no_audio ? " (some words had no audio recording)" : "");
@@ -423,7 +429,6 @@ static void do_sync(void)
                 break;
             }
             duplicates++;
-            refresh_count();
             continue;
         }
         if (rc != VJO_OK) {
@@ -440,7 +445,6 @@ static void do_sync(void)
         }
         sent++;
         no_audio |= op.no_audio;
-        refresh_count();
     }
     rc = refresh_count();
     vjo_log("anki: sync %d sent, %d duplicates, %d pending, %d ms", sent, duplicates, rc,

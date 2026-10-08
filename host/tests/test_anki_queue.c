@@ -38,7 +38,7 @@ int vjo_file_write(const char *path, const void *data, size_t len) { return 0; }
 static DIR *directory;
 static char directory_path[256], test_dir[128];
 static int write_budget, short_io, fail_rename, fail_sync, fail_remove, fail_close, fail_scan;
-static int fail_mount_sync, mount_sync_calls, write_fd = -1;
+static int fail_mount_sync, mount_sync_calls, write_fd = -1, dir_scans;
 static char write_path[256], last_rename[256];
 static const char *crash_point;
 
@@ -137,6 +137,7 @@ int sceIoSync(const char *device, unsigned flags)
 int sceIoDopen(const char *p)
 {
     TEST_ASSERT(!directory);
+    dir_scans++;
     snprintf(directory_path, sizeof(directory_path), "%s", p);
     directory = opendir(p);
     return directory ? 10000 : -1;
@@ -398,7 +399,7 @@ static void test_duplicates_continue(void)
     setup();
     save_note("猫");
     save_note("犬");
-    TEST_ASSERT(vjo_queue_first(id) == 1);
+    TEST_ASSERT(vjo_queue_first(id) == 2); /* the pending count */
     vjo_arena_reset(&arena);
     TEST_ASSERT(vjo_queue_load(&arena, id, &original, &media) == 0);
     char spelling[32];
@@ -593,8 +594,14 @@ static void test_large_queue_bounded_memory(void)
         responses[2 * i + 1] = ADDED;
     }
     network(200, responses);
+    dir_scans = 0;
     do_sync();
+    int scans = dir_scans;
     TEST_CHECK(vjo_queue_count() == 0 && n_connect == 200);
+    /* One scan per card (it also yields the pending count), one finding the
+     * queue empty, and the final recount. */
+    TEST_CHECK(scans == 102);
+    TEST_MSG("directory scans: %d", scans);
     TEST_CHECK(arena.peak < 32 * 1024);
     TEST_MSG("100-card text sync peak: %zu bytes", arena.peak);
 }

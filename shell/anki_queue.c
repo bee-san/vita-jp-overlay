@@ -78,11 +78,7 @@ static int scan_queue(char *first)
 }
 
 int vjo_queue_count(void) { return scan_queue(NULL); }
-int vjo_queue_first(char id[VJO_QUEUE_ID_SIZE])
-{
-    int n = scan_queue(id);
-    return n < 0 ? -1 : n > 0;
-}
+int vjo_queue_first(char id[VJO_QUEUE_ID_SIZE]) { return scan_queue(id); }
 
 /* Never remove the destination to rename over it. A commit is a new filename. */
 static int commit(const char *path, const void *data, size_t len)

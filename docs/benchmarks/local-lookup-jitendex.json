@@ -1,0 +1,208 @@
+{
+  "runs_per_case": 100,
+  "method": "timed lookup only; empty application caches; warm host OS cache; not Vita hardware",
+  "before_dicts": "jitendex-v1.vjdict",
+  "after_dicts": "jitendex-v2.vjdict",
+  "cases": [
+    {
+      "name": "exact",
+      "text": "図書館",
+      "before": {
+        "median_us": 13.31,
+        "p95_us": 14.241,
+        "read_calls": 36,
+        "read_bytes": 135692,
+        "nonsequential_reads": 34,
+        "arena_peak": 100824,
+        "entries": 2,
+        "digest": "94af7a60ab538cb7"
+      },
+      "after": {
+        "median_us": 4.346,
+        "p95_us": 6.6,
+        "read_calls": 5,
+        "read_bytes": 8716,
+        "nonsequential_reads": 3,
+        "arena_peak": 110192,
+        "entries": 2,
+        "digest": "94af7a60ab538cb7"
+      },
+      "read_reduction_percent": 86.11,
+      "host_speedup": 3.06
+    },
+    {
+      "name": "reading",
+      "text": "としょかん",
+      "before": {
+        "median_us": 13.155,
+        "p95_us": 23.175,
+        "read_calls": 32,
+        "read_bytes": 123174,
+        "nonsequential_reads": 31,
+        "arena_peak": 100824,
+        "entries": 1,
+        "digest": "81d0128bed2d09bd"
+      },
+      "after": {
+        "median_us": 3.966,
+        "p95_us": 5.128,
+        "read_calls": 4,
+        "read_bytes": 8486,
+        "nonsequential_reads": 3,
+        "arena_peak": 110192,
+        "entries": 1,
+        "digest": "81d0128bed2d09bd"
+      },
+      "read_reduction_percent": 87.5,
+      "host_speedup": 3.32
+    },
+    {
+      "name": "polite_negative",
+      "text": "食べませんでした",
+      "before": {
+        "median_us": 56.059,
+        "p95_us": 116.165,
+        "read_calls": 186,
+        "read_bytes": 754054,
+        "nonsequential_reads": 185,
+        "arena_peak": 100856,
+        "entries": 1,
+        "digest": "14e29c070c6af125"
+      },
+      "after": {
+        "median_us": 6.89,
+        "p95_us": 10.235,
+        "read_calls": 9,
+        "read_bytes": 29062,
+        "nonsequential_reads": 8,
+        "arena_peak": 110224,
+        "entries": 1,
+        "digest": "14e29c070c6af125"
+      },
+      "read_reduction_percent": 95.16,
+      "host_speedup": 8.14
+    },
+    {
+      "name": "dialogue",
+      "text": "今日は学校に行って、友達と話しました。",
+      "before": {
+        "median_us": 923.822,
+        "p95_us": 1160.332,
+        "read_calls": 3005,
+        "read_bytes": 12218888,
+        "nonsequential_reads": 2987,
+        "arena_peak": 100920,
+        "entries": 25,
+        "digest": "b81979d58df74713"
+      },
+      "after": {
+        "median_us": 61.057,
+        "p95_us": 115.463,
+        "read_calls": 116,
+        "read_bytes": 385544,
+        "nonsequential_reads": 112,
+        "arena_peak": 110288,
+        "entries": 25,
+        "digest": "b81979d58df74713"
+      },
+      "read_reduction_percent": 96.14,
+      "host_speedup": 15.13
+    },
+    {
+      "name": "inflected",
+      "text": "彼女の名前を思い出せなかった。",
+      "before": {
+        "median_us": 1004.102,
+        "p95_us": 1206.711,
+        "read_calls": 3267,
+        "read_bytes": 13337178,
+        "nonsequential_reads": 3266,
+        "arena_peak": 100888,
+        "entries": 11,
+        "digest": "d35a2fdcb3c5ebb7"
+      },
+      "after": {
+        "median_us": 59.555,
+        "p95_us": 74.712,
+        "read_calls": 106,
+        "read_bytes": 389722,
+        "nonsequential_reads": 105,
+        "arena_peak": 110256,
+        "entries": 11,
+        "digest": "d35a2fdcb3c5ebb7"
+      },
+      "read_reduction_percent": 96.76,
+      "host_speedup": 16.86
+    },
+    {
+      "name": "repeated",
+      "text": "猫。猫。猫。猫。猫。",
+      "before": {
+        "median_us": 50.305,
+        "p95_us": 95.814,
+        "read_calls": 168,
+        "read_bytes": 676611,
+        "nonsequential_reads": 167,
+        "arena_peak": 100856,
+        "entries": 2,
+        "digest": "b6c096fff846f4c1"
+      },
+      "after": {
+        "median_us": 5.137,
+        "p95_us": 8.242,
+        "read_calls": 5,
+        "read_bytes": 8963,
+        "nonsequential_reads": 4,
+        "arena_peak": 110224,
+        "entries": 2,
+        "digest": "b6c096fff846f4c1"
+      },
+      "read_reduction_percent": 97.02,
+      "host_speedup": 9.79
+    },
+    {
+      "name": "unknown",
+      "text": "霻霻霻霻霻霻霻霻",
+      "before": {
+        "median_us": 394.447,
+        "p95_us": 501.813,
+        "read_calls": 1261,
+        "read_bytes": 5161024,
+        "nonsequential_reads": 1260,
+        "arena_peak": 100856,
+        "entries": 0,
+        "digest": "cbf29ce484222325"
+      },
+      "after": {
+        "median_us": 8.142,
+        "p95_us": 11.517,
+        "read_calls": 11,
+        "read_bytes": 41024,
+        "nonsequential_reads": 10,
+        "arena_peak": 110224,
+        "entries": 0,
+        "digest": "cbf29ce484222325"
+      },
+      "read_reduction_percent": 99.13,
+      "host_speedup": 48.45
+    }
+  ],
+  "source": {
+    "name": "Jitendex.org [2026-10-03]",
+    "url": "https://github.com/stephenmk/stephenmk.github.io/releases/download/2026.10.03.0/jitendex-yomitan.zip",
+    "sha256": "e914c76596220dffc6ee0c069cd05992f03adb2988c12c3cebe817a3ac271356",
+    "entries": 436549,
+    "index_records": 662343,
+    "unique_keys": 558655
+  },
+  "before_revision": "23fd3e0464a3a5c3987b44fbf76e0eb1827d93b3",
+  "file_bytes": {
+    "before": 92845647,
+    "after": 103097379
+  },
+  "host": {
+    "system": "Linux",
+    "machine": "x86_64",
+    "compiler": "cc (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0"
+  }
+}

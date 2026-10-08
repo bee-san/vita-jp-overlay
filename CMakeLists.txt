@@ -62,5 +62,9 @@ add_test(NAME shell_worker COMMAND vjo-shell-worker-tests)
 # End-to-end ZIP conversion and disk lookup, using the actual CLI/runtime.
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 add_test(NAME local_dictionary COMMAND ${CMAKE_COMMAND} -E env
-  "VJO_CLI=$<TARGET_FILE:vjo-cli>" ${Python3_EXECUTABLE} -m unittest discover
+  "VJO_CLI=$<TARGET_FILE:vjo-cli>" "VJO_BENCH=$<TARGET_FILE:vjo-local-bench>" ${Python3_EXECUTABLE} -m unittest discover
   -s ${CMAKE_SOURCE_DIR}/tools/tests -v)
+
+# Counts production file reads and times lookup only (no OCR or process startup).
+add_executable(vjo-local-bench host/local_bench.c)
+target_link_libraries(vjo-local-bench vjo_host)

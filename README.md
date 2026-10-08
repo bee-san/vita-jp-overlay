@@ -86,6 +86,12 @@ Dictionary lookup needs no computer or internet; **Google Lens OCR still needs
 internet**. The existing Hachidori Relay default is preserved until you select
 `local` (or use `tools/install_dictionary.py --enable`).
 
+The current converter builds a page-based hash index that reduces sentence
+lookup reads by 96–97% in the [Jitendex benchmark](docs/lookup-performance.md),
+within the existing 112 KiB lookup budget. If you installed the first local
+build, update the plugin and reconvert your ZIPs to benefit. Existing `.vjdict`
+files remain compatible.
+
 ## Hachidori Relay setup
 
 1. On your computer, install a current [Hachidori browser extension](https://github.com/bee-san/hachidori)

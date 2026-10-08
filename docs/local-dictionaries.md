@@ -57,6 +57,15 @@ Older dictionary versions remain available; remove unused files in VitaShell
 when you no longer need them. Remove a name from `local_dictionaries` to disable
 that dictionary before deleting its file.
 
+### Upgrading from the first local build
+
+Install the updated plugin binaries and reboot, then reconvert your original
+Yomitan ZIPs with the included converter. New conversions use the faster
+version 2 index. Upload and select the new files as above. Existing version 1
+files remain readable, including alongside version 2 files, but keep their
+older index. `--format-version 1` is available when converting for an older
+plugin; older plugins cannot read version 2 files.
+
 ## Several dictionaries
 
 Up to eight `.vjdict` files can be enabled in priority order:
@@ -84,9 +93,12 @@ only after success, so a failed conversion preserves the previous dictionary.
 ## Memory and lookup behavior
 
 The plugin does **not** unzip banks, build an in-memory map, load a whole index,
-or memory-map dictionaries. It binary-searches a sorted index on storage with
-two shared 4 KiB page caches. Dictionaries are opened for a lookup and closed on
-both success and error; no dictionary-sized persistent allocation is added.
+or memory-map dictionaries. A term hashes directly to a 4 KiB index bucket on
+storage; a hit verifies the full key before reading its definitions. Four shared
+4 KiB page buffers and a small absent-hash cache reduce repeated reads. These
+caches are shared across all enabled files and released after each request.
+Dictionaries are opened for a lookup and closed on both success and error;
+no dictionary-sized persistent allocation is added.
 
 | Resource | Bound |
 | --- | --- |
@@ -136,7 +148,7 @@ avoids hiding an incomplete screen behind an apparently successful result.
   more results per screen.
 - Headwords/readings beyond the supported term length are skipped and counted.
   Half-width katakana, arbitrary Unicode normalization, and custom HoshiDicts
-  database files are not supported by this first local format.
+  database files are not supported by this local format.
 - Source ZIPs are read on the computer one JSON row at a time, with an 8 MiB
   per-row safety limit. SQLite sorts the index on disk with a 4 MiB page cache.
   Allow temporary disk space for the payload, sorting database and final output;
@@ -163,18 +175,49 @@ The generated deinflection table is checked against its pinned source.
 
 ### Host benchmark (2026-10-08)
 
-The reproducible synthetic benchmark above, built with GCC on this Linux host:
+With Jitendex (436,549 entries), the new index cuts two sentence workloads
+from 3,005 / 3,267 file reads to 116 / 106. Host lookup times improve 15–17×,
+with identical definitions and highlights. Lookup arena peaks stay below
+108 KiB, inside the existing 112 KiB cap. The converted file grows from
+88.5 MiB to 98.3 MiB (about 11%). See the [benchmark report](lookup-performance.md)
+for all queries, raw measurements, methodology and reproduction commands.
 
-| Dictionary | Entries | File size | Lookup arena peak | Median CLI wall time |
-| --- | ---: | ---: | ---: | ---: |
-| Synthetic | 1,000,003 | 192,000,369 bytes (183.1 MiB) | 100,872 bytes (98.5 KiB) | 4.381 ms |
+The benchmark driver times the lookup pipeline without process startup, counts
+file reads, and checks result equality. Application caches start empty for
+each request; the host OS file cache is warm. These are **not physical Vita or
+SD-card measurements**. The synthetic size/memory benchmark above uses the
+same driver, and regression tests check that arena use does not grow with
+dictionary size.
 
-Conversion took 18.021 seconds. The lookup sentence was `猫は食べました。行った。`;
-10 CLI runs were measured, including process startup. The separate regression
-test compares a tiny dictionary with 30,000 filler entries and asserts an equal
-arena peak. These are host checks, **not a physical Vita or SD-card benchmark**.
+### Binary format, version 2 (default)
 
-### Binary format, version 1
+All integers are little-endian unless explicitly stated. No C structs are cast
+onto disk data. The 64-byte header contains magic `VJDICT2\0`; four u32 values
+(version=2, header size=64, total posting count, hash-record stride=24); then
+five u64 values (index offset=4096, data offset, exact file size, primary bucket
+count, total index page count). The header is padded to 4 KiB. Bucket count is
+a power of two; the data region follows all index pages.
+
+Keys use FNV-1a-64 followed by the avalanche finalizer implemented in
+`key_hash()` in the converter and runtime. The low bits select a primary
+bucket. Each 4 KiB index page has a 16-byte header: magic `VJHP`, u32 record
+count (at most 170), and u64 next-page offset (zero for none). Overflow pages
+follow all primary pages, have increasing offsets, and are limited to a
+64-page chain. Records are sorted by unsigned hash within each bucket.
+
+Each 24-byte record contains u64 hash, u64 key-group offset, u32 posting count,
+u16 key length and u16 union of deinflection rule bits. A group holds the raw
+UTF-8 key followed by 16-byte postings: u64 payload offset, u32 payload length,
+u16 rule bits and u16 reserved=0. Postings retain dictionary priority,
+descending term score and original row order. Hash collisions are resolved
+by comparing the full key. All offsets are absolute.
+
+Payloads are three UTF-8 NUL-terminated strings: spelling, reading, definition.
+Spelling and reading indexes share payloads. Rule bits are v1=1, v5=2, vs=4,
+vk=8, vz=16, adj-i=32, iru=64. Opening a dictionary reads only its header;
+pages, offsets, bounds and payloads are validated as they are accessed.
+
+### Binary format, version 1 (legacy, still readable)
 
 All integers are little-endian. No C structs are cast onto disk data. The header
 is 64 bytes: magic `VJDICT1\0`; four u32 values (version=1, header size=64,

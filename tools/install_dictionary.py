@@ -14,7 +14,7 @@ import secrets
 import sys
 import time
 
-from convert_dictionary import HEADER, MAGIC, RECORD
+from convert_dictionary import HEADER, MAGIC, MAGIC_V2, RECORD, PAGE_SIZE
 
 DATA_DIR = "/ux0:/data/VitaJPOverlay"
 DICT_DIR = DATA_DIR + "/dictionaries"
@@ -26,9 +26,14 @@ def inspect(path):
         if len(raw) != HEADER.size:
             raise ValueError(f"{path}: incomplete dictionary header")
         magic, version, header, count, stride, index, data, size, r1, r2 = HEADER.unpack(raw)
-        if (magic != MAGIC or version != 1 or header != HEADER.size or stride != RECORD.size
-                or not count or index != HEADER.size or data != header + count * stride
-                or data > size or size != path.stat().st_size or r1 or r2):
+        common_valid = (header == HEADER.size and stride == RECORD.size and count > 0
+                        and data <= size and size == path.stat().st_size and size <= 0x7FFFFFFFFFFFFFFF)
+        v1_valid = (version == 1 and magic == MAGIC and index == HEADER.size
+                    and data == header + count * stride and r1 == 0 and r2 == 0)
+        v2_valid = (version == 2 and magic == MAGIC_V2 and index == PAGE_SIZE
+                    and 0 < r1 <= 0xFFFFFFFF and not (r1 & (r1 - 1))
+                    and r1 <= r2 <= 0xFFFFFFFF and data == PAGE_SIZE * (1 + r2))
+        if not common_valid or not (v1_valid or v2_valid):
             raise ValueError(f"{path}: incompatible or incomplete .vjdict file")
         sha = hashlib.sha256(raw)
         for block in iter(lambda: f.read(1024 * 1024), b""):

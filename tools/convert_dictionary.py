@@ -21,7 +21,14 @@ from html.parser import HTMLParser
 
 MAGIC = b"VJDICT1\0"
 HEADER = struct.Struct("<8sIIIIQQQQQ")
-RECORD = struct.Struct("<QQHHI")
+RECORD = struct.Struct("<QQHHI")  # Version 1 lexical index.
+MAGIC_V2 = b"VJDICT2\0"
+PAGE_SIZE = 4096
+HASH_RECORD = struct.Struct("<QQIHH")
+POSTING = struct.Struct("<QIHH")
+PAGE_HEADER = struct.Struct("<4sIQ")
+HASH_PAGE_RECORDS = (PAGE_SIZE - PAGE_HEADER.size) // HASH_RECORD.size
+MAX_HASH_CHAIN = 64
 MAX_KEY = 192
 MAX_SCAN_CHARS = 32
 MAX_ENTRY = 8192
@@ -188,7 +195,85 @@ def read_index(archive):
     return utf8_clip(clean(title.strip()).replace("\n", " "), 128)
 
 
-def convert(inputs, output, max_definition_bytes=4096, temp_dir=None):
+def key_hash(key):
+    """FNV-1a-64 plus avalanche; identical to core/local_dict.c."""
+    mask = (1 << 64) - 1
+    h = 14695981039346656037
+    for byte in key:
+        h = ((h ^ byte) * 1099511628211) & mask
+    h = ((h ^ (h >> 33)) * 0xff51afd7ed558ccd) & mask
+    h = ((h ^ (h >> 33)) * 0xc4ceb9fe1a85ec53) & mask
+    return h ^ (h >> 33)
+
+
+def write_v2(db, data, final, count):
+    # Sorting and all per-key metadata live on the computer's disk, not the Vita.
+    db.execute("CREATE INDEX lookup_order ON lookups(key, priority, score, seq)")
+    unique = db.execute("SELECT COUNT(DISTINCT key) FROM lookups").fetchone()[0]
+    buckets = 1
+    # About 82% target occupancy; rare overflow pages keep padding modest.
+    while buckets * 140 < unique:
+        buckets *= 2
+    counts = [0] * buckets
+    db.execute("CREATE TABLE hash_keys(key BLOB PRIMARY KEY, hash BLOB, bucket INTEGER, n INTEGER, off INTEGER, rules INTEGER)")
+    for (key,) in db.execute("SELECT DISTINCT key FROM lookups ORDER BY key"):
+        h = key_hash(key)
+        bucket = h & (buckets - 1)
+        counts[bucket] += 1
+        # Big endian blob order is unsigned integer order in SQLite.
+        db.execute("INSERT INTO hash_keys VALUES (?,?,?,0,0,0)", (key, h.to_bytes(8, "big"), bucket))
+    page_counts = [max(1, (n + HASH_PAGE_RECORDS - 1) // HASH_PAGE_RECORDS) for n in counts]
+    if max(page_counts) > MAX_HASH_CHAIN:
+        raise ValueError("hash bucket chain exceeds the supported limit")
+    pages = sum(page_counts)
+    data_off = PAGE_SIZE * (1 + pages)
+    final.seek(data_off)
+    data.seek(0)
+    shutil.copyfileobj(data, final, length=1024 * 1024)
+    current, group_off, n, rules_union = None, 0, 0, 0
+    for key, entry_off, rules, length in db.execute(
+            "SELECT key, entry_off, rules, size FROM lookups ORDER BY key, priority, score, seq"):
+        if key != current:
+            if current is not None:
+                db.execute("UPDATE hash_keys SET n=?, off=?, rules=? WHERE key=?", (n, group_off, rules_union, current))
+            current, group_off, n, rules_union = key, final.tell(), 0, 0
+            final.write(key)
+        final.write(POSTING.pack(data_off + entry_off, length, rules, 0))
+        n += 1
+        rules_union |= rules
+    db.execute("UPDATE hash_keys SET n=?, off=?, rules=? WHERE key=?", (n, group_off, rules_union, current))
+    size = final.tell()
+    if size > 0x7FFFFFFFFFFFFFFF:
+        raise ValueError("dictionary exceeds the supported file size")
+    final.seek(0)
+    final.write(HEADER.pack(MAGIC_V2, 2, HEADER.size, count, HASH_RECORD.size,
+                           PAGE_SIZE, data_off, size, buckets, pages))
+    records = iter(db.execute("SELECT hash, off, n, key, rules FROM hash_keys ORDER BY bucket, hash, key"))
+    overflow = buckets
+    for bucket, number in enumerate(page_counts):
+        left = counts[bucket]
+        page_number = bucket
+        for page_in_bucket in range(number):
+            take = min(left, HASH_PAGE_RECORDS)
+            following = 0 if page_in_bucket + 1 == number else PAGE_SIZE * (1 + overflow)
+            block = bytearray(PAGE_SIZE)
+            PAGE_HEADER.pack_into(block, 0, b"VJHP", take, following)
+            for slot in range(take):
+                h, group_off, n, key, flags = next(records)
+                HASH_RECORD.pack_into(block, PAGE_HEADER.size + slot * HASH_RECORD.size,
+                                      int.from_bytes(h, "big"), group_off, n, len(key), flags)
+            final.seek(PAGE_SIZE * (1 + page_number))
+            final.write(block)
+            left -= take
+            if following:
+                page_number = overflow
+                overflow += 1
+    return {"bytes": size, "unique_keys": unique, "hash_buckets": buckets, "index_pages": pages}
+
+
+def convert(inputs, output, max_definition_bytes=4096, temp_dir=None, format_version=2):
+    if format_version not in (1, 2):
+        raise ValueError("format-version must be 1 or 2")
     output = Path(output)
     if output.suffix != ".vjdict":
         raise ValueError("output filename must end in .vjdict")
@@ -197,7 +282,7 @@ def convert(inputs, output, max_definition_bytes=4096, temp_dir=None):
     if any(Path(p).resolve() == output.resolve() for p in inputs):
         raise ValueError("output must not replace an input archive")
     output.parent.mkdir(parents=True, exist_ok=True)
-    stats = {"entries": 0, "index_records": 0, "truncated_definitions": 0,
+    stats = {"format_version": format_version, "entries": 0, "index_records": 0, "truncated_definitions": 0,
              "skipped_long_headwords": 0, "dictionaries": []}
     # The final temporary file is beside the destination, for atomic replacement.
     final_name = None
@@ -261,7 +346,8 @@ def convert(inputs, output, max_definition_bytes=4096, temp_dir=None):
                                             flags = rule_flags(rules)
                                             for key in keys:
                                                 key_off = data.tell()
-                                                data.write(key)
+                                                if format_version == 1:
+                                                    data.write(key)
                                                 db.execute("INSERT INTO lookups VALUES (?,?,?,?,?,?,?,?)",
                                                            (key, priority, -score, stats["entries"], key_off, entry_off, flags, len(payload)))
                                                 stats["index_records"] += 1
@@ -281,13 +367,17 @@ def convert(inputs, output, max_definition_bytes=4096, temp_dir=None):
                     with tempfile.NamedTemporaryFile(prefix=output.name + ".", suffix=".tmp", dir=output.parent,
                                                      delete=False) as final:
                         final_name = Path(final.name)
-                        final.write(HEADER.pack(MAGIC, 1, HEADER.size, count, RECORD.size,
-                                                HEADER.size, data_off, size, 0, 0))
-                        for key, key_off, entry_off, flags, length in db.execute(
-                                "SELECT key, key_off, entry_off, rules, size FROM lookups ORDER BY key, priority, score, seq"):
-                            final.write(RECORD.pack(key_off + data_off, entry_off + data_off, len(key), flags, length))
-                        data.seek(0)
-                        shutil.copyfileobj(data, final, length=1024 * 1024)
+                        if format_version == 2:
+                            stats.update(write_v2(db, data, final, count))
+                            size = stats["bytes"]
+                        else:
+                            final.write(HEADER.pack(MAGIC, 1, HEADER.size, count, RECORD.size,
+                                                    HEADER.size, data_off, size, 0, 0))
+                            for key, key_off, entry_off, flags, length in db.execute(
+                                    "SELECT key, key_off, entry_off, rules, size FROM lookups ORDER BY key, priority, score, seq"):
+                                final.write(RECORD.pack(key_off + data_off, entry_off + data_off, len(key), flags, length))
+                            data.seek(0)
+                            shutil.copyfileobj(data, final, length=1024 * 1024)
                         final.flush()
                         os.fsync(final.fileno())
                     os.replace(final_name, output)
@@ -306,10 +396,12 @@ def main():
     parser.add_argument("inputs", nargs="+", type=Path, help="Yomitan term ZIP(s), in priority order")
     parser.add_argument("-o", "--output", required=True, type=Path, help="output .vjdict file")
     parser.add_argument("--max-definition-bytes", type=int, default=4096)
+    parser.add_argument("--format-version", type=int, choices=(1, 2), default=2,
+                        help="2: page hash index (default); 1: legacy binary-search format")
     parser.add_argument("--temp-dir", type=Path, help="scratch disk for sorting large dictionaries")
     args = parser.parse_args()
     try:
-        stats = convert(args.inputs, args.output, args.max_definition_bytes, args.temp_dir)
+        stats = convert(args.inputs, args.output, args.max_definition_bytes, args.temp_dir, args.format_version)
     except (ValueError, OSError, sqlite3.Error, RuntimeError) as exc:
         parser.exit(1, f"Conversion failed: {exc}\n")
     print(json.dumps(stats, ensure_ascii=False, indent=2))

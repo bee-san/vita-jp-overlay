@@ -149,7 +149,7 @@ static void posix_on_response(void *ud, const char *host, const char *body, size
     fclose(f);
 }
 
-/* No stdio buffering: local_dict.c owns its two bounded page caches. */
+/* No stdio buffering: local_dict.c owns its bounded page cache. */
 static int local_read(void *ctx, uint64_t off, void *dst, size_t n)
 {
     int fd = (int)(intptr_t)ctx;

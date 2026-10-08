@@ -11,6 +11,10 @@
 #define MAX_SCAN_CHARS 32
 #define MAX_HOMONYMS 64
 #define RULE_MASK 127u
+#define CACHE_PAGES 4
+#define MISS_SLOTS 64
+#define HASH_PAGE_RECORDS 170u
+#define MAX_HASH_CHAIN 64u
 
 typedef struct {
     const char *in, *out;
@@ -26,7 +30,7 @@ typedef struct {
 
 typedef struct {
     VjoFile file;
-    uint32_t count;
+    uint32_t count, version, buckets;
     uint64_t data;
 } Dictionary;
 
@@ -34,6 +38,7 @@ typedef struct {
     Dictionary *dict;
     uint64_t off;
     size_t len;
+    uint32_t used;
     uint8_t bytes[PAGE_SIZE];
 } Page;
 
@@ -50,7 +55,9 @@ typedef struct {
 
 typedef struct {
     Dictionary dicts[VJO_LOCAL_MAX_DICTS];
-    Page index_page, data_page;
+    Page pages[CACHE_PAGES];
+    struct { uint64_t hash; unsigned dict; } misses[MISS_SLOTS];
+    uint32_t clock;
     Candidate candidates[MAX_CANDIDATES];
     Match matches[VJO_LOCAL_MAX_MATCHES];
     uint64_t seen_off[VJO_LOCAL_MAX_RESULTS];
@@ -108,14 +115,21 @@ static int range_ok(Dictionary *d, uint64_t off, size_t n)
     return off <= d->file.size && n <= d->file.size - off;
 }
 
-static int cached_read(Page *page, Dictionary *d, uint64_t off, void *dst, size_t n)
+static int cached_read(Workspace *w, Dictionary *d, uint64_t off, void *dst, size_t n)
 {
     uint8_t *out = dst;
     if (!range_ok(d, off, n)) return VJO_E_LOCAL_FORMAT;
     while (n) {
         uint64_t base = off & ~(uint64_t)(PAGE_SIZE - 1);
         size_t pos = (size_t)(off - base), take;
-        if (page->dict != d || page->off != base) {
+        Page *page = NULL, *victim = &w->pages[0];
+        for (int i = 0; i < CACHE_PAGES; i++) {
+            Page *p = &w->pages[i];
+            if (p->dict == d && p->off == base) { page = p; break; }
+            if (!p->dict || (victim->dict && p->used < victim->used)) victim = p;
+        }
+        if (!page) {
+            page = victim;
             uint64_t remaining = d->file.size - base;
             page->dict = NULL;
             page->off = base;
@@ -123,6 +137,7 @@ static int cached_read(Page *page, Dictionary *d, uint64_t off, void *dst, size_
             if (d->file.read(d->file.ctx, base, page->bytes, page->len)) return VJO_E_LOCAL_IO;
             page->dict = d;
         }
+        page->used = ++w->clock;
         take = page->len - pos;
         if (take > n) take = n;
         memcpy(out, page->bytes + pos, take);
@@ -150,13 +165,24 @@ static int open_dictionaries(Workspace *w, const VjoPlatform *p, const VjoConfig
         w->n_dicts++; /* close even if header validation fails */
         if (d->file.size < HEADER_SIZE) return VJO_E_LOCAL_FORMAT;
         if (!d->file.read || !d->file.close || d->file.read(d->file.ctx, 0, h, sizeof(h))) return VJO_E_LOCAL_IO;
+        d->version = u32(h + 8);
         d->count = u32(h + 16);
         d->data = u64(h + 32);
-        if (memcmp(h, "VJDICT1\0", 8) || u32(h + 8) != 1 || u32(h + 12) != HEADER_SIZE ||
-            u32(h + 20) != INDEX_SIZE || u64(h + 24) != HEADER_SIZE ||
-            d->data != HEADER_SIZE + (uint64_t)d->count * INDEX_SIZE ||
+        if (u32(h + 12) != HEADER_SIZE || u32(h + 20) != INDEX_SIZE ||
             d->data > d->file.size || u64(h + 40) != d->file.size || !d->count ||
-            d->file.size > INT64_MAX || u64(h + 48) || u64(h + 56)) return VJO_E_LOCAL_FORMAT;
+            d->file.size > INT64_MAX) return VJO_E_LOCAL_FORMAT;
+        if (d->version == 1) {
+            if (memcmp(h, "VJDICT1\0", 8) || u64(h + 24) != HEADER_SIZE ||
+                d->data != HEADER_SIZE + (uint64_t)d->count * INDEX_SIZE ||
+                u64(h + 48) || u64(h + 56)) return VJO_E_LOCAL_FORMAT;
+        } else if (d->version == 2) {
+            uint64_t buckets = u64(h + 48), pages = u64(h + 56);
+            if (memcmp(h, "VJDICT2\0", 8) || u64(h + 24) != PAGE_SIZE ||
+                !buckets || buckets > UINT32_MAX || (buckets & (buckets - 1)) ||
+                pages < buckets || pages > UINT32_MAX || d->data != PAGE_SIZE + pages * PAGE_SIZE)
+                return VJO_E_LOCAL_FORMAT;
+            d->buckets = (uint32_t)buckets;
+        } else return VJO_E_LOCAL_FORMAT;
     }
     return VJO_OK;
 }
@@ -164,21 +190,21 @@ static int open_dictionaries(Workspace *w, const VjoPlatform *p, const VjoConfig
 static int record_at(Workspace *w, Dictionary *d, uint32_t i, Record *r, char *key)
 {
     uint8_t bytes[INDEX_SIZE];
-    int rc = cached_read(&w->index_page, d, HEADER_SIZE + (uint64_t)i * INDEX_SIZE, bytes, sizeof(bytes));
+    int rc = cached_read(w, d, HEADER_SIZE + (uint64_t)i * INDEX_SIZE, bytes, sizeof(bytes));
     if (rc) return rc;
     r->key_off = u64(bytes); r->entry_off = u64(bytes + 8);
     r->key_len = u16(bytes + 16); r->rules = u16(bytes + 18); r->entry_len = u32(bytes + 20);
     if (!r->key_len || r->key_len > VJO_LOCAL_MAX_KEY || (r->rules & ~RULE_MASK) ||
         r->key_off < d->data || r->entry_off < d->data || r->entry_len < 4 ||
         r->entry_len > VJO_LOCAL_MAX_ENTRY || !range_ok(d, r->entry_off, r->entry_len)) return VJO_E_LOCAL_FORMAT;
-    rc = cached_read(&w->data_page, d, r->key_off, key, r->key_len);
+    rc = cached_read(w, d, r->key_off, key, r->key_len);
     if (rc) return rc;
     if (memchr(key, 0, r->key_len)) return VJO_E_LOCAL_FORMAT;
     key[r->key_len] = 0;
     return VJO_OK;
 }
 
-static int find_matches(Workspace *w, int di, const Candidate *c)
+static int find_matches_v1(Workspace *w, int di, const Candidate *c)
 {
     Dictionary *d = &w->dicts[di];
     uint32_t lo = 0, hi = d->count;
@@ -206,13 +232,99 @@ static int find_matches(Workspace *w, int di, const Candidate *c)
     return VJO_OK;
 }
 
+/* Stable FNV-1a-64 hash with an avalanche finalizer; mirrored by the converter.
+ * Hashes route to a bucket only: full keys are always compared before a hit. */
+static uint64_t key_hash(const char *key)
+{
+    uint64_t h = UINT64_C(14695981039346656037);
+    for (; *key; key++) h = (h ^ (uint8_t)*key) * UINT64_C(1099511628211);
+    h ^= h >> 33; h *= UINT64_C(0xff51afd7ed558ccd);
+    h ^= h >> 33; h *= UINT64_C(0xc4ceb9fe1a85ec53);
+    return h ^ (h >> 33);
+}
+
+static int find_matches_v2(Workspace *w, int di, const Candidate *c)
+{
+    Dictionary *d = &w->dicts[di];
+    uint64_t hash = key_hash(c->key), page = PAGE_SIZE + (hash & (d->buckets - 1)) * PAGE_SIZE;
+    unsigned miss = (unsigned)(hash >> 32) & (MISS_SLOTS - 1);
+    int rc, hash_present = 0;
+    if (w->misses[miss].dict == (unsigned)di + 1 && w->misses[miss].hash == hash) return VJO_OK;
+    for (unsigned chain = 0; ; chain++) {
+        uint8_t header[16], slot[24];
+        uint32_t count, lo = 0, hi;
+        uint64_t next;
+        if (chain >= MAX_HASH_CHAIN || page < PAGE_SIZE || page >= d->data || page % PAGE_SIZE)
+            return VJO_E_LOCAL_FORMAT;
+        if ((rc = cached_read(w, d, page, header, sizeof(header)))) return rc;
+        count = u32(header + 4); next = u64(header + 8);
+        if (memcmp(header, "VJHP", 4) || count > HASH_PAGE_RECORDS ||
+            (next && (next <= page || next < PAGE_SIZE + (uint64_t)d->buckets * PAGE_SIZE ||
+                      next >= d->data || next % PAGE_SIZE))) return VJO_E_LOCAL_FORMAT;
+        hi = count;
+        while (lo < hi) {
+            uint32_t mid = lo + (hi - lo) / 2;
+            if ((rc = cached_read(w, d, page + 16 + mid * 24, slot, sizeof(slot)))) return rc;
+            if (u64(slot) < hash) lo = mid + 1; else hi = mid;
+        }
+        for (; lo < count; lo++) {
+            uint64_t group;
+            uint32_t n;
+            uint16_t key_len, rules;
+            char key[VJO_LOCAL_MAX_KEY + 1];
+            if ((rc = cached_read(w, d, page + 16 + lo * 24, slot, sizeof(slot)))) return rc;
+            if (u64(slot) != hash) break;
+            hash_present = 1;
+            group = u64(slot + 8); n = u32(slot + 16);
+            key_len = u16(slot + 20); rules = u16(slot + 22);
+            if (!key_len || key_len > VJO_LOCAL_MAX_KEY || !n || n > d->count ||
+                (rules & ~RULE_MASK) || group < d->data || !range_ok(d, group, key_len) ||
+                (uint64_t)n * 16 > d->file.size - group - key_len) return VJO_E_LOCAL_FORMAT;
+            if (key_len != c->len || (c->rules && !(c->rules & rules))) continue;
+            if ((rc = cached_read(w, d, group, key, key_len))) return rc;
+            if (memcmp(key, c->key, key_len)) continue;
+            if (n > MAX_HOMONYMS) n = MAX_HOMONYMS;
+            for (uint32_t j = 0; j < n && w->n_matches < VJO_LOCAL_MAX_MATCHES; j++) {
+                uint8_t post[16];
+                Record r;
+                int duplicate = 0;
+                if ((rc = cached_read(w, d, group + key_len + j * 16, post, sizeof(post)))) return rc;
+                r.entry_off = u64(post); r.entry_len = u32(post + 8); r.rules = u16(post + 12);
+                r.key_off = group; r.key_len = key_len;
+                if (u16(post + 14) || (r.rules & ~RULE_MASK) || r.entry_off < d->data ||
+                    r.entry_len < 4 || r.entry_len > VJO_LOCAL_MAX_ENTRY ||
+                    !range_ok(d, r.entry_off, r.entry_len)) return VJO_E_LOCAL_FORMAT;
+                if (c->rules && !(c->rules & r.rules)) continue;
+                for (int k = 0; k < w->n_matches; k++)
+                    if (w->matches[k].dict == di && w->matches[k].record.entry_off == r.entry_off) duplicate = 1;
+                if (duplicate) continue;
+                w->matches[w->n_matches].dict = di;
+                w->matches[w->n_matches++].record = r;
+            }
+            return VJO_OK;
+        }
+        if (!next) break;
+        page = next;
+    }
+    /* Cache only proven absent hashes, never a filtered/duplicate result. A
+     * collision cannot create a false negative: any equal hash prevents caching. */
+    if (!hash_present) { w->misses[miss].hash = hash; w->misses[miss].dict = (unsigned)di + 1; }
+    return VJO_OK;
+}
+
+static int find_matches(Workspace *w, int di, const Candidate *c)
+{
+    return w->dicts[di].version == 2 ? find_matches_v2(w, di, c) : find_matches_v1(w, di, c);
+}
+
 static int deinflect(Candidate *c, const char *key)
 {
     int count = 1;
     size_t len = strlen(key);
     memcpy(c[0].key, key, len + 1); c[0].len = (uint16_t)len; c[0].rules = 0;
     for (int i = 0; i < count; i++) {
-        for (unsigned r = 0; r < sizeof(deinflect_rules) / sizeof(deinflect_rules[0]); r++) {
+        unsigned suffix = (uint8_t)c[i].key[c[i].len - 1];
+        for (unsigned r = deinflect_offsets[suffix]; r < deinflect_offsets[suffix + 1]; r++) {
             const DeinflectRule *rule = &deinflect_rules[r];
             size_t stem, n;
             char next[VJO_LOCAL_MAX_KEY + 1];

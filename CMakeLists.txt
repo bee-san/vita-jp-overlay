@@ -20,7 +20,7 @@ set(CORE_SRC
   core/arena.c core/pb.c core/utf.c core/lens.c core/json.c core/jpdb.c
   core/textfilter.c core/entries.c core/jiten.c core/config.c core/regions.c
   core/http.c core/tls.c core/tls_roots.c core/client.c core/styled.c core/jpegsw.c
-  core/base64.c core/anki.c core/net.c core/hachidori.c core/local_dict.c core/ocr_lines.c)
+  core/base64.c core/anki.c core/anki_queue.c core/net.c core/hachidori.c core/local_dict.c core/ocr_lines.c)
 add_library(vjo_core STATIC ${CORE_SRC})
 target_include_directories(vjo_core PUBLIC core include)
 target_link_libraries(vjo_core PUBLIC bearssl)
@@ -70,6 +70,11 @@ if(VJO_WITH_NCNN)
   target_link_libraries(vjo-shell-worker-tests vjo_ocr)
 endif()
 add_test(NAME shell_worker COMMAND vjo-shell-worker-tests)
+add_executable(vjo-anki-queue-tests host/tests/test_anki_queue.c)
+target_include_directories(vjo-anki-queue-tests PRIVATE third_party/acutest/include host/tests/vita_stubs)
+target_compile_options(vjo-anki-queue-tests PRIVATE -Wall -Wextra -Wno-unused-parameter)
+target_link_libraries(vjo-anki-queue-tests vjo_host)
+add_test(NAME anki_queue COMMAND vjo-anki-queue-tests)
 
 # End-to-end ZIP conversion and disk lookup, using the actual CLI/runtime.
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
@@ -81,6 +86,9 @@ if(VJO_WITH_NCNN)
   add_test(NAME local_ocr_model COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/test_local_ocr.py
     --cli $<TARGET_FILE:vjo-ocr> --model ${VJO_OCR_ASSETS})
 endif()
+# Each action is a fresh process; the Anki HTTP double survives client restarts.
+add_test(NAME anki_restart COMMAND ${Python3_EXECUTABLE}
+  ${CMAKE_SOURCE_DIR}/host/tests/test_anki_restart.py $<TARGET_FILE:vjo-anki-queue-tests>)
 add_test(NAME local_dictionary COMMAND ${CMAKE_COMMAND} -E env
   "VJO_CLI=$<TARGET_FILE:vjo-cli>" "VJO_BENCH=$<TARGET_FILE:vjo-local-bench>" ${Python3_EXECUTABLE} -m unittest discover
   -s ${CMAKE_SOURCE_DIR}/tools/tests -v)

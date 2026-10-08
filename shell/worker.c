@@ -167,8 +167,8 @@ static void view_publish(int open, const VjoEntryList *list, const char *status,
     __atomic_store_n(&g_view.open, open, __ATOMIC_RELEASE); /* also read unlocked (overlay frame) */
     g_view.list = list;
     g_view.list_seq++;
-    g_view.anki_enabled = anki_started && cfg.anki_host[0] != '\0';
-    g_view.anki_status[0] = '\0'; /* the pre-check of a new list reports again */
+    g_view.anki_enabled = anki_started;
+    g_view.anki_status[0] = '\0'; /* a new result clears the previous transient message */
     sceClibSnprintf(g_view.status, sizeof(g_view.status), "%s", status ? status : "");
     g_view.status_is_error = is_error;
     g_view.font_size_ja = cfg.font_size_ja;
@@ -186,7 +186,7 @@ static void view_show_cache(void)
     const char *err = d->err.rc ? vjo_err_text(&scratch, d->failed_stage, &d->err) : NULL;
     view_publish(1, &d->list, err, err != NULL);
     vjo_arena_release(&scratch, mark);
-    if (anki_started && cfg.anki_host[0] && d->list.n_entries > 0) {
+    if (anki_started) {
         unsigned seq;
         vjo_view_lock();
         seq = g_view.list_seq;

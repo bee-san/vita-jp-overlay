@@ -153,7 +153,8 @@ In the overlay:
 | ◀ ▶              | Previous or next word. The word is highlighted in the text and its definition is shown below.                                                |
 | ▲ ▼              | The word on the line above or below.                                                                                                         |
 | Either stick     | Scroll a long definition.                                                                                                                    |
-| ×                | Add the word to Anki (when set up, see [Anki](#anki)). A green √ marks words already in your deck.                                           |
+| ×                | Save the selected word to the offline Anki queue (see [Anki](#anki)); no network needed. |
+| △                | Send the saved queue to AnkiConnect on your computer. |
 | □                | Choose the area to read in this game. Drag a box on the touchscreen, then press × to keep it or ○ to cancel. Holding □ sets the full screen. |
 | ○, or the toggle | Close the overlay.                                                                                                                           |
 
@@ -192,18 +193,32 @@ All settings live in `ux0:data/VitaJPOverlay/config.ini`. The area to read (□ 
 
 ## Anki
 
-× adds selected word to Anki, along with the reading, furigana, definitions, the sentence, a screenshot of the game, the frequency rank and (optionally) the word's audio. Words already in your deck show a green √.
+**× saves locally; △ sends to Anki.** You can queue cards with Wi-Fi off or Anki closed, including before `anki_host` is configured. The queue survives closing the game and rebooting the Vita. Saving and opening the overlay make no Anki or audio requests.
+
+Wait for **Saved offline** (or **Already queued**) before restarting or powering off. Those confirmations come only after the file data and directory changes have been flushed to `ux0:`. On the next boot, opening the overlay recounts the queue from disk; nothing is sent until you press △. If shutdown interrupts “Saving card…”, the latest unconfirmed card may need to be saved again, but previously confirmed cards are not rewritten. If it interrupts sync after Anki accepted a card, its saved tag lets the next manual sync finish without adding it twice.
+
+Each card keeps the word, reading, definitions, sentence/highlight, frequency rank, and an optional captured screenshot. Furigana is generated when sending. The overlay shows the pending count and “Queued offline”; after a completed sync, queued words in the current list get a green √. While a sync is running, × is disabled.
+
+When you are back on your home network, open Anki on your computer, open the Vita overlay, and press **△**. You can do this even when the current screen has no dictionary entries. Set up the connection as follows:
 
 1. In Anki, install [AnkiConnect](https://ankiweb.net/shared/info/2055492159).
 2. Tools → Add-ons → AnkiConnect → Config: set `"webBindAddress": "0.0.0.0"`, then restart Anki.
 3. In `config.ini`, set `anki_host = auto` (the Vita searches your network once and remembers the computer) or your computer's IP. Set `anki_deck` to your deck; it's created if missing.
 4. The default note type is [Lapis](https://github.com/donkuri/lapis). For another note type, set `anki_note_type` and the `anki_field_*` keys to its field names; leave a key empty to skip that data. Duplicates are checked on the note type's first field, so map the word to that field.
-5. Optional, word audio: set `anki_audio_url` to a Yomitan custom audio source URL, the same one you'd paste into Yomitan, with `{term}` and `{reading}` in it. To host your own, see [yomitan-ultimate-audio](https://github.com/friedrich-de/yomitan-ultimate-audio?tab=readme-ov-file). The Vita looks up the word there and Anki downloads the audio.
+5. Optional, word audio: set `anki_audio_url` to a Yomitan custom audio source URL, the same one you'd paste into Yomitan, with `{term}` and `{reading}` in it. To host your own, see [yomitan-ultimate-audio](https://github.com/friedrich-de/yomitan-ultimate-audio?tab=readme-ov-file). During manual sync, the Vita looks up the word there and Anki downloads the audio. A failed audio lookup keeps the card queued; a source with no recording sends the card without audio and reports that at completion.
 
+
+Cards are sent using the **current** `anki_deck`, note type, field mapping, tags, and audio settings, loaded when the overlay opens. This lets you fix a mapping and retry without losing saved text. Choose the desired deck before syncing. The saved screenshot is used; sync never recaptures the game.
+
+The files live in `ux0:data/VitaJPOverlay/anki_queue/`: one readable UTF-8 `<id>.json` per pending card, plus `<id>.jpg` when captured. Back up this folder with VitaShell/FTP. IDs are checksums of the JSON; do not rename or edit pending records. Temporary `.tmp` files and orphan JPEGs are ignored. A failed screenshot capture still saves the text and shows a warning. A failed card write shows **Card NOT saved** so you can retry before leaving the screen.
+
+Sync sends one card at a time and removes it only after a valid Anki acknowledgement. On a network, configuration, or storage error, already completed cards stay completed and the remaining queue stays on disk. Press △ to retry. Each sent card carries a `vita_queue_<id>` tag so an interrupted response or local cleanup can be retried without adding it twice; keep these tags until the queue is empty. Ordinary duplicates already in the target deck are kept as `<id>.duplicate.json` (and their JPEG), excluded from the pending count, and do not block other cards. You can inspect or delete those retained duplicates later. If you want to mine exactly the same archived card again after deleting it from Anki, remove its archived JSON/JPEG first.
+
+The queue uses the existing **384 KiB temporary Anki arena**, released while idle, regardless of the number of saved cards. Each record is limited to 32 KiB of text and 192 KiB of JPEG; oversized text is rejected visibly, and an oversized capture saves text with a warning. Queue capacity is limited by free storage. This is offline **card saving**: OCR and dictionary access still follow their own configured backends.
 
 | Key                     | Default              | What it does                                                                         |
 | ----------------------- | -------------------- | ------------------------------------------------------------------------------------ |
-| `anki_host`             | empty                | The computer running Anki: empty = off, `auto` = search the network, or `IP[:port]`. |
+| `anki_host`             | empty                | The computer running Anki: empty = queue only, `auto` = search on sync, or `IP[:port]`. |
 | `anki_deck`             | `Default`            | Deck for new cards.                                                                  |
 | `anki_note_type`        | `Lapis`              | Note type for new cards.                                                             |
 | `anki_tags`             | `vita-jp-overlay`    | Tags for new cards, separated by spaces.                                             |
@@ -235,10 +250,10 @@ and while subtitles are on, that happens every time the area changes while a gam
   to a cloud dictionary.
 - With `dictionary = jiten` or `jpdb`, recognised text is sent to the selected
   cloud dictionary, along with its API key.
-- With Anki set up, the cards (including the screenshot) go to Anki on your computer over your
-local network. `anki_host = auto` looks for it on port 8765 of the other devices on your
+- Cards and screenshots stay on the Vita until you press △ to send them to Anki on your computer over your
+local network. `anki_host = auto` then looks for it on port 8765 of the other devices on your
 network.
-- With `anki_audio_url` set, each word you add is sent to that audio source, and Anki
+- With `anki_audio_url` set, each word you sync is sent to that audio source, and Anki
 downloads the audio from the link it returns.
 - Nothing else leaves the console. Logs go only where `log_host` and `log_file` send them.
 
@@ -290,6 +305,8 @@ cmake -S vita -B build/vita && cmake --build build/vita --target release
 ```
 
 
+
+The Anki restart suite runs each save, recovery, and sync in a fresh process, with a local AnkiConnect HTTP test server surviving client restarts. It checks abrupt exits during JPEG/JSON writes, flushes, renames, and confirmed-send cleanup, plus lost replies and replay of an unflushed deletion. These are host crash simulations; physical Vita/SD2Vita restart and power-loss testing remains a hardware validation step.
 
 The host tests cover relay configuration, HTTP requests, reply parsing,
 structured definitions and Unicode token positions. CTest also compiles the

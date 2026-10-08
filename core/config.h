@@ -76,7 +76,7 @@ const char *vjo_config_api_key(const VjoConfig *c);
 /* Local lookup is always schedulable (worker checks files); relay/cloud need their settings. */
 int vjo_config_dict_ready(const VjoConfig *c);
 
-/* anki_host (or the saved anki_host.txt): "" = off, "auto" = search the
+/* anki_host (or the saved anki_host.txt): "" = sync off (queue still works), "auto" = search the
  * network, or host[:port]. For VJO_ANKI_MANUAL, host (cap bytes) and port
  * are set. Returns -1 for an invalid value. */
 #define VJO_ANKI_PORT 8765

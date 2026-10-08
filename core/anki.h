@@ -35,6 +35,7 @@ typedef struct {
     int n_meanings;
     const char *sentence; /* VjoEntryList.header */
     int hl_start, hl_end; /* the word in sentence, -1 if none */
+    const char *queue_tag; /* optional stable tag for retry-safe queued sends */
 } VjoAnkiNote;
 
 int vjo_anki_note_from_entry(VjoArena *a, const VjoEntryList *l, int entry, VjoAnkiNote *out);
@@ -108,6 +109,11 @@ int vjo_anki_check(VjoArena *a, const VjoPlatform *p, const char *host, int port
  * created, then the note is sent again. */
 int vjo_anki_add(VjoArena *a, const VjoPlatform *p, const char *host, int port, const VjoConfig *cfg,
                  const VjoAnkiNote *n, const VjoAnkiMedia *m, VjoErr *err);
+
+/* Check the queue's unique tag before retrying an ambiguous addNote response.
+ * found is set only for a valid array of positive note IDs. */
+int vjo_anki_find_queued(VjoArena *a, const VjoPlatform *p, const char *host, int port,
+                         const char *tag, int *found, VjoErr *err);
 
 /* Asks the audio source (anki_audio_url) for the word: its best recording
  * in m->audio_url and m->audio_name (both NULL when there is none, or on

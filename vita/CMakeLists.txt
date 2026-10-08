@@ -64,7 +64,7 @@ add_library(vjo_core_vita STATIC
   ${ROOT}/core/jpdb.c ${ROOT}/core/textfilter.c ${ROOT}/core/entries.c ${ROOT}/core/jiten.c
   ${ROOT}/core/config.c ${ROOT}/core/regions.c ${ROOT}/core/http.c ${ROOT}/core/tls.c
   ${ROOT}/core/tls_roots.c ${ROOT}/core/client.c ${ROOT}/core/styled.c ${ROOT}/core/jpegsw.c
-  ${ROOT}/core/base64.c ${ROOT}/core/anki.c ${ROOT}/core/net.c ${ROOT}/core/hachidori.c ${ROOT}/core/local_dict.c)
+  ${ROOT}/core/base64.c ${ROOT}/core/anki.c ${ROOT}/core/anki_queue.c ${ROOT}/core/net.c ${ROOT}/core/hachidori.c ${ROOT}/core/local_dict.c)
 target_include_directories(vjo_core_vita PUBLIC ${ROOT}/core ${ROOT}/include)
 target_link_libraries(vjo_core_vita PUBLIC vjo_bearssl)
 target_compile_options(vjo_core_vita PRIVATE -O2 -Wall -Wextra -Wno-unused-parameter -fno-builtin -fshort-wchar
@@ -77,6 +77,7 @@ add_executable(VitaJPOverlay_Shell
   ${ROOT}/shell/strip.cpp
   ${ROOT}/shell/worker.c
   ${ROOT}/shell/anki.c
+  ${ROOT}/shell/anki_queue.c
   ${ROOT}/shell/platform_vita.c
   ${ROOT}/shell/log_vita.c
   ${ROOT}/shell/files.c

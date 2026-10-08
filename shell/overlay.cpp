@@ -80,7 +80,7 @@ static ui::Widget *s_panel, *s_region_layer, *s_region_rect;
 
 static unsigned s_seen_version, s_seen_anki_version;
 static unsigned s_list_seq; /* the shown list (Anki requests name it) */
-static int s_anki_enabled;
+static int s_anki_enabled, s_anki_syncing;
 static int s_selected;
 /* Copied from the view under its lock, so nothing outside render() reads
  * the result memory (the control thread frees it when a game exits) and no
@@ -224,6 +224,7 @@ static void render(int new_content)
     s_n_entries = l ? l->n_entries : 0;
     s_list_seq = g_view.list_seq;
     s_anki_enabled = g_view.anki_enabled;
+    s_anki_syncing = g_view.anki_syncing;
     if (s_selected >= s_n_entries)
         s_selected = s_n_entries ? s_n_entries - 1 : 0;
     vjo_arena_reset(&s_ui);
@@ -243,6 +244,17 @@ static void render(int new_content)
         have_body = 1;
         if (g_view.status[0])
             vjo_styled_puts(&body, g_view.status, g_view.status_is_error ? VJO_RGB_ERROR : VJO_RGB_DIM, en);
+        if (s_anki_enabled) {
+            char queue[80];
+            if (g_view.anki_pending < 0)
+                sceClibSnprintf(queue, sizeof(queue), "Anki queue unavailable: check ux0 storage");
+            else
+                sceClibSnprintf(queue, sizeof(queue), "Anki queue: %d · %s", g_view.anki_pending,
+                                g_view.anki_syncing ? "syncing…" : "△ send");
+            if (body.len)
+                vjo_styled_puts(&body, "\n", VJO_RGB_DIM, en);
+            vjo_styled_puts(&body, queue, VJO_RGB_DIM, en);
+        }
         if (g_view.anki_status[0]) {
             /* by VJO_ANKI_STATUS_* */
             static const uint32_t rgb[] = {VJO_RGB_DIM, VJO_RGB_ERROR};
@@ -255,9 +267,12 @@ static void render(int new_content)
         }
         if (s_n_entries) {
             int marked = g_view.anki_marks_seq == s_list_seq && s_selected < VJO_MAX_ENTRIES &&
-                         g_view.anki_mark[s_selected];
+                         g_view.anki_mark[s_selected] == 1;
             if (body.len)
                 vjo_styled_puts(&body, "\n", VJO_RGB_DIM, en);
+            if (g_view.anki_marks_seq == s_list_seq && s_selected < VJO_MAX_ENTRIES &&
+                g_view.anki_mark[s_selected] == 2)
+                vjo_styled_puts(&body, "Queued offline\n", VJO_RGB_DIM, en);
             vjo_styled_entry(&body, l, s_selected, ja, en, marked);
         } else if (l && !g_view.status[0]) {
             vjo_styled_puts(&body, "No dictionary entries for this text.", VJO_RGB_DIM, en);
@@ -428,7 +443,7 @@ static void open_page(void)
         vjo_view_unlock();
         sceClibSnprintf(hint, sizeof(hint),
                         "<font color=\"#8a94a6\">◀ ▶ ▲ ▼ word · %sstick scroll · □ region · ○ close</font>",
-                        anki ? "× Anki · " : "");
+                        anki ? "× queue · △ send · " : "");
         set_rich(s_hint, hint);
     }
     s_mode = MODE_OVERLAY;
@@ -518,8 +533,10 @@ static void input_overlay(const VjoInput *in, uint32_t pressed)
         s_stick_max = dy < 0 ? -dy : dy;
     if (dy <= -STICK_DEADZONE || dy >= STICK_DEADZONE)
         pane_scroll_to(&s_body, s_body.scroll + (float)dy * STICK_SCROLL_PX);
-    if ((pressed & SCE_CTRL_CROSS) && s_anki_enabled && s_selected < n)
+    if ((pressed & SCE_CTRL_CROSS) && s_anki_enabled && !s_anki_syncing && s_selected < n)
         vjo_anki_post_add(s_list_seq, s_selected);
+    if ((pressed & SCE_CTRL_TRIANGLE) && s_anki_enabled)
+        vjo_anki_post_sync();
     if (pressed & SCE_CTRL_CIRCLE)
         vjo_post_command(VJO_CMD_CLOSED, NULL);
     if (pressed & SCE_CTRL_SQUARE)

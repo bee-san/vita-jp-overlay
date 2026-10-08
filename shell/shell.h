@@ -44,12 +44,14 @@ typedef struct {
     int font_size_en;         /* config font_size_en */
     /* Anki (anki.c); changes bump anki_version only, so the overlay keeps the
      * header and the selection */
-    int anki_enabled;         /* config anki_host is set */
+    int anki_enabled;         /* queue worker is available, even without anki_host */
+    int anki_pending;         /* number of durable queue records; -1 on I/O error */
+    int anki_syncing;         /* disables × while the worker is sending cards */
     unsigned anki_version;
     char anki_status[128];    /* "Adding…", "Anki offline", an error, or "" */
     int anki_status_kind;     /* VJO_ANKI_STATUS_* */
     unsigned anki_marks_seq;  /* list_seq the marks are for */
-    uint8_t anki_mark[VJO_MAX_ENTRIES]; /* 1 = already in Anki */
+    uint8_t anki_mark[VJO_MAX_ENTRIES]; /* 1 = in Anki, 2 = queued locally */
     /* subtitles: a strip at the top while the overlay is closed; changes
      * bump strip_version */
     int strip_on;             /* subtitles are on (stored atomically) */
@@ -85,10 +87,12 @@ int vjo_anki_start(void);
 void vjo_anki_stop(void);
 /* Settings for the next request (control thread, after each config load). */
 void vjo_anki_configure(const VjoConfig *cfg);
-/* Duplicate pre-check of the published list list_seq (control thread). */
+/* Refresh the on-disk queue count (control thread, no network). */
 void vjo_anki_post_check(unsigned list_seq);
-/* Adds entry `entry` of list list_seq (overlay, × pressed). */
+/* Queue entry `entry` of list list_seq (overlay, × pressed). */
 void vjo_anki_post_add(unsigned list_seq, int entry);
+/* Explicitly send queued notes (overlay, △ pressed). */
+void vjo_anki_post_sync(void);
 
 /* overlay.cpp (paf main thread) */
 void vjo_overlay_init(void *plugin);

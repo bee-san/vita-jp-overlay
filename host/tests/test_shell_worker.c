@@ -25,7 +25,6 @@ SceUID sceKernelCreateThread(const char *, int (*)(SceSize, void *), int,
                            unsigned int, unsigned int, int, void *);
 int sceKernelStartThread(SceUID, SceSize, void *);
 #endif
-#include "../../include/vjo_text.h"
 
 static VjoState kernel_state;
 static uint64_t test_now;
@@ -103,29 +102,6 @@ int vjoReadRaw(uint32_t row, uint32_t n, void *dst) {
     if (!row) raw_row_zero_reads++;
     raw_rows_copied += n;
     return (int)n;
-}
-static VjoTextSnapshot hook_snapshot;
-static unsigned text_reads, text_controls;
-int vjoTextRead(VjoTextSnapshot *out) { text_reads++; *out = hook_snapshot; return 0; }
-static int last_hook_mode, discover_calls;
-int vjoTextControl(uint32_t session, int mode, uint32_t selected) {
-    text_controls++;
-    last_hook_mode = mode;
-    if (mode == VJO_TEXT_DISCOVER) discover_calls++;
-    if (session != hook_snapshot.session) return -1;
-    hook_snapshot.selected = selected;
-    memset(&hook_snapshot.current, 0, sizeof(hook_snapshot.current));
-    for (unsigned i = 0; i < hook_snapshot.count; i++)
-        if (hook_snapshot.candidates[i].id == selected) hook_snapshot.current = hook_snapshot.candidates[i];
-    hook_snapshot.sequence++;
-    return 0;
-}
-static int anchor_calls;
-static char last_reference[VJO_TEXT_BYTES];
-int vjoTextReference(uint32_t session, const char *text) {
-    anchor_calls++;
-    snprintf(last_reference, sizeof(last_reference), "%s", text);
-    return session == hook_snapshot.session ? 0 : -1;
 }
 
 #include "../../shell/worker.c"
@@ -331,8 +307,7 @@ void vjo_platform_vita(VjoPlatform *p) {}
 static uint8_t result_mem[2][RESULT_ARENA_SIZE] __attribute__((aligned(64)));
 static unsigned allocation_calls, allocation_frees;
 static int allocation_failure;
-static uint8_t heap_mem[RESULT_ARENA_SIZE > 2 * NATIVE_ARENA_SIZE
-                        ? RESULT_ARENA_SIZE : 2 * NATIVE_ARENA_SIZE];
+static uint8_t heap_mem[MEM_SIZE];
 static unsigned allocation_bytes, heap_bytes;
 static unsigned heap_calls, heap_frees;
 static int heap_available;
@@ -340,7 +315,7 @@ void *vjo_shell_heap_alloc(size_t bytes)
 {
     heap_calls++;
     heap_bytes = bytes;
-    TEST_CHECK(bytes == RESULT_ARENA_SIZE || bytes == 2 * NATIVE_ARENA_SIZE);
+    TEST_CHECK(bytes <= MEM_SIZE);
     return heap_available && bytes <= sizeof(heap_mem) ? heap_mem : NULL;
 }
 void vjo_shell_heap_free(void *ptr)
@@ -464,21 +439,10 @@ static void disconnect_relay(void *ud, VjoConn *c)
 static void setup(const char *ini)
 {
     vjo_config_defaults(&loaded_config);
+    vjo_config_parse(&loaded_config, "ocr_backend = lens\n", strlen("ocr_backend = lens\n"));
     vjo_config_parse(&loaded_config, ini, strlen(ini));
     cfg = loaded_config;
-    native_game = text_calibrated = text_started = job_native = job_anchor = 0;
-    memset(&hook_snapshot, 0, sizeof(hook_snapshot));
-    hook_snapshot.session = 42;
-    memset(&text_state, 0, sizeof(text_state));
-    seen_hook_id = 0; seen_hook_text[0] = 0;
-    hook_log_after = 0;
-    hook_log_pending = 0;
-    anchor_calls = discover_calls = 0;
-    text_reads = text_controls = 0;
-    last_hook_mode = VJO_TEXT_OFF;
-    last_reference[0] = 0;
     allocation_bytes = heap_bytes = 0;
-    mem_kind = MEM_RESULTS;
 #ifdef VJO_MEIKI_GAME_WORKER
     game_submit_reply = 19; game_engine_reply = VJO_OK;
     game_error_metadata = NULL;
@@ -534,7 +498,6 @@ static void setup(const char *ini)
     memset(&ocr_backoff, 0, sizeof(ocr_backoff));
     memset(&dict_backoff, 0, sizeof(dict_backoff));
     memset(&mem_backoff, 0, sizeof(mem_backoff));
-    memset(&native_list, 0, sizeof(native_list));
     memset(&plat, 0, sizeof(plat));
     plat.connect = connect_relay;
     plat.disconnect = disconnect_relay;
@@ -799,6 +762,22 @@ static void test_ocr_context_changes(void)
     TEST_CHECK(!job_running && !cache_ok && active == -1 && !g_view.open);
 }
 
+static void test_legacy_source_settings_use_visual_ocr(void)
+{
+    const int legacy_sources[] = { VJO_SOURCE_AUTO, VJO_SOURCE_HOOKS };
+    for (unsigned i = 0; i < sizeof(legacy_sources) / sizeof(legacy_sources[0]); i++) {
+        setup(RELAY_CONFIG "ocr_backend = meiki\nocr_mode = auto\n");
+        loaded_config.text_source = legacy_sources[i];
+        apply_config();
+        TEST_CHECK(cfg.text_source == VJO_SOURCE_OCR);
+        TEST_CHECK(!auto_mode() && !background_wanted());
+        region_selected = 1;
+        open_overlay();
+        TEST_CHECK(job_running && job_region_selected);
+        TEST_CHECK(job_cfg.text_source == VJO_SOURCE_OCR && job_cfg.ocr_backend == VJO_OCR_MEIKI);
+    }
+}
+
 static void test_region_change_redoes_subtitle_job(void)
 {
     setup("dictionary = local\nocr_backend = ncnn\n");
@@ -816,22 +795,11 @@ static void test_region_change_redoes_subtitle_job(void)
     TEST_CHECK(g_view.strip_on && g_view.strip_busy && !g_view.open);
 }
 
-static void native_setup(const char *mode)
+static void game_setup(const char *mode)
 {
     setup(mode);
-#ifdef VJO_PAF_ALLOC
-    /* Installed native paths retain their USER-first ownership policy. */
-    result_memory = NULL;
-    mem_uid = 1;
-#endif
-    native_game = 1;
-    hook_snapshot.pid = 7;
-    hook_snapshot.count = 1;
-    VjoTextCandidate *c = &hook_snapshot.candidates[0];
-    c->id = 10; c->kind = VJO_TEXT_CALL; c->encoding = VJO_TEXT_UTF8;
-    c->japanese = c->length = 6; c->updates = 1;
-    strcpy(c->text, "猫を見ました");
 }
+
 
 /* A synthetic response with invented text. The real JPEG encoder, streamed
  * Lens request, HTTP receiver and protobuf parser run; no socket is opened. */
@@ -873,89 +841,6 @@ static int connect_capture(void *ud, const char *host, int port, int timeout, in
 }
 static void disconnect_capture(void *ud, VjoConn *c) {}
 
-static void capture_anchor_setup(void)
-{
-    native_setup(RELAY_CONFIG "text_source = auto\n");
-    allocation_failure = 0;
-    capture_reply = 71;
-    capture_waits = 2;
-    raw_fault_row = UINT32_MAX;
-    kernel_state.width = 755;
-    kernel_state.height = 146; /* final JPEG band is only two rows */
-    kernel_state.raw_stride = kernel_state.width * 4;
-    kernel_state.capture_checksum = 0x12345678;
-    hook_snapshot.candidates[0].score = 95;
-    capture_connections = 0;
-    plat.connect = connect_capture;
-    plat.disconnect = disconnect_capture;
-    plat.random = capture_random;
-    plat.plain_http = 1;
-    open_overlay();
-    TEST_ASSERT(job_running && job_anchor && !job_lookup && job_idx == 0);
-}
-
-static int capture_field(const void *data, size_t size, unsigned field, PbField *out)
-{
-    PbReader r;
-    PbField f;
-    pb_reader_init(&r, data, size);
-    while (pb_next(&r, &f) > 0)
-        if (f.field == field) { *out = f; return 1; }
-    return 0;
-}
-
-static void test_capture_rows_jpeg_lens_anchor(void)
-{
-    capture_anchor_setup();
-    uint32_t checksum = 0;
-    TEST_ASSERT(run_job(&results[0], &cache_data[0], &checksum) == VJO_OK);
-    TEST_CHECK(capture_calls == 1 && raw_calls == 10 && raw_rows_copied == 146);
-    TEST_CHECK(!discard_requests);
-    TEST_CHECK(capture_flags == VJO_CAPTURE_ONCE);
-    TEST_CHECK(capture_waits == 0 && checksum == kernel_state.capture_checksum);
-    TEST_CHECK(capture_connections == 1 && !relay_connections);
-    TEST_CHECK(job_text_ready && !strcmp(cache_data[0].sentence, "猫を見ました"));
-    TEST_CHECK(results[0].peak < RESULT_ARENA_SIZE && !results[1].base);
-
-    /* Inspect the uploaded protobuf, including bytes streamed through the
-     * shell's MemJpeg callback after capture has released its mutex. */
-    size_t header = 0;
-    for (size_t i = 0; i + 4 <= capture_conn.out_len; i++)
-        if (!memcmp(capture_upload + i, "\r\n\r\n", 4)) { header = i + 4; break; }
-    TEST_ASSERT(header && capture_conn.out_len < sizeof(capture_upload));
-    PbField object = {0}, image = {0}, payload = {0}, jpeg = {0}, metadata = {0}, f = {0};
-    TEST_ASSERT(capture_field(capture_upload + header, capture_conn.out_len-header, 1, &object));
-    TEST_ASSERT(capture_field(object.data, object.len, 3, &image));
-    TEST_ASSERT(capture_field(image.data, image.len, 1, &payload));
-    TEST_ASSERT(capture_field(payload.data, payload.len, 1, &jpeg));
-    TEST_ASSERT(jpeg.len > 4096); /* multiple upload callback reads */
-    TEST_CHECK(jpeg.data[0] == 0xFF && jpeg.data[1] == 0xD8);
-    TEST_CHECK(jpeg.data[jpeg.len-2] == 0xFF && jpeg.data[jpeg.len-1] == 0xD9);
-    TEST_ASSERT(capture_field(image.data, image.len, 3, &metadata));
-    TEST_CHECK(capture_field(metadata.data, metadata.len, 1, &f) && f.varint == 755);
-    TEST_CHECK(capture_field(metadata.data, metadata.len, 2, &f) && f.varint == 146);
-    unsigned jpeg_width = 0, jpeg_height = 0;
-    for (size_t i = 2; i + 9 < jpeg.len && jpeg.data[i] == 0xFF;) {
-        size_t length = (size_t)jpeg.data[i+2] * 256 + jpeg.data[i+3];
-        if (jpeg.data[i+1] == 0xC0) {
-            jpeg_height = (unsigned)jpeg.data[i+5] * 256 + jpeg.data[i+6];
-            jpeg_width = (unsigned)jpeg.data[i+7] * 256 + jpeg.data[i+8];
-            break;
-        }
-        if (length < 2 || length > jpeg.len-i-2) break;
-        i += length + 2;
-    }
-    TEST_CHECK(jpeg_width == 755 && jpeg_height == 146);
-
-    on_job_text();
-    TEST_CHECK(!anchor_calls && job_running && mem_uid >= 0);
-    job_done = 1; on_job_done();
-    TEST_CHECK(anchor_calls == 1 && !strcmp(last_reference, "猫を見ました"));
-    TEST_CHECK(g_view.hook_match_state == VJO_HOOK_MATCH_READY && g_view.hook_count == 1);
-    TEST_CHECK(!strcmp(g_view.hook_reference, "猫を見ました"));
-    TEST_CHECK(!job_running && !g_view.list && mem_uid < 0 && !results[0].base);
-}
-
 static void test_local_capture_keeps_multiple_passes(void)
 {
     setup("ocr_backend = ncnn\n");
@@ -969,339 +854,7 @@ static void test_local_capture_keeps_multiple_passes(void)
     TEST_CHECK(capture_calls == 1 && capture_flags == 0);
 }
 
-static void test_capture_failures_do_not_upload(void)
-{
-    static const struct {
-        const char *name;
-        int request, result, waits, short_read, expected;
-        unsigned fault_row, expected_rows;
-    } cases[] = {
-        {"request memory", VJO_ERR_NO_MEMORY, 0, 0, 0, VJO_E_OOM, 0, 0},
-        {"request no game", VJO_ERR_NO_GAME, 0, 0, 0, VJO_E_SOURCE, 0, 0},
-        {"completed memory", 71, VJO_ERR_NO_MEMORY, 2, 0, VJO_E_OOM, 0, 0},
-        {"completed copy", 71, VJO_ERR_COPY, 2, 0, VJO_E_SOURCE, 0, 0},
-        {"no completed capture", 71, 0, -1, 0, VJO_E_SOURCE, 0, 0},
-        {"failed first row", 71, 0, 2, 0, VJO_E_SOURCE, 0, 0},
-        {"short later row", 71, 0, 2, 1, VJO_E_SOURCE, 32, 32},
-    };
-    for (unsigned i = 0; i < sizeof(cases)/sizeof(*cases); i++) {
-        capture_anchor_setup();
-        capture_reply = cases[i].request;
-        kernel_state.capture_result = cases[i].result;
-        capture_waits = cases[i].waits;
-        raw_short_read = cases[i].short_read;
-        raw_fault_row = cases[i].fault_row;
-        uint32_t checksum = 0;
-        int rc = run_job(&results[0], &cache_data[0], &checksum);
-        TEST_CHECK_(rc == cases[i].expected, "%s: rc=%d", cases[i].name, rc);
-        TEST_CHECK(cache_data[0].failed_stage == VJO_STAGE_OCR && !job_text_ready);
-        TEST_CHECK(!capture_connections && !relay_connections && !anchor_calls);
-        TEST_CHECK(raw_rows_copied == cases[i].expected_rows);
-        TEST_CHECK(capture_calls == 1);
-        TEST_CHECK(discard_requests == (raw_calls ? 1u : 0u));
-        job_done = 1; on_job_done();
-        TEST_CHECK(g_view.hook_match_state == VJO_HOOK_MATCH_FAILED && g_view.status_is_error);
-        if (cases[i].expected == VJO_E_OOM)
-            TEST_CHECK(strstr(g_view.status, "not enough memory") != NULL);
-        else
-            TEST_CHECK(strstr(g_view.status, "Cannot capture the game screen") != NULL);
-        TEST_CHECK(!strstr(g_view.status, "unexpected response"));
-        TEST_CHECK(!g_view.hook_count && !g_view.hook_reference[0]);
-        TEST_CHECK(!job_running && mem_uid < 0 && !results[0].base);
-    }
-}
-
-static void test_capture_allocation_status_identifies_physical_error(void)
-{
-    static const struct { int alloc_status, state_rc, expected; } cases[] = {
-        {VJO_ALLOC_FAIL, 0, VJO_E_OOM},
-        {VJO_ALLOC_OK, 0, VJO_E_SOURCE},
-        {VJO_ALLOC_FAIL, VJO_ERR_PERM, VJO_E_SOURCE},
-    };
-    for (unsigned i = 0; i < sizeof(cases)/sizeof(*cases); i++) {
-        capture_anchor_setup();
-        capture_reply = (int32_t)0xC0000002u; /* exact physical request result */
-        kernel_state.alloc_status = cases[i].alloc_status;
-        state_read_result = cases[i].state_rc;
-        uint32_t checksum = 0;
-        TEST_CHECK(run_job(&results[0], &cache_data[0], &checksum) == cases[i].expected);
-        TEST_CHECK(!raw_calls && !capture_connections && !relay_connections);
-        TEST_CHECK(capture_calls == 1 && !discard_requests);
-        TEST_CHECK(!job_text_ready && !anchor_calls && !results[0].used);
-        state_read_result = 0;
-        job_done = 1; on_job_done();
-        TEST_CHECK(g_view.hook_match_state == VJO_HOOK_MATCH_FAILED && g_view.status_is_error);
-        TEST_CHECK(!strstr(g_view.status, "unexpected response"));
-        TEST_CHECK((strstr(g_view.status, "not enough memory") != NULL) == (cases[i].expected == VJO_E_OOM));
-        TEST_CHECK(!job_running && mem_uid < 0 && !results[0].base);
-    }
-}
-
-static void test_manual_hook_bypasses_capture_and_ocr(void)
-{
-    native_setup(RELAY_CONFIG "text_source = hooks\nocr_backend = ncnn\n");
-    open_overlay();
-    TEST_CHECK(g_view.hook_picker && g_view.hook_count == 1 && !job_running);
-    vjo_post_hook(hook_snapshot.session, 10);
-    on_command();
-    TEST_ASSERT(job_running && job_native && !g_view.hook_picker);
-    uint32_t checksum = 123;
-    TEST_CHECK(run_job(&results[job_idx], &cache_data[job_idx], &checksum) == VJO_OK);
-    TEST_CHECK(!capture_calls && !anchor_calls && relay_connections > 0 && checksum == 0);
-    TEST_CHECK(!strcmp(cache_data[job_idx].sentence, "猫を見ました"));
-    on_job_text(); on_job_done();
-    TEST_CHECK(!job_running && cache_ok && g_view.list && !g_view.hook_picker);
-}
-
-static void test_automatic_hooks_match_once_and_handle_ocr_failure(void)
-{
-    native_setup(RELAY_CONFIG "text_source = auto\n");
-    allocation_failure = 0;
-    stable_pending = 1; auto_prefetch();
-    TEST_CHECK(!job_running); /* never continuous OCR while finding a hook */
-    open_overlay();
-    TEST_ASSERT(job_running && job_anchor && !job_native && !job_lookup);
-    TEST_CHECK(g_view.hook_match_state == VJO_HOOK_MATCH_MATCHING && !g_view.hook_count);
-    TEST_CHECK(allocation_bytes == RESULT_ARENA_SIZE && !results[1].base);
-    uint32_t checksum = 0;
-    TEST_CHECK(run_job(&results[job_idx], &cache_data[job_idx], &checksum) != VJO_OK);
-    on_job_done();
-    TEST_CHECK(g_view.hook_picker && text_calibrated && capture_calls == 1);
-    TEST_CHECK(g_view.hook_match_state == VJO_HOOK_MATCH_FAILED && g_view.status_is_error);
-    TEST_CHECK(!g_view.hook_count && !g_view.hook_reference[0] && !mem_heap && mem_uid < 0);
-    hook_snapshot.candidates[0].score = 80; /* stale score cannot validate failed OCR */
-    for (int i = 0; i < 20; i++) { hook_snapshot.sequence++; poll_hooks(); }
-    TEST_CHECK(!job_running && !hook_snapshot.selected && !g_view.hook_count);
-    close_overlay(); open_overlay(); /* explicit reopen is a fresh screenshot */
-    TEST_CHECK(job_running && job_anchor && !job_lookup && capture_calls == 1);
-    TEST_CHECK(!discover_calls && last_hook_mode == VJO_TEXT_LISTEN);
-}
-
 /* Complete OCR with invented text; Lens transport is covered separately. */
-static void complete_anchor(const char *sentence)
-{
-    TEST_ASSERT(job_running && job_anchor && !job_lookup && job_idx == 0);
-    TEST_ASSERT(vjo_overlay_ocr_text(&results[0], &job_cfg, sentence, &cache_data[0]) == VJO_OK);
-    job_text_ready = 1;
-    on_job_text();
-    TEST_CHECK(job_running && !anchor_calls && (mem_uid >= 0 || mem_heap));
-    job_done = 1;
-    on_job_done();
-}
-
-static void test_anchor_heap_lifecycle_and_stable_matches(void)
-{
-    native_setup(RELAY_CONFIG "text_source = auto\n");
-    mem_free(); allocation_frees = 0;
-    heap_available = 1;
-    hook_snapshot.count = 2;
-    hook_snapshot.candidates[0].score = 95;
-    hook_snapshot.candidates[1] = hook_snapshot.candidates[0];
-    hook_snapshot.candidates[1].id = 11;
-    hook_snapshot.candidates[1].score = 0;
-    open_overlay();
-    TEST_ASSERT(job_running && mem_heap == heap_mem && mem_kind == MEM_ANCHOR);
-    TEST_CHECK(allocation_bytes == RESULT_ARENA_SIZE && heap_bytes == RESULT_ARENA_SIZE);
-    TEST_CHECK(!results[1].base && results[0].size == RESULT_ARENA_SIZE && !heap_frees);
-    complete_anchor("猫を見ました");
-    TEST_CHECK(!job_running && !mem_heap && heap_frees == 1 && !g_view.list);
-    TEST_CHECK(!results[0].base && !results[1].base && !relay_connections);
-    TEST_CHECK(g_view.hook_match_state == VJO_HOOK_MATCH_READY && g_view.hook_count == 1);
-    TEST_CHECK(!strcmp(g_view.hook_reference, "猫を見ました") && !strcmp(last_reference, "猫を見ました"));
-    TEST_CHECK(!hook_snapshot.selected && !discover_calls && last_hook_mode == VJO_TEXT_LISTEN);
-    unsigned version = g_view.version;
-    for (int i = 0; i < 50; i++) {
-        hook_snapshot.sequence++;
-        strcpy(hook_snapshot.candidates[0].text, "別の文章");
-        poll_hooks();
-    }
-    TEST_CHECK(g_view.version == version && !strcmp(g_view.hooks[0].text, "猫を見ました"));
-    TEST_CHECK(!job_running && !hook_snapshot.selected);
-    pending_cmd = VJO_CMD_HOOK_DISCOVER; on_command();
-    TEST_CHECK(!strcmp(g_view.hooks[0].text, "別の文章") && !job_running && !discover_calls);
-    vjo_post_hook(hook_snapshot.session, 10); on_command();
-    TEST_ASSERT(job_running && job_native && !job_anchor && mem_kind == MEM_NATIVE);
-    TEST_CHECK(heap_bytes == 2 * NATIVE_ARENA_SIZE && results[1].base);
-}
-
-static void test_anchor_oom_is_explicit_and_retryable(void)
-{
-    native_setup(RELAY_CONFIG "text_source = auto\n");
-    mem_free();
-    open_overlay();
-    TEST_CHECK(!job_running && g_view.hook_match_state == VJO_HOOK_MATCH_FAILED);
-    TEST_CHECK(g_view.status_is_error && strstr(g_view.status, "Not enough memory"));
-    TEST_CHECK(!g_view.hook_count && allocation_bytes == RESULT_ARENA_SIZE && heap_bytes == RESULT_ARENA_SIZE);
-    for (int i = 0; i < 30; i++) { test_now += 100000; poll_hooks(); }
-    TEST_CHECK(allocation_calls == 1 && !discover_calls);
-    heap_available = 1;
-    pending_cmd = VJO_CMD_HOOK_OCR; on_command();
-    TEST_CHECK(job_running && g_view.hook_match_state == VJO_HOOK_MATCH_MATCHING);
-    complete_anchor("犬を見ました");
-    TEST_CHECK(g_view.hook_match_state == VJO_HOOK_MATCH_READY && !g_view.hook_count);
-}
-
-static void test_anchor_cancel_frees_only_after_done(void)
-{
-    native_setup(RELAY_CONFIG "text_source = auto\n");
-    mem_free(); allocation_frees = 0;
-    heap_available = 1;
-    open_overlay();
-    TEST_ASSERT(job_running && mem_heap && !heap_frees);
-    on_game_exit();
-    TEST_CHECK(job_cancelled(NULL) && mem_heap && !heap_frees);
-    cache_data[0].sentence = "old screen";
-    on_job_text(); on_job_done();
-    TEST_CHECK(!job_running && !mem_heap && heap_frees == 1 && !anchor_calls);
-    TEST_CHECK(!g_view.open && !g_view.hook_reference[0] && !g_view.list);
-}
-
-static void test_reopen_during_anchor_discards_old_screenshot(void)
-{
-    native_setup(RELAY_CONFIG "text_source = auto\n");
-    allocation_failure = 0;
-    open_overlay();
-    TEST_ASSERT(job_running && job_anchor);
-    unsigned generation = job_generation;
-    close_overlay(); open_overlay();
-    TEST_CHECK(job_cancelled(NULL));
-    cache_data[0].sentence = "old screenshot";
-    on_job_text(); on_job_done();
-    TEST_CHECK(job_running && job_anchor && job_generation != generation);
-    TEST_CHECK(!anchor_calls && !g_view.hook_reference[0]);
-    complete_anchor("今の画面です");
-    TEST_CHECK(g_view.hook_match_state == VJO_HOOK_MATCH_READY);
-    TEST_CHECK(!strcmp(g_view.hook_reference, "今の画面です"));
-}
-
-static void test_dictionary_to_picker_reads_new_screenshot(void)
-{
-    native_setup("text_source = auto\n");
-    allocation_failure = 0;
-    vjoTextControl(hook_snapshot.session, VJO_TEXT_FOLLOW, 10);
-    open_overlay(); poll_hooks();
-    TEST_ASSERT(seen_hook_id == 10 && !g_view.hook_picker && !job_running);
-    pending_cmd = VJO_CMD_HOOK_DISCOVER; on_command(); poll_hooks();
-    TEST_CHECK(job_running && job_anchor && g_view.hook_picker);
-    TEST_CHECK(g_view.hook_match_state == VJO_HOOK_MATCH_MATCHING && !seen_hook_id);
-    TEST_CHECK(!anchor_calls && !discover_calls);
-    complete_anchor("今の画面です");
-    TEST_CHECK(g_view.hook_match_state == VJO_HOOK_MATCH_READY && anchor_calls == 1);
-}
-
-static void test_changed_picker_choice_is_not_silently_selected(void)
-{
-    native_setup(RELAY_CONFIG "text_source = hooks\n");
-    open_overlay();
-    strcpy(hook_snapshot.candidates[0].text, "別の文章");
-    hook_snapshot.sequence++;
-    poll_hooks();
-    TEST_CHECK(!strcmp(g_view.hooks[0].text, "猫を見ました"));
-    vjo_post_hook(hook_snapshot.session, 10); on_command();
-    TEST_CHECK(!job_running && !hook_snapshot.selected && g_view.hook_picker);
-    TEST_CHECK(g_view.status_is_error && strstr(g_view.status, "changed"));
-    TEST_CHECK(!strcmp(g_view.hooks[0].text, "別の文章"));
-}
-
-static void test_closed_anchor_clears_subtitle_busy(void)
-{
-    native_setup(RELAY_CONFIG "text_source = auto\n");
-    allocation_failure = 0;
-    set_subtitles(1); open_overlay();
-    TEST_ASSERT(job_running && job_anchor && g_view.strip_busy);
-    close_overlay(); on_job_done();
-    TEST_CHECK(!job_running && !g_view.strip_busy && !mem_heap && mem_uid < 0);
-    TEST_CHECK(g_view.strip_kind == VJO_STRIP_STATUS && !g_view.open);
-}
-
-static void test_ambiguous_and_stale_hook_choices(void)
-{
-    native_setup(RELAY_CONFIG "text_source = hooks\n");
-    open_overlay();
-    hook_snapshot.count = 2;
-    hook_snapshot.candidates[1] = hook_snapshot.candidates[0];
-    hook_snapshot.candidates[1].id = 11;
-    hook_snapshot.candidates[0].score = hook_snapshot.candidates[1].score = 80;
-    text_calibrated = 1;
-    poll_hooks();
-    TEST_CHECK(!hook_snapshot.selected && g_view.hook_picker && !job_running);
-    vjo_post_hook(hook_snapshot.session-1, 10);
-    on_command();
-    TEST_CHECK(!hook_snapshot.selected && !job_running);
-    TEST_CHECK(!capture_calls && !relay_connections);
-}
-
-static void test_hook_picker_without_dictionary_settings(void)
-{
-    native_setup("text_source = hooks\n");
-    open_overlay();
-    TEST_CHECK(g_view.hook_picker && !g_view.status_is_error && !job_running);
-    vjo_post_hook(hook_snapshot.session, 10); on_command();
-    TEST_ASSERT(!job_running && g_view.list && g_view.list->header);
-    TEST_CHECK(!strcmp(g_view.list->header, "猫を見ました"));
-    TEST_CHECK(!capture_calls && !relay_connections && !allocation_calls);
-}
-
-static void test_changed_hook_discards_old_lookup(void)
-{
-    native_setup(RELAY_CONFIG "text_source = hooks\n");
-    vjoTextControl(hook_snapshot.session, VJO_TEXT_FOLLOW, 10);
-    open_overlay();
-    TEST_ASSERT(job_running && job_native);
-    uint32_t checksum;
-    TEST_CHECK(run_job(&results[job_idx], &cache_data[job_idx], &checksum) == VJO_OK);
-    strcpy(hook_snapshot.current.text, "犬を見ました");
-    poll_hooks();
-    on_job_done();
-    TEST_CHECK(job_running && job_native && !strcmp(job_hook_text, "犬を見ました"));
-    TEST_ASSERT(g_view.list && g_view.list->header);
-    TEST_CHECK(!strcmp(g_view.list->header, "犬を見ました") && !capture_calls);
-}
-
-static void test_lost_hook_stays_manual(void)
-{
-    native_setup(RELAY_CONFIG "text_source = auto\n");
-    vjoTextControl(hook_snapshot.session, VJO_TEXT_FOLLOW, 10);
-    text_calibrated = 1;
-    open_overlay();
-    poll_hooks();
-    TEST_ASSERT(seen_hook_id == 10);
-    uint32_t checksum;
-    TEST_CHECK(run_job(&results[job_idx], &cache_data[job_idx], &checksum) == VJO_OK);
-    hook_snapshot.selected = 0; memset(&hook_snapshot.current, 0, sizeof(hook_snapshot.current));
-    /* The transport clears the old OCR reference when the source is lost. */
-    hook_snapshot.candidates[0].score = 0;
-    poll_hooks(); on_job_done();
-    TEST_CHECK(text_calibrated && g_view.hook_picker && !job_running && anchor_calls == 1);
-    TEST_CHECK(!capture_calls);
-}
-
-static void test_hook_cache_uses_unfiltered_source(void)
-{
-    native_setup("text_source = hooks\n");
-    strcpy(hook_snapshot.candidates[0].text, "English speaker\n猫を見ました");
-    vjoTextControl(hook_snapshot.session, VJO_TEXT_FOLLOW, 10);
-    open_overlay(); poll_hooks();
-    TEST_ASSERT(!job_running && g_view.list && g_view.list->header);
-    TEST_CHECK(!strcmp(g_view.list->header, "猫を見ました"));
-    TEST_CHECK(strcmp(g_view.list->header, seen_hook_text) != 0);
-    test_now += 400000; poll_hooks();
-    TEST_CHECK(!job_running && !capture_calls && !allocation_calls);
-}
-
-static void test_blank_selected_hook_recovers(void)
-{
-    native_setup("text_source = hooks\n");
-    vjoTextControl(hook_snapshot.session, VJO_TEXT_FOLLOW, 10);
-    hook_snapshot.current.text[0] = 0;
-    hook_snapshot.candidates[0].text[0] = 0;
-    open_overlay(); poll_hooks();
-    TEST_ASSERT(g_view.hook_picker && !job_running);
-    strcpy(hook_snapshot.current.text, "猫を見ました");
-    poll_hooks(); test_now += 400000; poll_hooks();
-    TEST_ASSERT(!g_view.hook_picker && !job_running && g_view.list && g_view.list->header);
-    TEST_CHECK(!strcmp(g_view.list->header, "猫を見ました") && !capture_calls);
-}
 
 static void remove_game_arenas(void)
 {
@@ -1310,203 +863,6 @@ static void remove_game_arenas(void)
     result_memory = NULL;
 #endif
     for (int i = 0; i < 2; i++) vjo_arena_init(&results[i], NULL, 0);
-}
-
-static void check_native_sentence(const char *sentence)
-{
-    TEST_ASSERT(g_view.list && g_view.list->header);
-    TEST_CHECK(!strcmp(g_view.list->header, sentence));
-    TEST_CHECK(g_view.list->n_entries == 0);
-    TEST_CHECK(!g_view.hook_picker && !capture_calls && !anchor_calls);
-    if (subtitles) {
-        TEST_CHECK(g_view.strip_kind == VJO_STRIP_SENTENCE && !g_view.strip_busy);
-        TEST_CHECK(!strcmp(g_view.strip_text, sentence));
-    }
-}
-
-static void test_low_memory_picker_and_raw_updates(void)
-{
-    native_setup(RELAY_CONFIG "text_source = hooks\nocr_backend = ncnn\n");
-    remove_game_arenas();
-    activate_game(7, "PCSG00415", VJO_GAME);
-    TEST_CHECK(mem_uid < 0 && allocation_calls == 0);
-    open_overlay();
-    TEST_CHECK(g_view.open && g_view.hook_picker && g_view.hook_count == 1);
-    TEST_CHECK(!g_view.status_is_error && !job_running && allocation_calls == 0);
-    set_subtitles(1);
-    TEST_CHECK(allocation_calls == 0 && !capture_calls && !anchor_calls);
-    vjo_post_hook(hook_snapshot.session, 10); on_command();
-    TEST_CHECK(allocation_calls == 1 && mem_uid < 0 && !job_running);
-    check_native_sentence("猫を見ました");
-
-    /* Kernel polling must neither require arenas nor retry allocation per tick. */
-    for (int i = 0; i < 20; i++) { test_now += 50000; poll_hooks(); }
-    TEST_CHECK(allocation_calls == 1 && !job_running);
-    strcpy(hook_snapshot.current.text, "犬を見ました");
-    hook_snapshot.sequence++;
-    poll_hooks();
-    check_native_sentence("犬を見ました");
-    TEST_CHECK(allocation_calls == 1 && !relay_connections && !posted_events);
-    test_now += BACKOFF_MIN_US;
-    poll_hooks();
-    TEST_CHECK(allocation_calls == 2 && !job_running);
-    check_native_sentence("犬を見ました");
-}
-
-static void test_native_subtitles_need_no_arena(void)
-{
-    native_setup(RELAY_CONFIG "text_source = hooks\n");
-    remove_game_arenas();
-    vjoTextControl(hook_snapshot.session, VJO_TEXT_FOLLOW, 10);
-    set_subtitles(1);
-    TEST_CHECK(!g_view.open && subtitles && !job_running && allocation_calls == 0);
-    TEST_CHECK(g_view.strip_kind == VJO_STRIP_SENTENCE && !g_view.strip_busy);
-    TEST_CHECK(!strcmp(g_view.strip_text, "猫を見ました"));
-    strcpy(hook_snapshot.current.text, "次の台詞を読みます");
-    poll_hooks(); test_now += 500000; poll_hooks();
-    TEST_CHECK(!strcmp(g_view.strip_text, "次の台詞を読みます"));
-    TEST_CHECK(!job_running && !allocation_calls && !capture_calls && !anchor_calls);
-}
-
-static void test_stale_dictionary_events_preserve_new_native_text(void)
-{
-    native_setup(RELAY_CONFIG "text_source = hooks\n");
-    vjoTextControl(hook_snapshot.session, VJO_TEXT_FOLLOW, 10);
-    set_subtitles(1);
-    open_overlay();
-    TEST_ASSERT(job_running && job_native && job_lookup);
-    uint32_t checksum;
-    TEST_ASSERT(run_job(&results[job_idx], &cache_data[job_idx], &checksum) == VJO_OK);
-    strcpy(hook_snapshot.current.text, "犬を見ました");
-    hook_snapshot.sequence++;
-    poll_hooks();
-    check_native_sentence("犬を見ました");
-    on_job_text();
-    check_native_sentence("犬を見ました");
-    on_job_done();
-    TEST_ASSERT(g_view.list && g_view.list->header);
-    TEST_CHECK(!strcmp(g_view.list->header, "犬を見ました"));
-    TEST_CHECK(!strcmp(g_view.strip_text, "犬を見ました"));
-    TEST_CHECK(!cache_ok && !capture_calls);
-}
-
-static void test_low_memory_exit_and_reopen(void)
-{
-    native_setup(RELAY_CONFIG "text_source = hooks\n");
-    remove_game_arenas();
-    open_overlay();
-    vjo_post_hook(hook_snapshot.session, 10); on_command();
-    TEST_CHECK(allocation_calls == 1 && !job_running);
-    close_overlay();
-    open_overlay();
-    check_native_sentence("猫を見ました");
-    TEST_CHECK(allocation_calls == 1); /* same failed allocation remains throttled */
-    on_game_exit();
-    TEST_CHECK(!g_view.open && !g_view.list && !subtitles && !native_game && !title_id[0]);
-    hook_snapshot.session++;
-    hook_snapshot.selected = 0;
-    memset(&hook_snapshot.current, 0, sizeof(hook_snapshot.current));
-    strcpy(hook_snapshot.candidates[0].text, "新しいゲームです");
-    activate_game(8, "PCSG00940", VJO_GAME);
-    open_overlay();
-    TEST_CHECK(g_view.hook_picker && !g_view.list && !job_running);
-    allocation_failure = 0;
-    vjo_post_hook(hook_snapshot.session, 10); on_command();
-    TEST_CHECK(allocation_calls == 2 && mem_uid >= 0 && job_running && job_native);
-    TEST_ASSERT(g_view.list && g_view.list->header);
-    TEST_CHECK(!strcmp(g_view.list->header, "新しいゲームです"));
-}
-
-static void test_native_arena_exhaustion_preserves_raw_text(void)
-{
-    native_setup(RELAY_CONFIG "text_source = hooks\n");
-    vjoTextControl(hook_snapshot.session, VJO_TEXT_FOLLOW, 10);
-    set_subtitles(1); open_overlay(); poll_hooks();
-    TEST_ASSERT(job_running && job_native);
-    vjo_arena_init(&results[job_idx], result_mem[job_idx], 1);
-    uint32_t checksum;
-    TEST_CHECK(run_job(&results[job_idx], &cache_data[job_idx], &checksum) == VJO_E_OOM);
-    on_job_text(); on_job_done();
-    TEST_CHECK(!job_running && !cache_ok && g_view.status_is_error);
-    check_native_sentence("猫を見ました");
-    int64_t until = ocr_backoff.until > dict_backoff.until ? ocr_backoff.until : dict_backoff.until;
-    TEST_ASSERT(until > (int64_t)test_now);
-    test_now = (uint64_t)(until-1); poll_hooks();
-    TEST_CHECK(!job_running);
-    check_native_sentence("猫を見ました");
-    test_now++; poll_hooks();
-    TEST_CHECK(job_running && job_native && !allocation_calls && !relay_connections);
-}
-
-static void test_native_pipeline_change_discards_old_dictionary(void)
-{
-    native_setup(RELAY_CONFIG "text_source = hooks\n");
-    vjoTextControl(hook_snapshot.session, VJO_TEXT_FOLLOW, 10);
-    set_subtitles(1); open_overlay();
-    TEST_ASSERT(job_running && job_native);
-    uint32_t checksum;
-    TEST_ASSERT(run_job(&results[job_idx], &cache_data[job_idx], &checksum) == VJO_OK);
-    TEST_ASSERT(cache_data[job_idx].list.n_entries == 1);
-    loaded_config.dictionary = VJO_DICT_LOCAL;
-    strcpy(loaded_config.local_dictionaries, "replacement.vjdict");
-    apply_config();
-    TEST_ASSERT(!same_pipeline(&job_cfg, &cfg));
-    on_job_text();
-    check_native_sentence("猫を見ました");
-    on_job_done();
-    TEST_CHECK(job_running && job_native && same_pipeline(&job_cfg, &cfg));
-    TEST_CHECK(!cache_ok);
-    check_native_sentence("猫を見ました");
-}
-
-static void test_native_heap_lookup_and_cleanup(void)
-{
-    native_setup(RELAY_CONFIG "text_source = hooks\n");
-    remove_game_arenas();
-    heap_available = 1;
-    vjoTextControl(hook_snapshot.session, VJO_TEXT_FOLLOW, 10);
-    open_overlay();
-    TEST_ASSERT(job_running && job_native && mem_heap == heap_mem && mem_uid < 0);
-    TEST_CHECK(heap_calls == 1 && allocation_calls == 1);
-    TEST_CHECK(results[0].size == NATIVE_ARENA_SIZE && results[1].size == NATIVE_ARENA_SIZE);
-    TEST_CHECK(results[1].base == heap_mem + NATIVE_ARENA_SIZE);
-    uint32_t checksum;
-    TEST_ASSERT(run_job(&results[job_idx], &cache_data[job_idx], &checksum) == VJO_OK);
-    on_job_text(); on_job_done();
-    TEST_ASSERT(g_view.list && g_view.list->n_entries == 1);
-    TEST_CHECK(!strcmp(g_view.list->header, "猫を見ました"));
-    TEST_CHECK(results[active].peak <= NATIVE_ARENA_SIZE);
-    on_game_exit();
-    TEST_CHECK(heap_frees == 1 && allocation_frees == 0 && !mem_heap && !g_view.list);
-    TEST_CHECK(!results[0].base && !results[1].base);
-    mem_free();
-    TEST_CHECK(heap_frees == 1);
-}
-
-static void test_native_heap_retires_for_ocr(void)
-{
-    native_setup(RELAY_CONFIG "text_source = hooks\n");
-    remove_game_arenas();
-    heap_available = 1;
-    vjoTextControl(hook_snapshot.session, VJO_TEXT_FOLLOW, 10);
-    vjoTextRead(&text_state);
-    TEST_ASSERT(mem_alloc() == 0 && mem_heap);
-    cfg.text_source = VJO_SOURCE_OCR;
-    allocation_failure = 0;
-    TEST_ASSERT(mem_alloc() == 0);
-    TEST_CHECK(heap_frees == 1 && !mem_heap && has_result_memory());
-#ifdef VJO_PAF_ALLOC
-    TEST_CHECK(result_memory == result_mem && mem_uid < 0 && paf_allocations == 1);
-#else
-    TEST_CHECK(mem_uid >= 0);
-#endif
-    TEST_CHECK(results[0].size == RESULT_ARENA_SIZE && results[1].size == RESULT_ARENA_SIZE);
-    mem_free();
-#ifdef VJO_PAF_ALLOC
-    TEST_CHECK(!allocation_frees && paf_frees == 1 && heap_frees == 1);
-#else
-    TEST_CHECK(allocation_frees == 1 && heap_frees == 1);
-#endif
 }
 
 static void test_result_memory_reuse_and_job_gate(void)
@@ -1728,11 +1084,9 @@ static void test_worker_stop_bridge_failure_then_retry(void)
 #if defined(VJO_WITH_MEIKI) && !defined(VJO_MEIKI_GAME_WORKER)
 static void meiki_capture_setup(void)
 {
-    native_setup(RELAY_CONFIG "text_source = ocr\nocr_backend = meiki\n"
+    game_setup(RELAY_CONFIG "text_source = ocr\nocr_backend = meiki\n"
                  "meiki_layout = dialogue_box\nocr_mode = auto\n");
-    /* Even a game with an available native source must remain OCR-only. */
-    hook_snapshot.selected = hook_snapshot.candidates[0].id;
-    hook_snapshot.current = hook_snapshot.candidates[0];
+    /* A retail-game context uses the selected screenshot for OCR. */
     activate_game(7, "PCSG00001", VJO_GAME);
     region_selected = 1;
     bridge_start_error = VJO_OK;
@@ -1751,21 +1105,13 @@ static void meiki_capture_setup(void)
     plat.plain_http = 1;
 }
 
-static void test_meiki_ocr_source_blocks_native_and_lens(void)
+static void test_meiki_capture_without_lens(void)
 {
     meiki_capture_setup();
     TEST_CHECK(VJO_API_VERSION == 9 && cfg.text_source == VJO_SOURCE_OCR);
-    TEST_CHECK(!native_enabled() && !auto_mode() && !background_wanted());
-    poll_hooks();
-    pending_cmd = VJO_CMD_HOOK_DISCOVER;
-    on_command();
-    vjo_post_hook(hook_snapshot.session, hook_snapshot.selected);
-    on_command();
-    TEST_CHECK(!text_reads && !text_controls && !anchor_calls && !discover_calls);
-    TEST_CHECK(!text_started && !g_view.hook_picker && !job_running);
-
+    TEST_CHECK(!auto_mode() && !background_wanted() && !job_running);
     open_overlay();
-    TEST_ASSERT(job_running && !job_native && !job_anchor && job_region_selected);
+    TEST_ASSERT(job_running && job_region_selected);
     job_lookup = 0; /* Exercise the OCR boundary without a dictionary socket. */
     uint32_t checksum = 0;
     TEST_ASSERT(run_job(&results[job_idx], &cache_data[job_idx], &checksum) == VJO_OK);
@@ -1778,8 +1124,6 @@ static void test_meiki_ocr_source_blocks_native_and_lens(void)
     TEST_CHECK(!capture_connections && !relay_connections);
     on_job_text();
     job_done = 1; on_job_done();
-    TEST_CHECK(!job_running && !g_view.hook_picker && !text_started);
-    TEST_CHECK(!text_reads && !text_controls && !anchor_calls && !discover_calls);
     on_game_exit();
     TEST_CHECK(!has_result_memory() && !meiki_bridge.workspace && !g_view.list);
 }
@@ -1807,14 +1151,14 @@ static void test_meiki_capture_errors_cleanup_without_fallback(void)
         bridge_inference_error = cases[i].inference_error;
         bridge_finish_error = cases[i].finish_error;
         open_overlay();
-        TEST_ASSERT(job_running && !job_native && !job_anchor);
+        TEST_ASSERT(job_running);
         uint32_t checksum = 0;
         int rc = run_job(&results[job_idx], &cache_data[job_idx], &checksum);
         TEST_CHECK_(rc == cases[i].expected, "%s: rc=%d", cases[i].name, rc);
         TEST_CHECK(cache_data[job_idx].failed_stage == VJO_STAGE_OCR && !job_text_ready);
         TEST_CHECK(bridge_starts == cases[i].starts && bridge_recognitions == cases[i].recognitions);
         TEST_CHECK(bridge_finishes == 1 && capture_flags == 0 && !discard_requests);
-        TEST_CHECK(!capture_connections && !relay_connections && !text_reads && !text_controls);
+        TEST_CHECK(!capture_connections && !relay_connections);
         if (cases[i].finish_error) {
             TEST_CHECK(meiki_bridge.module == 77 && meiki_bridge.metadata == borrowed_metadata);
             TEST_CHECK(meiki_bridge.workspace == borrowed_workspace && meiki_bridge.input == bridge_tensor);
@@ -1823,7 +1167,6 @@ static void test_meiki_capture_errors_cleanup_without_fallback(void)
         }
         TEST_CHECK(meiki_bridge.module == -1 && !meiki_bridge.workspace);
         job_done = 1; on_job_done();
-        TEST_CHECK(!job_running && g_view.status_is_error && !g_view.hook_picker);
         on_game_exit();
         TEST_CHECK(!has_result_memory() && !results[0].base && !results[1].base);
     }
@@ -1835,7 +1178,7 @@ static void test_game_meiki_dispatch_and_failure(void)
 {
     const int expected[] = {VJO_OK, VJO_E_OOM, VJO_E_OCR_UNAVAILABLE};
     for (unsigned i = 0; i < sizeof(expected)/sizeof(expected[0]); i++) {
-        native_setup(RELAY_CONFIG "text_source = ocr\nocr_backend = meiki\n"
+        game_setup(RELAY_CONFIG "text_source = ocr\nocr_backend = meiki\n"
                      "meiki_layout = dialogue_box\nocr_mode = on_press\n");
         activate_game(7, "PCSG00001", VJO_GAME);
         region_selected = 1; capture_reply = 71; capture_waits = 2;
@@ -1845,7 +1188,7 @@ static void test_game_meiki_dispatch_and_failure(void)
         if (i == 1) game_engine_reply = VJO_E_OOM;
         if (i == 2) game_submit_reply = -1;
         open_overlay();
-        TEST_ASSERT(job_running && !job_native && !job_anchor);
+        TEST_ASSERT(job_running);
         TEST_CHECK(RESULT_ARENA_SIZE == 160 * 1024);
         job_lookup = 0;
         uint32_t checksum = 0;
@@ -1853,7 +1196,7 @@ static void test_game_meiki_dispatch_and_failure(void)
         TEST_CHECK(game_submits == 1 && game_reads == (i == 2 ? 0u : 1u));
         TEST_CHECK(game_request.layout == VJO_GAME_OCR_DIALOGUE_BOX && !game_cancels);
         TEST_CHECK(capture_flags == 0 && capture_calls == 1 && !raw_calls);
-        TEST_CHECK(!text_reads && !text_controls && !anchor_calls && !discover_calls && !relay_connections);
+        TEST_CHECK(!relay_connections);
         if (!i) {
             TEST_CHECK(!strcmp(cache_data[job_idx].sentence, "猫"));
             TEST_CHECK(checksum == kernel_state.capture_checksum && job_text_ready);
@@ -1866,7 +1209,7 @@ static void test_game_meiki_dispatch_and_failure(void)
 }
 static void test_game_meiki_model_access_error(void)
 {
-    native_setup(RELAY_CONFIG "text_source = ocr\nocr_backend = meiki\nocr_mode = on_press\n");
+    game_setup(RELAY_CONFIG "text_source = ocr\nocr_backend = meiki\nocr_mode = on_press\n");
     activate_game(7, "PCSG00001", VJO_GAME);
     region_selected = 1; capture_reply = 71;
     kernel_state.width = 96; kernel_state.height = 32;
@@ -1874,7 +1217,7 @@ static void test_game_meiki_model_access_error(void)
     game_engine_reply = VJO_E_OCR_MODEL_IO;
     game_error_metadata = "MIO1:R:O:8001000D:P:00000000";
     open_overlay();
-    TEST_ASSERT(job_running && !job_native);
+    TEST_ASSERT(job_running);
     job_lookup = 0;
     uint32_t checksum = 0;
     TEST_CHECK(run_job(&results[job_idx], &cache_data[job_idx], &checksum) == VJO_E_OCR_MODEL_IO);
@@ -1884,7 +1227,7 @@ static void test_game_meiki_model_access_error(void)
     TEST_CHECK(strstr(out->err.detail, "open the recognizer model (0x8001000D)") != NULL);
     TEST_CHECK(strstr(out->err.detail, "Keep the installed model files") != NULL);
     TEST_CHECK(!strstr(out->err.detail, "Install") && !strstr(out->err.detail, "MIO1"));
-    TEST_CHECK(!job_text_ready && !text_reads && !relay_connections && !raw_calls);
+    TEST_CHECK(!job_text_ready && !relay_connections && !raw_calls);
     job_done = 1; on_job_done(); on_game_exit();
     TEST_CHECK(!has_result_memory());
     game_error_metadata = NULL;
@@ -1960,23 +1303,7 @@ static void test_diagnostic_probes_only_for_idle_pure_meiki(void)
         TEST_CHECK(!diagnostic_paf_calls && !diagnostic_pool_calls);
     }
 
-    /* Auto text mode on a non-native game still must not run these probes. */
-    setup("text_source = auto\nocr_backend = meiki\n" RELAY_CONFIG);
-    TEST_ASSERT(!native_enabled() && cfg.text_source == VJO_SOURCE_AUTO);
-    start_job("automatic text mode", 0);
-    TEST_CHECK(job_running && !diagnostic_paf_calls && !diagnostic_pool_calls);
 
-    native_setup("text_source = hooks\nocr_backend = meiki\n" RELAY_CONFIG);
-    TEST_ASSERT(native_enabled());
-    ov = OV_OPEN;
-    start_job("native hook picker", 0);
-    TEST_CHECK(g_view.hook_picker && !job_running);
-    TEST_CHECK(!diagnostic_paf_calls && !diagnostic_pool_calls);
-    vjoTextControl(hook_snapshot.session, VJO_TEXT_FOLLOW, 10);
-    vjoTextRead(&text_state);
-    start_job("selected native hook", 1);
-    TEST_CHECK(job_running && job_native);
-    TEST_CHECK(!diagnostic_paf_calls && !diagnostic_pool_calls);
 }
 
 static void test_diagnostic_probes_precede_result_allocation_and_job(void)
@@ -1988,13 +1315,12 @@ static void test_diagnostic_probes_precede_result_allocation_and_job(void)
         diagnostic_observe_idle = diagnostic_expect_no_results = 1;
         diagnostic_probe_error = allowed[i];
         /* Native-game context must still use pure OCR when configured so. */
-        native_game = 1;
         start_job("diagnostic ordering", 0);
         TEST_CHECK(diagnostic_paf_calls == 1 && diagnostic_pool_calls == 1);
         TEST_CHECK(diagnostic_order == 3 && paf_allocations == 1);
-        TEST_CHECK(job_running && !job_native && !job_anchor && has_result_memory());
+        TEST_CHECK(job_running && has_result_memory());
         TEST_CHECK(posted_events == NET_EV_JOB && !capture_calls);
-        TEST_CHECK(!diagnostic_failure && !text_reads && !text_controls);
+        TEST_CHECK(!diagnostic_failure);
         start_job("running job refuses another probe", 0);
         TEST_CHECK(diagnostic_paf_calls == 1 && diagnostic_pool_calls == 1);
     }
@@ -2011,7 +1337,6 @@ static void test_diagnostic_failures_stick_without_allocation_or_ocr(void)
         open_overlay();
         TEST_CHECK(diagnostic_failure == errors[i]);
         TEST_CHECK(diagnostic_paf_calls == 1 && diagnostic_pool_calls == 1);
-        TEST_CHECK(g_view.open && g_view.status_is_error && !g_view.hook_picker);
         TEST_CHECK(strstr(g_view.status, "Memory diagnostic failed") != NULL);
         TEST_CHECK(!job_running && !posted_events && !has_result_memory());
         TEST_CHECK(!paf_allocations && !allocation_calls && !capture_calls && !bridge_starts);
@@ -2081,33 +1406,7 @@ TEST_LIST = {
     {"worker_stop_diagnostic_cleanup_failure_then_retry", test_worker_stop_diagnostic_cleanup_failure_then_retry},
     {"diagnostic_startup_skips_anki_and_defers_probes", test_diagnostic_startup_skips_anki_and_defers_probes},
 #endif
-    {"capture_allocation_status_identifies_physical_error", test_capture_allocation_status_identifies_physical_error},
     {"local_capture_keeps_multiple_passes", test_local_capture_keeps_multiple_passes},
-    {"capture_rows_jpeg_lens_anchor", test_capture_rows_jpeg_lens_anchor},
-    {"capture_failures_do_not_upload", test_capture_failures_do_not_upload},
-    {"closed_anchor_clears_subtitle_busy", test_closed_anchor_clears_subtitle_busy},
-    {"changed_picker_choice_is_not_silently_selected", test_changed_picker_choice_is_not_silently_selected},
-    {"reopen_during_anchor_discards_old_screenshot", test_reopen_during_anchor_discards_old_screenshot},
-    {"dictionary_to_picker_reads_new_screenshot", test_dictionary_to_picker_reads_new_screenshot},
-    {"anchor_heap_lifecycle_and_stable_matches", test_anchor_heap_lifecycle_and_stable_matches},
-    {"anchor_oom_is_explicit_and_retryable", test_anchor_oom_is_explicit_and_retryable},
-    {"anchor_cancel_frees_only_after_done", test_anchor_cancel_frees_only_after_done},
-    {"native_heap_lookup_and_cleanup", test_native_heap_lookup_and_cleanup},
-    {"native_heap_retires_for_ocr", test_native_heap_retires_for_ocr},
-    {"low_memory_picker_and_raw_updates", test_low_memory_picker_and_raw_updates},
-    {"native_subtitles_need_no_arena", test_native_subtitles_need_no_arena},
-    {"stale_dictionary_events_preserve_new_native_text", test_stale_dictionary_events_preserve_new_native_text},
-    {"low_memory_exit_and_reopen", test_low_memory_exit_and_reopen},
-    {"native_arena_exhaustion_preserves_raw_text", test_native_arena_exhaustion_preserves_raw_text},
-    {"native_pipeline_change_discards_old_dictionary", test_native_pipeline_change_discards_old_dictionary},
-    {"manual_hook_bypasses_capture_and_ocr", test_manual_hook_bypasses_capture_and_ocr},
-    {"automatic_hooks_match_once_and_handle_ocr_failure", test_automatic_hooks_match_once_and_handle_ocr_failure},
-    {"ambiguous_and_stale_hook_choices", test_ambiguous_and_stale_hook_choices},
-    {"hook_picker_without_dictionary_settings", test_hook_picker_without_dictionary_settings},
-    {"changed_hook_discards_old_lookup", test_changed_hook_discards_old_lookup},
-    {"lost_hook_stays_manual", test_lost_hook_stays_manual},
-    {"hook_cache_uses_unfiltered_source", test_hook_cache_uses_unfiltered_source},
-    {"blank_selected_hook_recovers", test_blank_selected_hook_recovers},
     {"result_memory_reuse_and_job_gate", test_result_memory_reuse_and_job_gate},
     {"game_exit_frees_idle_result_memory", test_game_exit_frees_idle_result_memory},
     {"game_exit_during_job_frees_after_cancelled_completion", test_game_exit_during_job_frees_after_cancelled_completion},
@@ -2117,7 +1416,7 @@ TEST_LIST = {
     {"worker_stop_anki_failure_then_retry", test_worker_stop_anki_failure_then_retry},
 #if defined(VJO_WITH_MEIKI) && !defined(VJO_MEIKI_GAME_WORKER)
     {"worker_stop_bridge_failure_then_retry", test_worker_stop_bridge_failure_then_retry},
-    {"meiki_ocr_source_blocks_native_and_lens", test_meiki_ocr_source_blocks_native_and_lens},
+    {"meiki_capture_without_lens", test_meiki_capture_without_lens},
     {"meiki_capture_errors_cleanup_without_fallback", test_meiki_capture_errors_cleanup_without_fallback},
 #endif
 #ifdef VJO_PAF_ALLOC
@@ -2131,6 +1430,7 @@ TEST_LIST = {
 #endif
     {"meiki_layout_invalidates_cache", test_meiki_layout_invalidates_cache},
     {"ocr_context_changes", test_ocr_context_changes},
+    {"legacy_source_settings_use_visual_ocr", test_legacy_source_settings_use_visual_ocr},
     {"region_change_redoes_subtitle_job", test_region_change_redoes_subtitle_job},
     {"local_worker_and_config_changes", test_local_worker_and_config_changes},
     {"manual_relay_without_keys", test_manual_relay_without_keys},

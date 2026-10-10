@@ -79,8 +79,8 @@ void vjo_config_defaults(VjoConfig *c)
     c->toggle_button = VJO_TRIGGER_L_R;
     c->subtitle_button = VJO_TRIGGER_SELECT_R;
     c->ocr_mode = VJO_OCR_AUTO;
-    c->ocr_backend = VJO_OCR_LENS;
-    c->text_source = VJO_SOURCE_AUTO;
+    c->ocr_backend = VJO_OCR_MEIKI;
+    c->text_source = VJO_SOURCE_OCR;
     c->meiki_layout = VJO_MEIKI_SINGLE_LINE;
     vjo_snprintf(c->ocr_model_dir, sizeof(c->ocr_model_dir), "ux0:data/VitaJPOverlay/ocr");
     vjo_snprintf(c->anki_deck, sizeof(c->anki_deck), "Default");
@@ -131,13 +131,13 @@ const char *vjo_config_default_text(void)
            "; acts on release.\n"
            "subtitle_button = select+r\n"
            "\n"
-           "; Text: auto (read screenshot and show native text matches) | hooks (manual, no OCR) | ocr\n"
-           "text_source = auto\n"
+           "; Text: ocr (visual OCR only on this experimental branch)\n"
+           "text_source = ocr\n"
            "\n"
            "; OCR: lens (online) | ncnn (PP-OCRv5 mobile) | meiki (Meiki horizontal OCR)\n"
            "; Local OCR requires its matching model and a selected dialogue region; see docs/local-ocr.md.\n"
            "; Local OCR runs only on a button press, including subtitle refresh. No cloud fallback.\n"
-           "ocr_backend = lens\n"
+           "ocr_backend = meiki\n"
            "ocr_model_dir = ux0:data/VitaJPOverlay/ocr\n"
            "; Meiki: single_line (select one line) | dialogue_box (detect horizontal lines in the selection).\n"
            "meiki_layout = single_line\n"

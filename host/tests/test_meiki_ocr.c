@@ -124,7 +124,7 @@ static void test_config_backends_and_no_jpeg_upload(void)
     const int values[] = {VJO_OCR_LENS, VJO_OCR_NCNN, VJO_OCR_MEIKI, VJO_OCR_MEIKI};
     VjoConfig cfg;
     vjo_config_defaults(&cfg);
-    TEST_CHECK(cfg.ocr_backend == VJO_OCR_LENS);
+    TEST_CHECK(cfg.ocr_backend == VJO_OCR_MEIKI && cfg.text_source == VJO_SOURCE_OCR);
     TEST_CHECK(cfg.meiki_layout == VJO_MEIKI_SINGLE_LINE);
     for (unsigned i = 0; i < sizeof(values) / sizeof(values[0]); ++i) {
         char config[80];
@@ -144,11 +144,11 @@ static void test_config_backends_and_no_jpeg_upload(void)
     vjo_config_defaults(&cfg);
     const char invalid[] = "ocr_backend = unknown\n";
     vjo_config_parse(&cfg, invalid, sizeof(invalid) - 1);
-    TEST_CHECK(cfg.ocr_backend == VJO_OCR_LENS && cfg.n_warnings == 1);
+    TEST_CHECK(cfg.ocr_backend == VJO_OCR_MEIKI && cfg.n_warnings == 1);
     const char box[] = "meiki_layout = DiAlOgUe_BoX\n";
     vjo_config_defaults(&cfg); vjo_config_parse(&cfg, box, sizeof(box) - 1);
     TEST_CHECK(cfg.meiki_layout == VJO_MEIKI_DIALOGUE_BOX && !cfg.n_warnings);
-    TEST_CHECK(cfg.ocr_backend == VJO_OCR_LENS && cfg.ocr_mode == VJO_OCR_AUTO);
+    TEST_CHECK(cfg.ocr_backend == VJO_OCR_MEIKI && cfg.ocr_mode == VJO_OCR_AUTO);
     const char single[] = "meiki_layout = SINGLE_LINE\n";
     vjo_config_parse(&cfg, single, sizeof(single) - 1);
     TEST_CHECK(cfg.meiki_layout == VJO_MEIKI_SINGLE_LINE && !cfg.n_warnings);

@@ -9,7 +9,6 @@
 #include <taihen.h>
 
 #include "vjo_kernel.h"
-#include "text.h"
 
 VjoKernelState g;
 
@@ -181,7 +180,6 @@ static int worker(SceSize args, void *argp)
         }
 
         input_poll();
-        text_tick();
         buffers_trim();
         if (++tick % CHECK_EVERY == 0)
             change_detection();
@@ -438,10 +436,6 @@ int module_start(SceSize argc, const void *args)
         delete_sync_objects();
         return SCE_KERNEL_START_FAILED;
     }
-    if (text_init() < 0) {
-        delete_sync_objects();
-        return SCE_KERNEL_START_FAILED;
-    }
 
     {
         int d = display_hook_install(), i = input_hooks_install(), l = lifecycle_hooks_install();
@@ -455,7 +449,6 @@ int module_start(SceSize argc, const void *args)
             ksceKernelDeleteThread(worker_uid);
         worker_uid = -1;
         release_hooks();
-        text_shutdown();
         delete_sync_objects();
         return SCE_KERNEL_START_FAILED;
     }
@@ -481,7 +474,6 @@ int module_stop(SceSize argc, const void *args)
         ksceKernelDeleteThread(worker_uid);
     }
     release_hooks();
-    text_shutdown();
     VJO_LOCK();
     buffers_free();
     VJO_UNLOCK();

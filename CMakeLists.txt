@@ -2,7 +2,7 @@
 # The Vita build lives in vita/CMakeLists.txt.
 cmake_minimum_required(VERSION 3.16)
 project(vita_jp_overlay_host C CXX)
-option(VJO_WITH_NCNN "Build the CPU-only local mobile OCR recognizer" ON)
+option(VJO_WITH_NCNN "Build the CPU-only local mobile OCR recognizer" OFF)
 option(VJO_WITH_MEIKI "Build the portable Meiki region adapter" OFF)
 option(VJO_MEIKI_GAME_WORKER "Build tests for the optional game-process OCR worker" OFF)
 if(VJO_MEIKI_GAME_WORKER AND NOT VJO_WITH_MEIKI)
@@ -25,8 +25,7 @@ set(CORE_SRC
   core/arena.c core/pb.c core/utf.c core/lens.c core/json.c core/jpdb.c
   core/textfilter.c core/entries.c core/jiten.c core/config.c core/regions.c
   core/http.c core/tls.c core/tls_roots.c core/client.c core/styled.c core/jpegsw.c
-  core/base64.c core/anki.c core/anki_queue.c core/net.c core/hachidori.c core/local_dict.c core/ocr_lines.c
-  core/text_source.c core/text_match.c core/text_scan.c core/hook_profile.c)
+  core/base64.c core/anki.c core/anki_queue.c core/net.c core/hachidori.c core/local_dict.c core/ocr_lines.c)
 add_library(vjo_core STATIC ${CORE_SRC})
 target_include_directories(vjo_core PUBLIC core include)
 target_link_libraries(vjo_core PUBLIC bearssl)
@@ -53,15 +52,6 @@ add_executable(vjo-jpegsw host/jpegsw_tool.c)
 target_link_libraries(vjo-jpegsw vjo_host)
 
 enable_testing()
-add_executable(vjo-text-tests host/tests/test_text_source.c text/tests/cases.c)
-target_link_libraries(vjo-text-tests vjo_core)
-target_compile_options(vjo-text-tests PRIVATE -Wall -Wextra)
-add_test(NAME text_sources COMMAND vjo-text-tests)
-add_executable(vjo-kernel-text-tests host/tests/test_kernel_text.c)
-target_include_directories(vjo-kernel-text-tests PRIVATE third_party/acutest/include host/tests/vita_stubs)
-target_compile_options(vjo-kernel-text-tests PRIVATE -Wall -Wextra -Wno-unused-parameter)
-target_link_libraries(vjo-kernel-text-tests vjo_core)
-add_test(NAME kernel_text COMMAND vjo-kernel-text-tests)
 add_executable(vjo-kernel-game-ocr-tests host/tests/test_kernel_game_ocr.c)
 target_include_directories(vjo-kernel-game-ocr-tests PRIVATE third_party/acutest/include host/tests/vita_stubs)
 target_compile_options(vjo-kernel-game-ocr-tests PRIVATE -Wall -Wextra -Wno-unused-parameter)
@@ -176,7 +166,6 @@ add_test(NAME anki_queue COMMAND vjo-anki-queue-tests)
 
 # End-to-end ZIP conversion and disk lookup, using the actual CLI/runtime.
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
-add_test(NAME cp932_table COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/generate_cp932.py --check)
 if(VJO_WITH_NCNN)
   add_executable(vjo-ocr-tests host/tests/test_ocr.c)
   target_include_directories(vjo-ocr-tests PRIVATE third_party/acutest/include)

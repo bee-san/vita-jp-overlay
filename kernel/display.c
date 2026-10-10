@@ -7,7 +7,6 @@
 #include <taihen.h>
 
 #include "vjo_kernel.h"
-#include "text.h"
 
 static tai_hook_ref_t hook_ref;
 static SceUID hook_uid = -1;
@@ -68,7 +67,7 @@ static void on_frame(const GameFb *fb)
     g.fb_w = fb->w;
     g.fb_h = fb->h;
 
-    if (g.game_active && text_uses_frame_checks() && g.capture_state == CAPTURE_IDLE &&
+    if (g.game_active && g.capture_state == CAPTURE_IDLE &&
         ++frame_n % VJO_CHECK_EVERY_FRAMES == 0) {
         uint32_t cs = region_checksum_hook(fb->base, fb->pitch, fb->fmt, fb->w, fb->h);
         if (cs) {

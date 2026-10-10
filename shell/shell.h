@@ -9,7 +9,6 @@
 #include "../core/client.h"
 #include "../core/config.h"
 #include "../include/vjo_api.h"
-#include "../include/vjo_text.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -29,12 +28,6 @@ extern "C" {
 enum { VJO_ANKI_STATUS_DIM = 0, VJO_ANKI_STATUS_ERROR = 1 };
 /* VjoView.strip_kind */
 enum { VJO_STRIP_SENTENCE = 0, VJO_STRIP_STATUS = 1, VJO_STRIP_ERROR = 2 };
-enum {
-    VJO_HOOK_MATCH_NONE = 0,
-    VJO_HOOK_MATCH_MATCHING,
-    VJO_HOOK_MATCH_READY,
-    VJO_HOOK_MATCH_FAILED,
-};
 #define VJO_STRIP_MAX 4096 /* bytes of UTF-8 */
 
 /* ---- view model read by the overlay (under vjo_view_lock) ---- */
@@ -66,13 +59,6 @@ typedef struct {
     char strip_text[VJO_STRIP_MAX]; /* "" = no strip drawn */
     int strip_kind;           /* VJO_STRIP_* */
     int strip_busy;           /* a recognition is running */
-    int hook_picker;
-    int hook_match_state;     /* VJO_HOOK_MATCH_*; scores need a valid screenshot */
-    int hook_ocr_available;   /* explicit screenshot retry is actionable */
-    char hook_reference[256]; /* bounded UTF-8 excerpt of the matched screenshot */
-    uint32_t hook_session;
-    unsigned hook_count;
-    VjoTextCandidate hooks[VJO_TEXT_CHOICES];
 } VjoView;
 
 extern VjoView g_view;
@@ -85,12 +71,8 @@ enum {
     VJO_CMD_CLOSED,          /* overlay closed by ○ */
     VJO_CMD_SET_REGION,      /* region selected (rect passed to vjo_post_command) */
     VJO_CMD_CLEAR_REGION,    /* hold □ */
-    VJO_CMD_HOOK_DISCOVER,
-    VJO_CMD_HOOK_SELECT,
-    VJO_CMD_HOOK_OCR,
 };
 void vjo_post_command(int cmd, const VjoRect *rect);
-void vjo_post_hook(uint32_t session, uint32_t id);
 
 /* worker.c */
 int vjo_worker_start(void);

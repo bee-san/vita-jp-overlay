@@ -42,7 +42,7 @@ typedef struct {
     int ocr_mode;             /* VJO_OCR_* */
     int ocr_backend;          /* VJO_OCR_LENS | VJO_OCR_NCNN | VJO_OCR_MEIKI */
     int meiki_layout;         /* VJO_MEIKI_SINGLE_LINE | VJO_MEIKI_DIALOGUE_BOX */
-    int text_source;          /* OCR, one-time OCR-assisted discovery, or hooks only */
+    int text_source;          /* Legacy values parse; this branch always uses OCR. */
     char ocr_model_dir[160];
     char log_host[64];        /* "" = UDP log off */
     int log_file;             /* 0/1 */

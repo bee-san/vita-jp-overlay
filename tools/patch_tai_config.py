@@ -2,22 +2,19 @@
 """Patch only this overlay's taiHEN entries; preserve other plugins and CRLF."""
 import argparse
 from pathlib import Path
-import re
 
 KERNEL = "ur0:tai/VitaJPOverlay_Kernel.skprx"
 SHELL = "ur0:tai/VitaJPOverlay_Shell.suprx"
 TEXT = "ur0:tai/VitaJPOverlay_Text.suprx"
+OCR = "ur0:tai/VitaJPOverlay_OCR.suprx"
 
 
-def patch(raw: bytes, titles=(), extra_kernel=(), uninstall=False) -> bytes:
-    for title in titles:
-        if not re.fullmatch(r"[A-Z0-9]{9}", title):
-            raise ValueError(f"invalid Vita title ID: {title}")
+def patch(raw: bytes, extra_kernel=(), uninstall=False) -> bytes:
     source = raw.decode("utf-8")
     newline = "\r\n" if "\r\n" in source else "\n"
     lines = source.splitlines()
     if uninstall:
-        lines = [line for line in lines if line.strip() not in (KERNEL, SHELL, TEXT)]
+        lines = [line for line in lines if line.strip() not in (KERNEL, SHELL, TEXT, OCR)]
     else:
         def add(section, plugin):
             begin = next((i for i, line in enumerate(lines) if line.strip() == section), None)
@@ -31,15 +28,10 @@ def patch(raw: bytes, titles=(), extra_kernel=(), uninstall=False) -> bytes:
         for plugin in extra_kernel:
             add("*KERNEL", plugin)
         add("*main", SHELL)
-        # A pre-existing global entry already covers every title.
-        global_begin = next((i for i, line in enumerate(lines) if line.strip() == "*ALL"), None)
-        global_text = False
-        if global_begin is not None:
-            end = next((i for i in range(global_begin + 1, len(lines)) if lines[i].strip().startswith("*")), len(lines))
-            global_text = any(line.strip() == TEXT for line in lines[global_begin + 1:end])
-        if not global_text:
-            for title in titles:
-                add("*" + title, TEXT)
+        # Keep this branch's per-game OCR registrations active. Native text
+        # extraction belongs to its own branch; preserve its entries as comments.
+        lines = [("# Meiki OCR only: " + line) if line.strip() == TEXT else line
+                 for line in lines]
     return (newline.join(lines) + newline).encode("utf-8")
 
 
@@ -47,12 +39,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", type=Path)
     parser.add_argument("output", type=Path)
-    parser.add_argument("--text-title", action="append", default=[])
     parser.add_argument("--kernel-plugin", action="append", default=[])
     parser.add_argument("--uninstall", action="store_true")
     args = parser.parse_args()
     try:
-        args.output.write_bytes(patch(args.source.read_bytes(), args.text_title, args.kernel_plugin, args.uninstall))
+        args.output.write_bytes(patch(args.source.read_bytes(), args.kernel_plugin, args.uninstall))
     except (OSError, ValueError) as error:
         parser.error(str(error))
 

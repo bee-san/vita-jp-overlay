@@ -33,7 +33,7 @@ typedef struct {
     /* foreground game (VjoForeground in foreground.h) */
     volatile SceUID game_pid;
     volatile int game_active;  /* the shell confirmed game_pid is a game: its VJO_GAME* mode */
-    volatile uint32_t text_epoch; /* invalidates sources even on a fast same-PID suspend/resume */
+    volatile uint32_t text_epoch; /* invalidates OCR jobs even on a fast same-PID suspend/resume */
     SceUID prev_game_pid;      /* confirmed game behind game_pid, still running */
 
     /* last game frame seen (index 0, primary head; submitted or sampled) */
@@ -57,7 +57,7 @@ typedef struct {
     uint32_t capture_checksum;
     int64_t capture_requested_us;
     volatile int raw_valid;
-    volatile int capture_release; /* release an idle buffer after switching to native text */
+    volatile int capture_release; /* deferred release of an idle capture buffer */
     uint32_t capture_seq;      /* bumped per request */
     SceUID capture_game_pid;   /* owner when requested, separate from the current foreground */
     uint32_t capture_epoch;    /* suspend/resume invalidates a finished image too */

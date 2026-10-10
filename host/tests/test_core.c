@@ -908,6 +908,7 @@ static void test_fixtures(void)
             continue;
         /* same config as tools/record_fixtures.sh's vjo-cli --replay */
         vjo_config_defaults(&cfg);
+        cfg.ocr_backend = VJO_OCR_LENS; /* recorded JPEG/network fixtures */
         vjo_replay_config(&cfg, dir);
         vjo_arena_init(&files, fmem, sizeof(fmem));
         TEST_CASE(e->d_name);

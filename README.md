@@ -6,13 +6,16 @@ This [bee-san fork](https://github.com/bee-san/vita-jp-overlay) of
 [Hachidori Relay](https://github.com/bee-san/hachidori-anki) by default.
 It also supports **locally installed Yomitan dictionaries** with bounded-memory,
 disk-backed lookup. See [Local dictionaries](docs/local-dictionaries.md).
-Native Vita text mode uses OCR once to match a game text source, with a manual
-Japanese-first hook picker as fallback. After selection it reads text directly.
-See [Native text sources](docs/native-text.md) for installation and current
-validation limits. OCR calibration defaults to Google Lens. An **experimental CPU-only ncnn
-backend** runs PP-OCRv5 mobile locally; see [Local OCR](docs/local-ocr.md).
-An optional [Meiki backend](docs/meiki-ocr.md) isolates its bounded runtime
-in a separate user module. Physical game compatibility remains unverified.
+This is the isolated `experiment/meiki-ocr` branch. It defaults to visual
+[Meiki OCR](docs/meiki-ocr.md), using the bounded game worker and no native text
+collector, import interceptors, register profiles or source picker. The current
+Google Lens mainline lives on `main`; the separate native text experiment lives
+on `experiment/textractor`.
+
+Physical game-process model access is unresolved; this branch preserves the
+metadata-only model I/O diagnostics and its explicit failures. Enable Meiki and
+the game worker when building, with the pinned private source/model setup in
+the Meiki guide. ncnn is disabled by default.
 Jiten and JPDB remain optional backends.
 No dictionary API key is needed for Hachidori.
 
@@ -35,35 +38,39 @@ The idea comes from [meikidroid](https://github.com/rtr46/meikidroid)
 
 ### From the release zip
 
-1. Download the **VitaJPOverlay** artifact from a successful run in this fork's
-   [Actions](https://github.com/bee-san/vita-jp-overlay/actions) page. Extract the
-   artifact wrapper to get `VitaJPOverlay-<version>.zip`, then extract that zip.
-   Upstream release zips do not contain this fork's local or Hachidori backends.
+1. Build the experimental release with the [pinned Meiki setup](docs/meiki-ocr.md#build)
+   and extract `VitaJPOverlay-0.6-meiki.zip`. Hosted Actions artifacts omit the
+   private Meiki backend; upstream release zips omit this fork's local and
+   Hachidori backends.
 2. Copy the zip's `ur0` folder to the root of `ur0:` on the Vita. VitaShell's FTP server or
   USB mode both work. You should end up with:
   - `ur0:tai/VitaJPOverlay_Kernel.skprx`
   - `ur0:tai/VitaJPOverlay_Shell.suprx`
-  - `ur0:tai/VitaJPOverlay_Text.suprx`
+  - `ur0:tai/VitaJPOverlay_OCR.suprx`
+  - `ur0:data/VitaJPOverlay/meiki-engine.suprx`
   - `ur0:data/VitaJPOverlay/vitajpoverlay.rco`
 3. Open `ur0:tai/config.txt` (or `ux0:tai/config.txt`, if that is the one your taiHEN uses) and
-  add two lines:
+  add the matching plugins:
   - `ur0:tai/VitaJPOverlay_Kernel.skprx` on a new line under `*KERNEL`
   - `ur0:tai/VitaJPOverlay_Shell.suprx` on a new line under `*main`
-   Register `VitaJPOverlay_Text.suprx` under each native game's title ID as
-   described in the [native text guide](docs/native-text.md#install).
+  - `ur0:tai/VitaJPOverlay_OCR.suprx` under the specific game title to test,
+    following the [worker setup](docs/meiki-ocr.md#optional-game-process-ocr-worker).
+    Remove or comment old `VitaJPOverlay_Text.suprx` entries.
 4. Copy the zip's `config.ini` to `ux0:data/VitaJPOverlay/config.ini`. Keep
    `dictionary = hachidori` and set `hachidori_host` to your computer's LAN IP
    as described below. The file is read each time the overlay opens, so later
    changes need no reboot.
-5. Reboot.
+5. Copy the separately pinned models to the configured `ocr_model_dir`, then reboot.
 
 To update, copy the new files over the old ones and power-cycle the Vita. Your `config.ini`
 stays as it is.
 
 ### From a computer, over FTP
 
-If you have the source and a built copy of the plugins, `tools/install_ftp.sh` does the
-steps above in one go. It needs bash, curl and python3 (macOS or Linux). Start VitaShell's FTP
+If you have the source and a built copy of the plugins in `build/vita`,
+`tools/install_ftp.sh` installs the common Kernel, Shell and UI resources.
+Copy the experimental worker, engine and models and register the worker under
+the game title as described above. It needs bash, curl and python3 (macOS or Linux). Start VitaShell's FTP
 server (press Select in VitaShell) and run the example below, replacing
 `192.168.1.20` with your computer's LAN IP and `192.168.1.30` with the Vita's:
 
@@ -72,7 +79,8 @@ tools/install_ftp.sh --set dictionary=hachidori --set hachidori_host=192.168.1.2
 ```
 
 It backs up and patches the taiHEN config files, uploads the plugins and writes `config.ini`.
-Running it again later keeps your settings. `--uninstall` removes the plugin lines and
+Running it again later keeps your settings and existing OCR worker registrations,
+and comments out native Text registrations. `--uninstall` removes the plugin lines and
 `--status` prints the plugin logs.
 
 ## Local dictionary setup
@@ -94,7 +102,7 @@ You can enable up to eight dictionary files or combine multiple ZIPs. The
 converter and FTP installer are included in the fork's build ZIP. See the
 [installation guide and memory limits](docs/local-dictionaries.md).
 Dictionary lookup needs no computer or internet. Google Lens OCR needs internet;
-pair this with [local ncnn OCR](docs/local-ocr.md) for offline recognition.
+pair this with [Meiki OCR](docs/meiki-ocr.md) for offline recognition.
 The existing Hachidori Relay default is preserved until you select
 `local` (or use `tools/install_dictionary.py --enable`).
 
@@ -165,7 +173,6 @@ In the overlay:
 | △                | Send the saved queue to AnkiConnect on your computer. |
 | □                | Choose the area to read in this game. Drag a box on the touchscreen, then press × to keep it or ○ to cancel. Holding □ sets the full screen. |
 | ○, or the toggle | Close the overlay.                                                                                                                           |
-| Select + □ | Open the native text source picker. |
 
 Works with PSP games in Adrenaline. They all share one OCR region, because every PSP game runs inside the same emulator app.
 
@@ -191,8 +198,8 @@ All settings live in `ux0:data/VitaJPOverlay/config.ini`. The area to read (□ 
 | `font_size_en`        | 8 to 40                                                             | 14         | Size of the English text: meanings and messages.                                             |
 | `toggle_button`       | `l+r`, `select`, `start`, `select+l`, `select+r`, `rear_double_tap` | `l+r`      | What opens and closes the overlay. Buttons are hidden from the game; rear taps are not.      |
 | `subtitle_button`     | same as `toggle_button`                                             | `select+r` | What turns subtitles on and off.                                                             |
-| `text_source` | `auto`, `hooks`, `ocr` | `auto` | Read a screenshot and show stable native text matches, manual sources without OCR, or the legacy OCR flow. |
-| `ocr_backend` | `lens`, `ncnn`, `meiki` | `lens` | Online Lens or experimental local CPU OCR; see [ncnn](docs/local-ocr.md) and [Meiki](docs/meiki-ocr.md). |
+| `text_source` | `ocr` | `ocr` | Visual OCR only on this branch. |
+| `ocr_backend` | `lens`, `ncnn`, `meiki` | `meiki` | Online Lens or experimental local CPU OCR; see [ncnn](docs/local-ocr.md) and [Meiki](docs/meiki-ocr.md). |
 | `ocr_model_dir` | directory path | `ux0:data/VitaJPOverlay/ocr` | Folder holding the pinned mobile recognizer weights. |
 | `ocr_mode` | `auto`, `on_press` | `auto` | Lens background/on-press policy. Local OCR always runs on demand. |
 | `meiki_layout` | `single_line`, `dialogue_box` | `single_line` | Recognize one selected line or detect up to eight crops inside a selected dialogue area. |

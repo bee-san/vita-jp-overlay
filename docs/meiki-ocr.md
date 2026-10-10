@@ -1,9 +1,9 @@
 # Experimental Meiki OCR
 
-Meiki is optional local OCR for selected horizontal dialogue.
+Meiki is local OCR for selected horizontal dialogue on the isolated `experiment/meiki-ocr` branch.
 Select `ocr_backend = meiki` explicitly. It runs only on request, including
 when an older config says `ocr_mode = auto`, and errors never upload an image
-to Lens. Lens remains the default; the existing ncnn backend remains available.
+to Lens. Meiki and `text_source = ocr` are the defaults here; ncnn is disabled by default.
 
 Set `text_source = ocr` to use Meiki directly. Tap Square, select one horizontal
 line, and save it with Cross; then reopen with L+R to recognize it. Keep a narrow
@@ -35,14 +35,17 @@ the immutable source and model pins.
 git clone https://github.com/bee-san/vita-vn-ocr /path/to/vita-vn-ocr
 git -C /path/to/vita-vn-ocr checkout 2eaa0592a96583cd73fac7e21374cfc63dc4009e
 cmake -S vita -B build/vita-meiki \
-  -DVJO_WITH_NCNN=OFF -DVJO_WITH_MEIKI=ON \
+  -DVJO_WITH_NCNN=OFF -DVJO_WITH_MEIKI=ON -DVJO_MEIKI_GAME_WORKER=ON \
   -DVJO_MEIKI_SOURCE_DIR=/path/to/vita-vn-ocr/ports/meiki \
   -DMNN_SOURCE=/path/to/patched/MNN \
   -DMNN_LIBRARY=/path/to/mnn-vita/libMNN.a
 cmake --build build/vita-meiki --target release
 ```
 
-The optional release contains `ur0:data/VitaJPOverlay/meiki-engine.suprx`.
+The experimental release contains `ur0:data/VitaJPOverlay/meiki-engine.suprx`
+and `ur0:tai/VitaJPOverlay_OCR.suprx`, alongside its matching Kernel, Shell
+and UI resources. Copy the release's complete `ur0` tree to the Vita, then
+register the worker only under the intended game title as shown below.
 The models are separate: convert them with the pinned instructions and copy the
 5,392,856-byte `meiki-stream-int8.mnn` to
 `ux0:data/VitaJPOverlay/meiki/`. The selected worker checks its size and SHA-256 before MNN
@@ -58,9 +61,11 @@ ocr_mode = on_press
 meiki_layout = single_line
 ```
 
-For an OCR-only test, enable the Kernel and Shell plugins and leave
-`VitaJPOverlay_Text.suprx` registrations disabled. The Text plugin is optional
-and unnecessary for this configuration.
+This branch contains no native Text module. Remove or comment any existing
+`VitaJPOverlay_Text.suprx` registrations. Its FTP installer preserves existing
+OCR worker registrations while disabling Text, but uploads only the common
+Kernel, Shell and UI resources; copy the worker and engine from the release
+and add the per-title worker line manually.
 
 For local OCR and dictionary lookup, configure `dictionary = local` and
 install a [local dictionary](local-dictionaries.md). Other dictionaries and

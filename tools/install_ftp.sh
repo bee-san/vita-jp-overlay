@@ -11,6 +11,9 @@
 #   tools/install_ftp.sh --add-kernel-plugin NoPowerLimits.skprx 192.168.1.50
 #     (also uploads another kernel plugin to ur0:tai/ and adds it under *KERNEL;
 #      --uninstall leaves such plugins in place)
+#   tools/install_ftp.sh --vocr-model ocr/H15_w8.vocr --set ocr_backend=vocr 192.168.1.50
+#     (also uploads vita-vn-ocr weights to ux0:data/VitaJPOverlay/ocr/, for a
+#      build made with VJO_WITH_VOCR; see docs/vita-vn-ocr.md)
 #   tools/install_ftp.sh --uninstall 192.168.1.50
 #   tools/install_ftp.sh --purge 192.168.1.50     (uninstall, then delete the
 #     plugin files and both VitaJPOverlay data folders; config.ini and
@@ -26,6 +29,7 @@ STATUS=0
 DUMPS=0
 SETS=()
 EXTRA_K=()
+VOCR_MODELS=()
 while [ $# -gt 1 ]; do
   case $1 in
     --uninstall) UNINSTALL=1 ;;
@@ -34,6 +38,7 @@ while [ $# -gt 1 ]; do
     --status) STATUS=1 ;;
     --set) SETS+=("$2"); shift ;;
     --add-kernel-plugin) EXTRA_K+=("$2"); shift ;;
+    --vocr-model) VOCR_MODELS+=("$2"); shift ;;
     *) break ;;
   esac
   shift
@@ -186,6 +191,11 @@ put "$B/vitajpoverlay.rco" "ur0:/data/VitaJPOverlay/vitajpoverlay.rco"
 for f in ${EXTRA_K[@]+"${EXTRA_K[@]}"}; do
   put "$f" "ur0:/tai/$(basename "$f")"
   echo "uploaded ur0:tai/$(basename "$f")"
+done
+for f in ${VOCR_MODELS[@]+"${VOCR_MODELS[@]}"}; do
+  # The plugin checks the file's size and SHA-256 before it parses it.
+  put "$f" "ux0:/data/VitaJPOverlay/ocr/$(basename "$f")"
+  echo "uploaded ux0:data/VitaJPOverlay/ocr/$(basename "$f")"
 done
 
 # config.ini: rebuilt from docs/config.example.ini with the values of the

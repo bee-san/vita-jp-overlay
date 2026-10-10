@@ -82,6 +82,7 @@ void vjo_config_defaults(VjoConfig *c)
     c->ocr_backend = VJO_OCR_LENS;
     c->text_source = VJO_SOURCE_OCR;
     vjo_snprintf(c->ocr_model_dir, sizeof(c->ocr_model_dir), "ux0:data/VitaJPOverlay/ocr");
+    vjo_snprintf(c->vocr_model, sizeof(c->vocr_model), "H15_w8.vocr");
     vjo_snprintf(c->anki_deck, sizeof(c->anki_deck), "Default");
     vjo_snprintf(c->anki_note_type, sizeof(c->anki_note_type), "Lapis");
     vjo_snprintf(c->anki_tags, sizeof(c->anki_tags), "vita-jp-overlay");
@@ -133,13 +134,16 @@ const char *vjo_config_default_text(void)
            "; Text is read from screenshots using OCR.\n"
            "text_source = ocr\n"
            "\n"
-           "; OCR: lens (online) | ncnn (experimental CPU-only PP-OCRv5 mobile)\n"
-           "; ncnn requires the model download and a selected dialogue region; see docs/local-ocr.md.\n"
-           "; Local OCR runs only on a button press, including subtitle refresh. No cloud fallback.\n"
+           "; OCR: lens (online) | vocr (on the Vita: vita-vn-ocr, needs a build with it\n"
+           "; and its model file; see docs/vita-vn-ocr.md) | ncnn (PP-OCRv5, host tests only)\n"
+           "; Local OCR never falls back to uploading the screen.\n"
            "ocr_backend = lens\n"
            "ocr_model_dir = ux0:data/VitaJPOverlay/ocr\n"
+           "; vocr weights in ocr_model_dir: H15_w8.vocr (recommended) | FL10_w8.vocr (smaller)\n"
+           "; | F20_w8.vocr (larger)\n"
+           "vocr_model = H15_w8.vocr\n"
            "\n"
-           "; auto: recognize text in the background when the region changes (Lens only)\n"
+           "; auto: recognize text in the background when the region changes (lens, vocr)\n"
            "; on_press: recognize only when the overlay is opened\n"
            "ocr_mode = auto\n"
            "\n"
@@ -342,6 +346,22 @@ static int valid_audio_url(const char *v)
     return !*v || vjo_anki_audio_endpoint(v, host, &port, &tls, &path) == 0;
 }
 
+/* vocr_model: a plain file name in ocr_model_dir, ending in .vocr (which
+ * models a build accepts is checked when it loads one). */
+static int valid_vocr_model(const char *v)
+{
+    size_t n = strlen(v);
+    if (n <= 5 || n >= sizeof(((VjoConfig *)0)->vocr_model) || strcmp(v + n - 5, ".vocr"))
+        return 0;
+    for (size_t i = 0; i < n; i++) {
+        char ch = v[i];
+        if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+              ch == '.' || ch == '_' || ch == '-'))
+            return 0;
+    }
+    return 1;
+}
+
 /* Plain string settings. Deck, note type, tags, field names and the
  * audio URL may contain ';' and '#' (raw: no inline comment). */
 typedef struct {
@@ -465,8 +485,15 @@ static void set_kv(VjoConfig *c, const char *key, const char *val)
             c->ocr_backend = VJO_OCR_LENS;
         else if (vjo_ieq(val, "ncnn"))
             c->ocr_backend = VJO_OCR_NCNN;
+        else if (vjo_ieq(val, "vocr"))
+            c->ocr_backend = VJO_OCR_VOCR;
         else
             warn(c, "%s: invalid value '%s'", key, val);
+    } else if (vjo_ieq(key, "vocr_model")) {
+        if (valid_vocr_model(val))
+            set_str(c, key, val, c->vocr_model, sizeof(c->vocr_model));
+        else
+            warn(c, "%s: invalid value '%s' (a .vocr file name in ocr_model_dir)", key, val);
     } else if (vjo_ieq(key, "ocr_mode")) {
         if (vjo_ieq(val, "auto"))
             c->ocr_mode = VJO_OCR_AUTO;

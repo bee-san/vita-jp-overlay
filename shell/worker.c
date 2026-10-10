@@ -1,11 +1,15 @@
 /* Control thread (kernel events, overlay state, auto/on-press policy) and
- * network thread (capture -> JPEG -> Lens -> dictionary). */
+ * network thread (capture -> JPEG -> Lens, or capture -> local vita-vn-ocr;
+ * then the dictionary). */
 #include <psp2/kernel/clib.h>
 #include <psp2/kernel/sysmem.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
 
 #include "../core/regions.h"
+#ifdef VJO_WITH_VOCR
+#include "../core/vocr_ocr.h"
+#endif
 #include "shell.h"
 
 /* Memory: two result arenas (the overlay shows one while the network thread
@@ -312,6 +316,130 @@ static int mem_jpeg_read(void *ud, uint32_t off, void *dst, uint32_t len)
     return 0;
 }
 
+/* ---- local OCR: vita-vn-ocr (ocr_backend = vocr) ---- */
+
+#ifdef VJO_WITH_VOCR
+typedef struct {
+    char *text; /* VJO_OCR_TEXT_CAP bytes in the job's arena */
+} VocrJob;
+
+static int vocr_rows(void *ud, unsigned y, unsigned n, unsigned char *dst)
+{
+    (void)ud;
+    return vjoReadRaw(y, n, dst);
+}
+
+static int vocr_cancelled(void *ud)
+{
+    (void)ud;
+    __sync_synchronize(); /* job_cancelled is set by the control thread */
+    return !running || job_cancelled;
+}
+
+/* One job's workspace, sized for its region: a USER memblock when SceShell
+ * has free pages, else ScePaf's heap behind its reserve guard. Released
+ * before the lookup and before anything is published. */
+static void *vocr_alloc(size_t bytes, SceUID *uid, const char **where)
+{
+    void *base = NULL;
+    *where = "none";
+    *uid = sceKernelAllocMemBlock("VjoVocr", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW,
+                                  (bytes + 0xFFF) & ~(size_t)0xFFF, NULL);
+    if (*uid >= 0) {
+        if (sceKernelGetMemBlockBase(*uid, &base) >= 0 && base) {
+            *where = "USER memblock";
+            return base;
+        }
+        sceKernelFreeMemBlock(*uid);
+    } else {
+        vjo_log("vocr: USER memblock (%u KiB) failed 0x%08X", (unsigned)(bytes >> 10), (unsigned)*uid);
+    }
+    *uid = -1;
+#ifdef VJO_PAF_ALLOC
+    base = vjo_shell_heap_alloc_for("vocr", bytes);
+    if (base) *where = "Paf heap";
+#endif
+    return base;
+}
+
+static void vocr_free(void *base, SceUID uid)
+{
+    if (uid >= 0)
+        sceKernelFreeMemBlock(uid);
+#ifdef VJO_PAF_ALLOC
+    else if (base)
+        vjo_shell_heap_free(base);
+#endif
+    (void)base;
+}
+
+/* Runs while capture.c holds the capture: the job reads each row once, so
+ * the kernel frees its buffer before recognition starts. */
+static int vocr_consume(void *ud, const VjoState *st)
+{
+    VocrJob *job = ud;
+    VjoOcrImage image = {NULL, st->width, st->height, vocr_rows, vocr_cancelled};
+    VjoVocrStats stats;
+    const char *where;
+    SceUID uid;
+    size_t need;
+    void *ws;
+    int64_t t0 = now_us();
+    int rc;
+
+    job_capture_scene = st->capture_scene;
+    job_capture_seq = st->region_seq;
+    __sync_synchronize(); /* the scene is visible before job_captured */
+    job_captured = 1;
+    if (st->raw_stride != st->width * 4)
+        return VJO_E_SOURCE;
+    need = vjo_vocr_workspace_bytes(job_cfg.vocr_model, st->width, st->height);
+    if (!need) {
+        vjo_log("vocr: no workspace for model %s, region %ux%u", job_cfg.vocr_model, st->width, st->height);
+        return vjo_vocr_model(job_cfg.vocr_model) ? VJO_E_OCR_REGION : VJO_E_OCR_MODEL;
+    }
+    ws = vocr_alloc(need, &uid, &where);
+    if (!ws) {
+        vjo_log("vocr: no memory for the %u-byte workspace (%ux%u region, %s)", (unsigned)need,
+                st->width, st->height, job_cfg.vocr_model);
+        return VJO_E_OOM;
+    }
+    rc = vjo_vocr_ocr(&plat, job_cfg.ocr_model_dir, job_cfg.vocr_model, &image, ws, need, job->text,
+                      VJO_OCR_TEXT_CAP, &stats);
+    vocr_free(ws, uid);
+    vjo_log("vocr rc=%d %s: %ux%u region, %u lines (%u dark%s), %u frames, workspace %u bytes (%s), "
+            "find %u ms, load %u ms, recognize %u ms, total %d ms",
+            rc, job_cfg.vocr_model, st->width, st->height, stats.lines, stats.dark,
+            stats.truncated ? ", truncated" : "", stats.frames, (unsigned)need, where,
+            (unsigned)(stats.find_us / 1000), (unsigned)(stats.load_us / 1000),
+            (unsigned)(stats.recognize_us / 1000), (int)((now_us() - t0) / 1000));
+    return rc;
+}
+
+static int run_vocr(VjoArena *a, VjoOverlayData *out)
+{
+    VjoState st;
+    VocrJob job;
+    job.text = vjo_arena_alloc(a, VJO_OCR_TEXT_CAP);
+    if (!job.text)
+        return out->err.rc = VJO_E_OOM;
+    job.text[0] = '\0';
+    st.capture_scene = 0;
+    out->err.rc = vjo_capture_raw(0, vocr_consume, &job, &st);
+    if (out->err.rc != VJO_OK)
+        return out->err.rc;
+    return vjo_overlay_ocr_text(a, &job_cfg, job.text, out);
+}
+#else
+static int run_vocr(VjoArena *a, VjoOverlayData *out)
+{
+    (void)a;
+    out->err.detail = "This build has no vita-vn-ocr backend. Install a build made with VJO_WITH_VOCR, "
+                      "or set ocr_backend = lens.";
+    return out->err.rc = VJO_E_OCR_UNAVAILABLE;
+}
+#endif
+
 static int run_job(VjoArena *a, VjoOverlayData *out)
 {
     VjoState st;
@@ -321,6 +449,14 @@ static int run_job(VjoArena *a, VjoOverlayData *out)
 
     sceClibMemset(out, 0, sizeof(*out));
     out->list.header = "";
+    if (job_cfg.ocr_backend == VJO_OCR_VOCR) {
+        /* On the console only: no image or connection leaves it. */
+        if (run_vocr(a, out) != VJO_OK) {
+            out->failed_stage = VJO_STAGE_OCR;
+            return out->err.rc;
+        }
+        goto recognized;
+    }
     vjo_buf_init(&jb, a);
     st.capture_scene = 0;
     if ((out->err.rc = vjo_capture_jpeg(a, 0, JPEG_QUALITY, &jb, &st)) != VJO_OK) {
@@ -340,6 +476,7 @@ static int run_job(VjoArena *a, VjoOverlayData *out)
     src.size = (uint32_t)jb.len;
     if (vjo_overlay_ocr(a, &plat, &job_cfg, &src, out))
         return out->err.rc;
+recognized:
     /* The screen changed only in pixels (a mark, a cursor, an effect):
      * the cached lookup is this text's. */
     job_same_text = job_cached_text && out->filtered && !sceClibStrcmp(out->filtered, job_cached_text);
@@ -422,6 +559,9 @@ static int same_pipeline(const VjoConfig *a, const VjoConfig *b)
 {
     if (a->dictionary != b->dictionary || a->ocr_backend != b->ocr_backend ||
         a->non_japanese_filter != b->non_japanese_filter)
+        return 0;
+    if (a->ocr_backend == VJO_OCR_VOCR &&
+        (sceClibStrcmp(a->ocr_model_dir, b->ocr_model_dir) || sceClibStrcmp(a->vocr_model, b->vocr_model)))
         return 0;
     if (a->dictionary == VJO_DICT_LOCAL)
         return !sceClibStrcmp(a->local_dictionary_dir, b->local_dictionary_dir) &&
@@ -908,6 +1048,8 @@ static void warm_connections(void)
     VjoState st;
     int lookup;
     if (!game_active() || !has_result_memory() || net_busy() || now_us() - warm_asked_us < WARM_GAP_US)
+        return;
+    if (cfg.ocr_backend != VJO_OCR_LENS) /* local OCR opens no Lens connection */
         return;
     lookup = vjo_config_dict_ready(&cfg);
     if (!lookup && !subtitles)

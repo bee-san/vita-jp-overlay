@@ -23,7 +23,11 @@ set(ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
 set(VJO_ROOT ${ROOT})
 set(VJO_BUILD_VITA ON)
 option(VJO_WITH_NCNN "Build the CPU-only local mobile OCR recognizer" OFF)
+option(VJO_WITH_VOCR "Build the vita-vn-ocr local OCR backend (needs its runtime sources)" OFF)
 set(VJO_VERSION "0.6-lens")
+if(VJO_WITH_VOCR)
+  set(VJO_VERSION "${VJO_VERSION}-vocr")
+endif()
 
 
 # ---------------- kernel ----------------
@@ -92,6 +96,11 @@ if(VJO_WITH_NCNN)
   target_compile_definitions(vjo_core_vita PUBLIC VJO_WITH_NCNN=1)
   target_link_libraries(vjo_ocr PUBLIC vjo_core_vita)
 endif()
+if(VJO_WITH_VOCR)
+  include(${ROOT}/cmake/VocrOCR.cmake)
+  target_compile_definitions(vjo_core_vita PUBLIC VJO_WITH_VOCR=1)
+  target_link_libraries(vjo_vocr PUBLIC vjo_core_vita)
+endif()
 
 add_executable(VitaJPOverlay_Shell
   ${ROOT}/shell/boot.c
@@ -116,6 +125,9 @@ set_source_files_properties(${ROOT}/shell/boot.c ${ROOT}/shell/log_vita.c
   PROPERTIES COMPILE_OPTIONS "-mgeneral-regs-only")
 if(VJO_WITH_NCNN)
   target_link_libraries(VitaJPOverlay_Shell vjo_ocr ncnn)
+endif()
+if(VJO_WITH_VOCR)
+  target_link_libraries(VitaJPOverlay_Shell vjo_vocr)
 endif()
 target_compile_options(VitaJPOverlay_Shell PRIVATE -O2 -Wall -Wno-unused-parameter -fno-builtin -fshort-wchar
   "$<$<COMPILE_LANGUAGE:CXX>:-fno-rtti;-fno-exceptions;-Wno-sign-compare;-Wno-unused-function>"
@@ -177,7 +189,7 @@ add_custom_target(release
   COMMAND ${CMAKE_COMMAND} -E copy ${ROOT}/docs/config.example.ini ${STAGE}/config.ini
   COMMAND ${CMAKE_COMMAND} -E make_directory ${STAGE}/tools ${STAGE}/docs/benchmarks ${STAGE}/third_party
   COMMAND ${CMAKE_COMMAND} -E copy ${ROOT}/tools/convert_dictionary.py ${ROOT}/tools/install_dictionary.py ${ROOT}/tools/prepare_ocr.py ${STAGE}/tools/
-  COMMAND ${CMAKE_COMMAND} -E copy ${ROOT}/docs/local-dictionaries.md ${ROOT}/docs/local-ocr.md ${ROOT}/docs/lookup-performance.md ${ROOT}/docs/lens-performance.md ${STAGE}/docs/
+  COMMAND ${CMAKE_COMMAND} -E copy ${ROOT}/docs/local-dictionaries.md ${ROOT}/docs/local-ocr.md ${ROOT}/docs/vita-vn-ocr.md ${ROOT}/docs/lookup-performance.md ${ROOT}/docs/lens-performance.md ${STAGE}/docs/
   COMMAND ${CMAKE_COMMAND} -E copy ${ROOT}/docs/benchmarks/local-lookup-jitendex.json ${ROOT}/docs/benchmarks/kernel-startup-20261010.json ${ROOT}/docs/benchmarks/daijirin-import-20261010.json ${ROOT}/docs/benchmarks/lens-connections-20261010.json ${STAGE}/docs/benchmarks/
   COMMAND ${CMAKE_COMMAND} -E copy ${ROOT}/third_party/README.md ${STAGE}/third_party/
   COMMAND ${CMAKE_COMMAND} -E copy_directory ${ROOT}/third_party/licenses ${STAGE}/third_party/licenses

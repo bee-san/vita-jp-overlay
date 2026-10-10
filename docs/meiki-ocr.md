@@ -179,6 +179,26 @@ engine unload and successful owned-block release precede result publication.
 Failed cleanup keeps allocation identity and refuses further work or unload.
 Allocation failure publishes no partial OCR text and uses no Lens or Text fallback.
 
+This game-worker build retains 1.5 MiB of free Paf space for Shell UI, matching
+the Lens build's reserve. Its unchanged 320 KiB result allocation therefore
+requires at least 1,900,544 free bytes before the allocator is called. Builds
+that run Meiki inside Shell retain the original 2 MiB reserve. Allocation also
+requires both the allocation and release imports to be available. Paf free
+totals are a policy input, not a guarantee of a contiguous block: the log
+distinguishes `reserve_guard`, missing imports and `memalign_null`.
+The message "Not enough memory for the overlay" occurs at this Shell preflight,
+before capture or game-worker inference; it does not identify a model-workspace
+failure. Memory backoff can repeat that message for up to 60 seconds without
+another allocation attempt.
+
+Physical log readback later confirmed a 320 KiB result request was refused by
+the original 2 MiB guard with 2,404,536 free bytes, 20,296 bytes below its
+threshold. The revised Shell was installed and verified by file readback.
+The subsequent manual report said the overlay ran but did not recognize text.
+No recognition log was retrieved from that test, so it does not establish
+retail inference success or distinguish empty OCR from filtering or lookup
+failure. End-to-end physical recognition remains unresolved.
+
 The kernel ties each request to its game PID, foreground epoch and exact capture
 sequence. It pins the raw buffer while queued or claimed, including after a Shell
 timeout, game suspension or Shell restart. A successful drained completion or

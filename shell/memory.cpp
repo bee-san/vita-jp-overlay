@@ -9,7 +9,14 @@ extern "C" {
 #include "shell.h"
 }
 
+#ifdef VJO_MEIKI_GAME_WORKER
+/* Shell only holds UI and dictionary results in this build; Meiki's model and
+ * inference buffers belong to the game worker. Keep the same UI reserve as
+ * the Lens build, without reducing either result arena. */
+static constexpr size_t RESERVE = 1536u * 1024u;
+#else
 static constexpr size_t RESERVE = 2u * 1024u * 1024u;
+#endif
 
 template <typename Function> static bool import_ready(Function function)
 {
@@ -109,6 +116,11 @@ extern "C" void *vjo_paf_alloc(size_t bytes)
     }
     if (!import_ready(sce_paf_memalign)) {
         vjo_log("Paf alloc: requested=%u align=64 reason=memalign_import_unbound", (unsigned)bytes);
+        return nullptr;
+    }
+    if (!import_ready(sce_paf_free)) {
+        vjo_log("Paf alloc: requested=%u align=64 reason=free_import_unbound; allocator not called",
+                (unsigned)bytes);
         return nullptr;
     }
     void *pointer = sce_paf_memalign(64, bytes);

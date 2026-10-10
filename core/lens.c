@@ -33,7 +33,8 @@ static int build_request_context(VjoBuf *b, VjoArena *a, const uint8_t rnd[24])
 
     vjo_buf_init(&loc, a);
     pb_put_string(&loc, 1, "ja");               /* language */
-    pb_put_string(&loc, 2, "Asia/Tokyo");       /* region */
+    pb_put_string(&loc, 2, "JP");              /* CLDR region */
+    pb_put_string(&loc, 3, "Asia/Tokyo");       /* IANA time zone */
     if (loc.oom)
         return -1;
 

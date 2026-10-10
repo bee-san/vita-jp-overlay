@@ -70,7 +70,8 @@ class PlainHTML(HTMLParser):
         if not self.hidden and tag in ("br", "div", "p", "li", "tr"):
             self.parts.append("\n")
         if tag == "img" and not self.hidden:
-            self.parts.append(dict(attrs).get("alt", "[image omitted]"))
+            attributes = dict(attrs)
+            self.parts.append(attributes.get("alt") or attributes.get("title") or "[image omitted]")
 
     def handle_endtag(self, tag):
         if tag in ("script", "style"):
@@ -97,7 +98,7 @@ def glossary_text(value, depth=0):
     if isinstance(value, dict):
         kind, tag = value.get("type"), value.get("tag")
         if kind == "image" or tag == "img":
-            return str(value.get("alt", value.get("title", "[image omitted]")))
+            return str(value.get("alt") or value.get("title") or "[image omitted]")
         if kind == "text":
             return glossary_text(value.get("text", ""), depth + 1)
         if tag in ("script", "style", "rt", "rp"):
@@ -283,7 +284,8 @@ def convert(inputs, output, max_definition_bytes=4096, temp_dir=None, format_ver
         raise ValueError("output must not replace an input archive")
     output.parent.mkdir(parents=True, exist_ok=True)
     stats = {"format_version": format_version, "entries": 0, "index_records": 0, "truncated_definitions": 0,
-             "skipped_long_headwords": 0, "dictionaries": []}
+             "reading_only_entries": 0,
+             "skipped_empty_headwords": 0, "skipped_long_headwords": 0, "dictionaries": []}
     # The final temporary file is beside the destination, for atomic replacement.
     final_name = None
     try:
@@ -316,13 +318,19 @@ def convert(inputs, output, max_definition_bytes=4096, temp_dir=None, format_ver
                                             if not isinstance(row, list) or len(row) != 8:
                                                 raise ValueError(f"{context}: expected an 8-field Yomitan term row")
                                             spelling, reading, _, rules, score, gloss, _, _ = row
-                                            if (not isinstance(spelling, str) or not spelling or not isinstance(reading, str)
+                                            if (not isinstance(spelling, str) or not isinstance(reading, str)
                                                     or not isinstance(rules, str) or not isinstance(gloss, list)
                                                     or not isinstance(score, (int, float)) or isinstance(score, bool)
                                                     or not math.isfinite(score)):
                                                 raise ValueError(f"{context}: invalid spelling, reading, rules, score, or glossary")
                                             if clean(spelling) != spelling or clean(reading) != reading:
                                                 raise ValueError(f"{context}: headwords contain control characters")
+                                            if not (spelling or reading):
+                                                stats["skipped_empty_headwords"] += 1
+                                                continue
+                                            if not spelling:
+                                                spelling = reading
+                                                stats["reading_only_entries"] += 1
                                             spelling.encode("utf-8")  # Reject lone surrogates before writing.
                                             reading.encode("utf-8")
                                             keys = list(dict.fromkeys(normalize(x) for x in (spelling, reading) if x))

@@ -121,12 +121,12 @@ test("supplementary Unicode and OCR line breaks keep correct word highlights", a
   assert.match(result.stdout, /2: 😀猫を\n【見た】。/u);
 });
 
-test("repeated words are deduplicated without losing the first token's position", async (t) => {
+test("repeated words share vocabulary and preserve each navigable token", async (t) => {
   const { apiPort } = await hosting(t);
   const result = await run(args(apiPort, "猫、猫。"));
   assert.equal(result.code, 0, result.stdout + result.stderr);
   assert.match(result.stdout, /1: 【猫】、猫。/u);
-  assert.doesNotMatch(result.stdout, /2: /u);
+  assert.match(result.stdout, /2: 猫、【猫】。/u);
 });
 
 test("a sentence with no dictionary matches is not an error", async (t) => {

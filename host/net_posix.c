@@ -127,6 +127,15 @@ static uint64_t posix_time(void *ud)
     return (uint64_t)time(NULL);
 }
 
+static uint64_t posix_now_us(void *ud)
+{
+    struct timespec ts;
+    (void)ud;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return 0;
+    return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
+}
+
 static void posix_log(void *ud, const char *msg)
 {
     PosixPlatform *pp = (PosixPlatform *)ud;
@@ -186,6 +195,7 @@ void posix_platform_init(PosixPlatform *pp, VjoPlatform *p)
     p->disconnect = posix_disconnect;
     p->random = posix_random;
     p->unix_time = posix_time;
+    p->now_us = posix_now_us;
     p->log = posix_log;
     p->on_response = posix_on_response;
 }

@@ -86,10 +86,12 @@ python3 tools/convert_dictionary.py Jitendex.zip Grammar.zip Names.zip -o main.v
 
 Each definition includes its source dictionary title. The converter preserves
 separate senses/entries and indexes both spelling and reading without duplicating
-the definition payload. Earlier dictionaries and higher Yomitan term scores
-have priority for equal keys. Reconvert the original ZIPs to update a combined
-file. The converter writes to a temporary file and replaces the destination
-only after success, so a failed conversion preserves the previous dictionary.
+the definition payload. Reading-only terms use their reading as the displayed
+headword and are counted in the conversion report. Earlier dictionaries and
+higher Yomitan term scores have priority for equal keys. Reconvert the original
+ZIPs to update a combined file. The converter writes to a temporary file and
+replaces the destination only after success, so a failed conversion preserves
+the previous dictionary.
 
 ## Memory and lookup behavior
 
@@ -106,14 +108,14 @@ no dictionary-sized persistent allocation is added.
 | Lookup result arena | 64 KiB |
 | Lookup scratch, including page caches and deinflection candidates | At most 48 KiB; compile-time checked |
 | Temporary lookup arena total | At most 112 KiB, taken from the existing result arena |
-| Existing worker result arenas | Unchanged: two 384 KiB arenas |
+| Worker result arenas | Two 256 KiB arenas |
 | Enabled dictionary files | 8 |
 | Input text | 4,096 UTF-8 bytes |
 | Longest scanned term | 32 Unicode code points |
 | Deinflection candidates per substring | 128 |
 | Results per matched position | First 8 |
 | Same-key index rows examined per candidate/file | First 64 |
-| Total vocabulary entries / tokens per request | 64 each |
+| Total vocabulary entries / tokens per request | 128 each |
 
 Unused result capacity and the entire scratch allocation are released after
 lookup; only the actual returned vocabulary/tokens remain for the overlay.
@@ -121,6 +123,20 @@ These numbers describe dictionary lookup, not total process memory: the plugin
 also needs code, stacks, OCR/JPEG buffers, formatted overlay text and optional
 Anki buffers. If the existing arena has insufficient space, lookup fails with an
 explicit memory error; it never grows the worker allocation.
+
+The two worker arenas and the two-connection runtime pool share one Paf
+allocation. Before allocating, the worker checks that the current free heap
+can supply the block with a 1.5 MiB reserve. A failed check or allocation reports
+a memory error. Later UI allocations also use this heap, so this check cannot
+guarantee the total free memory while an overlay is open.
+
+The [Daijirin import measurement](benchmarks/daijirin-import-20261010.json)
+records conversion of the bilingual v2 archive: 334,741 entries, two reading-only
+headwords preserved, ten unindexable rows skipped, and 53 unusually long
+definitions clipped to the explicit 7,000-byte conversion limit. All 110 lookup
+samples and 30 combined JPEG/recorded-Lens samples passed on the host. These
+results establish the core bounds; physical Vita UI and network memory still
+require manual testing.
 
 Longer phrases take precedence. Katakana and hiragana readings share a search
 key; full-width ASCII is folded to ASCII. Yomichan's Japanese suffix rules handle
@@ -133,7 +149,7 @@ Missing or corrupt enabled files fail the lookup with an actionable error;
 there is no automatic relay/cloud fallback.
 
 The 64 KiB result budget includes text. If a screen exceeds that budget or the
-64-token limit, select a smaller OCR region or enable fewer dictionaries. This
+128-token limit, select a smaller OCR region or enable fewer dictionaries. This
 avoids hiding an incomplete screen behind an apparently successful result.
 
 ## Supported content and tradeoffs
@@ -147,7 +163,12 @@ avoids hiding an incomplete screen behind an apparently successful result.
   `[definition truncated]`, and reports the count. Change this with
   `--max-definition-bytes 2048` (allowed range 256–7,000) to trade detail for
   more results per screen.
-- Headwords/readings beyond the supported term length are skipped and counted.
+  For structured bilingual dictionaries, `--max-definition-bytes 7000` retains
+  more English and Japanese text while keeping the existing 8 KiB entry limit.
+  Definitions longer than that still receive the truncation notice; the converter
+  does not silently increase the console's lookup memory budget.
+- Headwords/readings beyond the supported term length, and rows with neither
+  spelling nor reading, are skipped and counted.
   Half-width katakana, arbitrary Unicode normalization, and custom HoshiDicts
   database files are not supported by this local format.
 - Source ZIPs are read on the computer one JSON row at a time, with an 8 MiB

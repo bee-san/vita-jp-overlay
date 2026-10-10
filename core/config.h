@@ -40,7 +40,7 @@ typedef struct {
     int subtitle_button;      /* enum VjoTrigger, != toggle_button */
     int ocr_mode;             /* VJO_OCR_* */
     int ocr_backend;          /* VJO_OCR_LENS | VJO_OCR_NCNN */
-    int text_source;          /* OCR, one-time OCR-assisted discovery, or hooks only */
+    int text_source;          /* compatibility setting, always screenshot OCR in this build */
     char ocr_model_dir[160];
     char log_host[64];        /* "" = UDP log off */
     int log_file;             /* 0/1 */

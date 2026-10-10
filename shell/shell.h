@@ -9,7 +9,6 @@
 #include "../core/client.h"
 #include "../core/config.h"
 #include "../include/vjo_api.h"
-#include "../include/vjo_text.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -29,12 +28,6 @@ extern "C" {
 enum { VJO_ANKI_STATUS_DIM = 0, VJO_ANKI_STATUS_ERROR = 1 };
 /* VjoView.strip_kind */
 enum { VJO_STRIP_SENTENCE = 0, VJO_STRIP_STATUS = 1, VJO_STRIP_ERROR = 2 };
-enum {
-    VJO_HOOK_MATCH_NONE = 0,
-    VJO_HOOK_MATCH_MATCHING,
-    VJO_HOOK_MATCH_READY,
-    VJO_HOOK_MATCH_FAILED,
-};
 #define VJO_STRIP_MAX 4096 /* bytes of UTF-8 */
 
 /* ---- view model read by the overlay (under vjo_view_lock) ---- */
@@ -66,13 +59,6 @@ typedef struct {
     char strip_text[VJO_STRIP_MAX]; /* "" = no strip drawn */
     int strip_kind;           /* VJO_STRIP_* */
     int strip_busy;           /* a recognition is running */
-    int hook_picker;
-    int hook_match_state;     /* VJO_HOOK_MATCH_*; scores need a valid screenshot */
-    int hook_ocr_available;   /* explicit screenshot retry is actionable */
-    char hook_reference[256]; /* bounded UTF-8 excerpt of the matched screenshot */
-    uint32_t hook_session;
-    unsigned hook_count;
-    VjoTextCandidate hooks[VJO_TEXT_CHOICES];
 } VjoView;
 
 extern VjoView g_view;
@@ -85,20 +71,26 @@ enum {
     VJO_CMD_CLOSED,          /* overlay closed by ○ */
     VJO_CMD_SET_REGION,      /* region selected (rect passed to vjo_post_command) */
     VJO_CMD_CLEAR_REGION,    /* hold □ */
-    VJO_CMD_HOOK_DISCOVER,
-    VJO_CMD_HOOK_SELECT,
-    VJO_CMD_HOOK_OCR,
 };
 void vjo_post_command(int cmd, const VjoRect *rect);
-void vjo_post_hook(uint32_t session, uint32_t id);
 
 /* worker.c */
 int vjo_worker_start(void);
 void vjo_worker_stop(void);
+
+/* capture.c */
+int vjo_capture_init(void);
+void vjo_capture_fini(void);
 /* Captures the screen (flags: VJO_CAPTURE_*) and encodes it as a JPEG into
  * out; serialized with the OCR job's capture (one kernel buffer). Returns
  * VJO_OK or a VJO_E_* code. */
 int vjo_capture_jpeg(VjoArena *a, uint32_t flags, int quality, VjoBuf *out, VjoState *st);
+
+/* game.c */
+/* The process's title ID; 0, or < 0 when not readable (yet). */
+int vjo_title_id(SceUID pid, char *tid, int size);
+/* vjoSetGameActive's mode (enum VjoGameMode) for a title ID. */
+int vjo_title_game_mode(const char *tid);
 
 /* anki.c: AnkiConnect thread */
 int vjo_anki_start(void);
@@ -116,10 +108,23 @@ void vjo_anki_post_sync(void);
 void vjo_overlay_init(void *plugin);
 
 /* platform_vita.c */
-void vjo_platform_vita(VjoPlatform *p);
+/* Lets another thread abandon the requests of the thread using a platform
+ * set up with it: vjo_net_cancel aborts the socket in use, and every
+ * connect fails until vjo_net_cancel_clear. */
+typedef struct {
+    SceUID lock; /* the socket in use vs an abort */
+    int fd;      /* -1: none */
+    volatile int cancelled;
+} VjoNetCancel;
+int vjo_net_cancel_init(VjoNetCancel *c);
+void vjo_net_cancel(VjoNetCancel *c);
+void vjo_net_cancel_clear(VjoNetCancel *c);
+/* cancel: NULL, or the VjoNetCancel of the thread using p. */
+void vjo_platform_vita(VjoPlatform *p, VjoNetCancel *cancel);
 /* Reuses ScePaf's existing heap. Returns NULL when its bounded allocation fails. */
 void *vjo_shell_heap_alloc(size_t bytes);
 void vjo_shell_heap_free(void *ptr);
+
 /* This console's IPv4 address and netmask (host byte order); -1 if none. */
 int vjo_net_local_ipv4(uint32_t *ip, uint32_t *mask);
 /* Connects to port of up to VJO_NET_PROBE_MAX hosts (host byte order) at

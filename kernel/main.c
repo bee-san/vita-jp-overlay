@@ -9,7 +9,6 @@
 #include <taihen.h>
 
 #include "vjo_kernel.h"
-#include "text.h"
 
 VjoKernelState g;
 
@@ -18,34 +17,49 @@ static volatile int worker_run = 1;
 
 #define POLL_US         16000   /* input poll period */
 #define CHECK_EVERY     4       /* change detection every 4th poll (~64 ms) */
-#define STABLE_US       300000  /* unchanged this long = stable */
 #define CAPTURE_WAIT_US 1500000 /* no new frame from the game within this -> timeout */
 
+/* Called with the lock held. Signatures already published are skipped. One
+ * the hook is still building for the old region can still arrive; it only
+ * costs an extra change. */
 static void reset_change_detection(void)
 {
-    g.checksum = 0;
-    g.stable = 0;
-    g.stable_fired = 0;
-    g.last_change_us = ksceKernelGetSystemTimeWide();
+    scene_reset(&g.tracker);
+    g.region_seq = 0; /* for another region */
+    g.seen_sig_seq = g.hook_sig_seq;
 }
 
 static void change_detection(void)
 {
-    uint32_t cs, seq = g.hook_checksum_seq;
-    int64_t now;
-    if (g.game_pid <= 0 || !g.game_active || seq == g.seen_checksum_seq)
+    static SceneSig sig;
+    uint32_t seq, id = 0;
+    SceneEvent ev = SCENE_NONE;
+    int animated = 0;
+    if (g.game_pid <= 0 || !g.game_active)
         return;
-    g.seen_checksum_seq = seq;
-    cs = g.hook_checksum;
-    now = ksceKernelGetSystemTimeWide();
-    if (cs != g.checksum) {
-        g.checksum = cs;
-        g.stable = 0;
-        g.stable_fired = 0;
-        g.last_change_us = now;
-    } else if (!g.stable_fired && now - g.last_change_us >= STABLE_US) {
-        g.stable = 1;
-        g.stable_fired = 1;
+    VJO_LOCK(); /* against reset_change_detection */
+    seq = g.hook_sig_seq;
+    if (seq != g.seen_sig_seq) {
+        __sync_synchronize(); /* pairs with the hook's barrier */
+        sig = g.hook_sig[seq & 1];
+        __sync_synchronize();
+        if (g.hook_sig_seq == seq) { /* else rewritten meanwhile: next poll */
+            g.seen_sig_seq = seq;
+            int64_t now = ksceKernelGetSystemTimeWide();
+            /* the low 32 bits, widened: within the last 71 min */
+            int64_t input_us = now - (uint32_t)((uint32_t)now - g.input_us32);
+            int64_t edge_us = now - (uint32_t)((uint32_t)now - g.input_edge_us32);
+            ev = scene_update(&g.tracker, &sig, now, input_us, edge_us);
+            id = g.tracker.id;
+            animated = g.tracker.masked;
+        }
+    }
+    VJO_UNLOCK();
+    if (ev == SCENE_QUIET) {
+        klog("region quiet: scene %u", id);
+        ksceKernelSetEventFlag(g.evf, VJO_EV_REGION_QUIET);
+    } else if (ev == SCENE_SETTLED) {
+        klog("region settled: scene %u (%d animated cells masked)", id, animated);
         ksceKernelSetEventFlag(g.evf, VJO_EV_REGION_STABLE);
     }
 }
@@ -59,6 +73,11 @@ static void finish_capture(void)
             g.capture_result = VJO_ERR_NO_GAME;
     }
     g.raw_valid = g.capture_result == 0;
+    g.capture_scene = g.raw_valid && !g.capture_full ? scene_match(&g.tracker, &g.capture_sig) : 0;
+    if (g.raw_valid && !g.capture_full) {
+        g.region_seq = g.capture_seq;
+        g.region_us = g.capture_copy_us;
+    }
     g.done_seq = g.capture_seq;
     g.capture_state = CAPTURE_IDLE;
     VJO_UNLOCK();
@@ -181,8 +200,6 @@ static int worker(SceSize args, void *argp)
         }
 
         input_poll();
-        text_tick();
-        buffers_trim();
         if (++tick % CHECK_EVERY == 0)
             change_detection();
         kernel_file_flush();
@@ -269,13 +286,22 @@ int vjoGetState(VjoState *out)
     s.fb_height = g.fb_h;
     s.fb_pitch = g.fb_pitch;
     s.fb_pixelformat = g.fb_fmt;
-    s.checksum = g.checksum;
-    s.stable = g.stable;
+    VJO_LOCK();
+    s.scene = g.tracker.id;
+    s.stable = g.tracker.stable;
+    s.unsettled_ms = (uint32_t)(scene_unsettled_us(&g.tracker, ksceKernelGetSystemTimeWide()) / 1000);
+    s.quiet = g.tracker.quiet && !g.tracker.stable;
+    /* 0 while a region capture rewrites capture_sig */
+    if (g.region_seq) {
+        s.region_seq = g.region_seq;
+        s.region_scene = scene_match_since(&g.tracker, &g.capture_sig, g.region_us);
+    }
+    VJO_UNLOCK();
     s.alloc_status = g.alloc_status;
     s.capture_result = g.capture_result;
     s.width = g.crop_w;
     s.height = g.crop_h;
-    s.capture_checksum = g.capture_checksum;
+    s.capture_scene = g.capture_scene;
     s.raw_stride = g.raw_stride;
     s.done_seq = g.done_seq;
     if (size >= sizeof(uint32_t))
@@ -334,11 +360,16 @@ int vjoSetTriggers(int toggle, int subtitle)
 
 int vjoSetInputBlock(int on)
 {
-    if (!caller_ok())
+    if (!caller_ok()) {
+        klog("input block refused: pid=%X shell=%X", ksceKernelGetProcessId(), g.shell_pid);
         return VJO_ERR_PERM;
+    }
+    if (on) input_trace_reset();
     if (!on && g.input_block) /* e.g. the ○ that closed the overlay */
         __sync_fetch_and_or(&g.suppress_mask, g.raw_buttons);
-    g.input_block = on ? 1 : 0;
+    __atomic_store_n(&g.input_block, on ? 1 : 0, __ATOMIC_RELEASE);
+    klog("input block=%d pid=%X game=%X raw=%08X", g.input_block,
+         ksceKernelGetProcessId(), g.game_pid, g.raw_buttons);
     return 0;
 }
 
@@ -365,7 +396,6 @@ int vjoRequestCapture(uint32_t flags)
         return VJO_ERR_PERM;
     ENTER_SYSCALL(state);
     ret = capture_request(flags);
-    if (ret < 0) klog("capture request result %d (0x%08X), alloc=%d", ret, (unsigned)ret, g.alloc_status);
     EXIT_SYSCALL(state);
     return ret;
 }
@@ -423,15 +453,12 @@ int module_start(SceSize argc, const void *args)
     memset(&g, 0, sizeof(g));
     g.trigger[TRIG_TOGGLE] = VJO_TRIGGER_L_R;
     g.trigger[TRIG_SUBTITLE] = VJO_TRIGGER_SELECT_R;
+    g.input_us32 = g.input_edge_us32 = (uint32_t)(ksceKernelGetSystemTimeWide() - 3600000000LL); /* none yet */
     g.evf = ksceKernelCreateEventFlag("VjoEvents", SCE_EVENT_WAITMULTIPLE, 0, NULL);
     g.ievf = ksceKernelCreateEventFlag("VjoInternal", 0, 0, NULL);
     g.lock = ksceKernelCreateMutex("VjoLock", 0, 0, NULL);
     g.game_lock = ksceKernelCreateMutex("VjoGameLock", 0, 0, NULL);
     if (g.evf < 0 || g.ievf < 0 || g.lock < 0 || g.game_lock < 0) {
-        delete_sync_objects();
-        return SCE_KERNEL_START_FAILED;
-    }
-    if (text_init() < 0) {
         delete_sync_objects();
         return SCE_KERNEL_START_FAILED;
     }
@@ -448,7 +475,6 @@ int module_start(SceSize argc, const void *args)
             ksceKernelDeleteThread(worker_uid);
         worker_uid = -1;
         release_hooks();
-        text_shutdown();
         delete_sync_objects();
         return SCE_KERNEL_START_FAILED;
     }
@@ -467,7 +493,6 @@ int module_stop(SceSize argc, const void *args)
         ksceKernelDeleteThread(worker_uid);
     }
     release_hooks();
-    text_shutdown();
     buffers_free();
     delete_sync_objects();
     return SCE_KERNEL_STOP_SUCCESS;

@@ -101,6 +101,35 @@ class LocalDictionaryTest(unittest.TestCase):
         self.assertNotIn("hidden()", output)
         self.assertIn("[Two]", output)
 
+    def test_bilingual_structured_content_and_empty_image_labels(self):
+        self.build([term("猫", "ねこ", [{"type": "structured-content", "content": [
+            {"tag": "div", "content": ["cat; a feline", {"tag": "br"}, "猫科の動物。"]},
+            {"tag": "img", "title": ""},
+            {"type": "image", "alt": "", "title": "diagram caption"},
+            {"tag": "img", "alt": "cat illustration", "title": "unused title"},
+        ]}, '<p>English 日本語</p><img alt=""><img alt title="HTML caption">'])])
+        output = self.lookup("猫").stdout
+        for expected in ("cat; a feline\n猫科の動物。", "English 日本語", "diagram caption",
+                         "cat illustration", "HTML caption"):
+            self.assertIn(expected, output)
+        self.assertEqual(output.count("[image omitted]"), 2)
+        self.assertNotIn("unused title", output)
+
+    def test_reading_only_term_uses_reading_as_display_headword(self):
+        _, stats = self.build([term("", "あて", ["a target; 目標。"]),
+                               term("猫", "ねこ", ["cat"])])
+        self.assertEqual(stats["entries"], 2)
+        self.assertEqual(stats["reading_only_entries"], 1)
+        self.assertEqual(stats["index_records"], 3)
+        output = self.lookup("あて").stdout
+        self.assertIn("【あて】", output)
+        self.assertIn("a target; 目標。", output)
+        _, stats = self.build([term("", "", ["no usable key"]), term("猫")])
+        self.assertEqual(stats["entries"], 1)
+        self.assertEqual(stats["skipped_empty_headwords"], 1)
+        with self.assertRaisesRegex(ValueError, "no installable term entries"):
+            self.build([term("", "", ["no usable key"])])
+
     def test_missing_partial_and_malformed_files(self):
         self.assertIn("Cannot read local dictionaries", self.lookup("猫", ok=False).stdout)
         path, _ = self.build([term("猫")], format_version=1)
@@ -133,7 +162,18 @@ class LocalDictionaryTest(unittest.TestCase):
     def test_size_limit_and_exhausted_results_are_actionable(self):
         self.build([term("猫")])
         self.assertIn("smaller OCR region", self.lookup("猫" * 1400, ok=False).stdout)
-        self.assertIn("smaller OCR region", self.lookup("猫。" * 65, ok=False).stdout)
+        self.assertIn("smaller OCR region", self.lookup("猫。" * 129, ok=False).stdout)
+
+    def test_128_repeated_occurrences_keep_individual_navigation(self):
+        self.build([term("猫", "ねこ", ["cat; 猫科の動物。"])])
+        result = self.lookup("猫。" * 128)
+        navigation = result.stdout.split("[navigation]\n", 1)[1].splitlines()
+        self.assertEqual(len(navigation), 128)
+        for index, line in enumerate(navigation):
+            self.assertTrue(line.startswith(f"{index + 1}: "))
+            self.assertEqual(line.count("【猫】"), 1)
+            self.assertTrue(line.split(": ", 1)[1].startswith("猫。" * index + "【猫】。"))
+        self.assertNotIn("[error]", result.stdout)
 
     def test_large_disk_dictionary_keeps_lookup_memory_fixed(self):
         self.build([term("猫", "ねこ")])

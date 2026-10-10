@@ -103,6 +103,13 @@ static void publish(unsigned seq, const char *msg, int kind, int mark_entry)
                 g_view.anki_marks_seq = seq;
             }
             g_view.anki_mark[mark_entry] = 1;
+            /* the word's other occurrences in the text too */
+            if (g_view.list && mark_entry < g_view.list->n_entries) {
+                const VjoVocab *v = g_view.list->entries[mark_entry].vocab;
+                for (int i = 0; i < g_view.list->n_entries && i < VJO_MAX_ENTRIES; i++)
+                    if (g_view.list->entries[i].vocab == v)
+                        g_view.anki_mark[i] = 1;
+            }
         }
         sceClibSnprintf(g_view.anki_status, sizeof(g_view.anki_status), "%s", msg);
         g_view.anki_status_kind = kind;
@@ -131,6 +138,7 @@ static int refresh_count(void)
 static int mem_get(void)
 {
     void *base = NULL;
+    int rc;
     if (mem_uid >= 0) {
         vjo_arena_reset(&arena);
         return 0;
@@ -140,7 +148,14 @@ static int mem_get(void)
         vjo_log("anki: memblock (%d KiB) failed 0x%08X", ANKI_MEM_SIZE >> 10, mem_uid);
         return -1;
     }
-    sceKernelGetMemBlockBase(mem_uid, &base);
+    rc = sceKernelGetMemBlockBase(mem_uid, &base);
+    if (rc < 0 || !base) {
+        vjo_log("anki: memblock base failed 0x%08X", (unsigned)rc);
+        sceKernelFreeMemBlock(mem_uid);
+        mem_uid = -1;
+        vjo_arena_init(&arena, NULL, 0);
+        return -1;
+    }
     vjo_arena_init(&arena, base, ANKI_MEM_SIZE);
     return 0;
 }
@@ -515,7 +530,7 @@ static int anki_main(SceSize args, void *argp)
 
 int vjo_anki_start(void)
 {
-    vjo_platform_vita(&plat);
+    vjo_platform_vita(&plat, NULL);
     vjo_arena_init(&arena, NULL, 0);
     box_lock = sceKernelCreateMutex("VjoAnkiBox", 0, 0, NULL);
     evf = sceKernelCreateEventFlag("VjoAnkiEv", 0, 0, NULL);

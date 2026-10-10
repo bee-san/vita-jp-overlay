@@ -47,7 +47,9 @@ int vjo_http_send(VjoConn *c, const VjoHttpRequest *req)
         head_add(head, sizeof(head), &n, "Content-Type: %s\r\n", req->content_type);
     if (req->body_len || req->write_body)
         head_add(head, sizeof(head), &n, "Content-Length: %lu\r\n", (unsigned long)req->body_len);
-    head_add(head, sizeof(head), &n, "Connection: close\r\n%s\r\n", req->extra_headers ? req->extra_headers : "");
+    if (!req->keep_alive)
+        head_add(head, sizeof(head), &n, "Connection: close\r\n");
+    head_add(head, sizeof(head), &n, "%s\r\n", req->extra_headers ? req->extra_headers : "");
     if (n >= sizeof(head))
         return VJO_E_HTTP;
     rc = vjo_conn_send_all(c, head, n);
@@ -55,6 +57,8 @@ int vjo_http_send(VjoConn *c, const VjoHttpRequest *req)
         return rc;
     return req->write_body ? req->write_body(req->ud, c) : VJO_OK;
 }
+
+#define MAX_TRAILERS 32 /* more: the connection is not kept */
 
 /* Buffered reader over a connection. */
 typedef struct {
@@ -97,17 +101,116 @@ static int rd_line(Rd *r, char *out, size_t cap)
     size_t n = 0;
     for (;;) {
         int ch = rd_byte(r);
-        if (ch < 0)
-            return n ? (int)n : -1;
-        if (ch == '\n')
+        if (ch < 0 || n + 1 >= cap || ch == '\n' || !ch ||
+            (ch < 0x20 && ch != '\r' && ch != '\t') || ch == 0x7f) {
+            if (!r->err) r->err = VJO_E_HTTP;
+            return -1;
+        }
+        if (ch == '\r') {
+            if (rd_byte(r) != '\n') {
+                if (!r->err) r->err = VJO_E_HTTP;
+                return -1;
+            }
             break;
-        if (n + 1 < cap)
-            out[n++] = (char)ch;
+        }
+        out[n++] = (char)ch;
     }
-    if (n && out[n - 1] == '\r')
-        n--;
     out[n] = '\0';
     return (int)n;
+}
+
+static int token_char(unsigned char ch)
+{
+    return (ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'Z') ||
+           (ch >= 'a' && ch <= 'z') || (ch && strchr("!#$%&'*+-.^_`|~", ch));
+}
+
+static int value_equals(const char *value, const char *name)
+{
+    size_t n = strlen(value);
+    while (n && (value[n-1] == ' ' || value[n-1] == '\t')) n--;
+    return n == strlen(name) && vjo_ieq_prefix(value, name);
+}
+
+static int connection_close(const char *value)
+{
+    const char *p = value;
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == ',') p++;
+        const char *start = p;
+        while (*p && *p != ',') p++;
+        size_t n = (size_t)(p-start);
+        while (n && (start[n-1] == ' ' || start[n-1] == '\t')) n--;
+        if (n == 5 && vjo_ieq_prefix(start, "close")) return 1;
+    }
+    return 0;
+}
+
+static int content_size(const char *value, size_t *size)
+{
+    size_t n = 0;
+    if (*value < '0' || *value > '9') return VJO_E_HTTP;
+    while (*value >= '0' && *value <= '9') {
+        unsigned d = (unsigned)(*value++ - '0');
+        if (n > (SIZE_MAX-d)/10) return VJO_E_TOO_LARGE;
+        n = n*10+d;
+    }
+    while (*value == ' ' || *value == '\t') value++;
+    if (*value) return VJO_E_HTTP;
+    *size = n;
+    return VJO_OK;
+}
+
+/* Extensions cannot alter framing. Validate their token / quoted-string
+ * syntax instead of interpreting a malformed chunk size as the final zero. */
+static int chunk_size(const char *line, size_t max, size_t *size)
+{
+    size_t n = 0;
+    const char *p = line;
+    unsigned digits = 0;
+    for (;;) {
+        unsigned d;
+        if (*p >= '0' && *p <= '9') d = (unsigned)(*p-'0');
+        else if (*p >= 'a' && *p <= 'f') d = (unsigned)(*p-'a'+10);
+        else if (*p >= 'A' && *p <= 'F') d = (unsigned)(*p-'A'+10);
+        else break;
+        if (n > max/16 || (n == max/16 && d > max%16)) return VJO_E_TOO_LARGE;
+        n = n*16+d;
+        p++; digits++;
+    }
+    if (!digits) return VJO_E_HTTP;
+    while (*p) {
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p++ != ';') return VJO_E_HTTP;
+        while (*p == ' ' || *p == '\t') p++;
+        const char *name = p;
+        while (token_char((unsigned char)*p)) p++;
+        if (p == name) return VJO_E_HTTP;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '=') {
+            p++;
+            while (*p == ' ' || *p == '\t') p++;
+            if (*p == '"') {
+                p++;
+                while (*p && *p != '"') {
+                    if (*p == '\\') {
+                        p++;
+                        if (!*p) return VJO_E_HTTP;
+                    }
+                    if ((unsigned char)*p < 0x20 && *p != '\t') return VJO_E_HTTP;
+                    if ((unsigned char)*p == 0x7f) return VJO_E_HTTP;
+                    p++;
+                }
+                if (*p++ != '"') return VJO_E_HTTP;
+            } else {
+                const char *value = p;
+                while (token_char((unsigned char)*p)) p++;
+                if (p == value) return VJO_E_HTTP;
+            }
+        }
+    }
+    *size = n;
+    return VJO_OK;
 }
 
 static const char *hval(const char *line, size_t name_len)
@@ -151,7 +254,8 @@ int vjo_http_recv(VjoArena *a, VjoConn *c, size_t max_body, VjoHttpResponse *res
     Rd *r;
     char line[512];
     size_t content_length = 0;
-    int have_length = 0, chunked = 0, rc = VJO_OK;
+    int have_length = 0, chunked = 0, conn_close = 0, status = 0, rc = VJO_OK;
+    unsigned interim = 0;
     VjoBuf body;
 
     memset(resp, 0, sizeof(*resp));
@@ -167,16 +271,22 @@ int vjo_http_recv(VjoArena *a, VjoConn *c, size_t max_body, VjoHttpResponse *res
     r->eof = 0;
     r->err = 0;
 
+read_status:
     if (rd_line(r, line, sizeof(line)) < 0)
         return r->err ? r->err : VJO_E_HTTP;
     /* "HTTP/1.x NNN ..." */
     if (!vjo_ieq_prefix(line, "http/1.") || strlen(line) < 12 || line[8] != ' ')
         return VJO_E_HTTP;
+    status = 0;
     for (int k = 9; k < 12; k++) {
         if (line[k] < '0' || line[k] > '9')
             return VJO_E_HTTP;
-        resp->status = resp->status * 10 + (line[k] - '0');
+        status = status * 10 + (line[k] - '0');
     }
+    resp->status = status;
+    conn_close = line[7] != '1'; /* HTTP/1.0 */
+    have_length = chunked = 0;
+    resp->gzip = 0;
 
     for (;;) {
         int n = rd_line(r, line, sizeof(line));
@@ -184,58 +294,70 @@ int vjo_http_recv(VjoArena *a, VjoConn *c, size_t max_body, VjoHttpResponse *res
             return r->err ? r->err : VJO_E_HTTP;
         if (n == 0)
             break;
+        const char *colon = strchr(line, ':');
+        if (!colon || colon == line) return VJO_E_HTTP;
+        for (const char *p = line; p < colon; p++)
+            if (!token_char((unsigned char)*p)) return VJO_E_HTTP;
         if (vjo_ieq_prefix(line, "content-length:")) {
             const char *v = hval(line, 15);
-            if (*v < '0' || *v > '9')
-                return VJO_E_HTTP;
-            /* Stops growing past max_body, so long digit strings cannot overflow. */
-            for (content_length = 0; *v >= '0' && *v <= '9'; v++)
-                if (content_length <= max_body)
-                    content_length = content_length * 10 + (size_t)(*v - '0');
+            size_t length;
+            rc = content_size(v, &length);
+            if (rc) return rc;
+            if (have_length && length != content_length) return VJO_E_HTTP;
+            content_length = length;
             have_length = 1;
         } else if (vjo_ieq_prefix(line, "transfer-encoding:")) {
-            if (vjo_ieq_prefix(hval(line, 18), "chunked"))
-                chunked = 1;
+            if (chunked || !value_equals(hval(line, 18), "chunked")) return VJO_E_HTTP;
+            chunked = 1;
         } else if (vjo_ieq_prefix(line, "content-encoding:")) {
-            if (vjo_ieq_prefix(hval(line, 17), "gzip"))
+            if (value_equals(hval(line, 17), "gzip"))
                 resp->gzip = 1;
+        } else if (vjo_ieq_prefix(line, "connection:")) {
+            conn_close |= connection_close(hval(line, 11));
         }
+    }
+
+    if (chunked && have_length) return VJO_E_HTTP;
+    if (status >= 100 && status < 200) {
+        /* Informational replies precede the real response. Protocol upgrades
+         * have no place in this bounded HTTP request/response client. */
+        if (status == 101 || have_length || chunked || ++interim > 8) return VJO_E_HTTP;
+        goto read_status;
     }
 
     vjo_buf_init(&body, a);
 
+    /* These never have a body (RFC 9112 6.3), whatever the headers say. */
+    if (status == 204 || status == 304) {
+        chunked = 0;
+        have_length = 1;
+        content_length = 0;
+    }
     if (chunked) {
         for (;;) {
             size_t sz = 0;
-            const char *p;
             if (rd_line(r, line, sizeof(line)) < 0) {
                 rc = r->err ? r->err : VJO_E_HTTP;
                 break;
             }
-            for (p = line; *p; p++) {
-                int d;
-                if (*p >= '0' && *p <= '9')
-                    d = *p - '0';
-                else if (*p >= 'a' && *p <= 'f')
-                    d = *p - 'a' + 10;
-                else if (*p >= 'A' && *p <= 'F')
-                    d = *p - 'A' + 10;
-                else
-                    break;
-                sz = sz * 16 + (size_t)d;
-                if (sz > max_body) {
-                    rc = VJO_E_TOO_LARGE;
-                    break;
-                }
-            }
+            rc = chunk_size(line, max_body, &sz);
             if (rc)
                 break;
-            if (sz == 0)
-                break; /* trailers are ignored (Connection: close) */
+            if (sz == 0) {
+                /* Trailers (ignored) up to the empty line that ends them. */
+                int k = 1;
+                for (int n = 0; k > 0 && n < MAX_TRAILERS; n++)
+                    k = rd_line(r, line, sizeof(line));
+                if (k != 0) rc = r->err ? r->err : VJO_E_HTTP;
+                break;
+            }
             rc = read_exact(r, &body, max_body, sz);
             if (rc)
                 break;
-            rd_line(r, line, sizeof(line)); /* CRLF after chunk */
+            if (rd_byte(r) != '\r' || rd_byte(r) != '\n') {
+                rc = r->err ? r->err : VJO_E_HTTP;
+                break;
+            }
         }
     } else if (have_length) {
         if (content_length > max_body)
@@ -244,6 +366,7 @@ int vjo_http_recv(VjoArena *a, VjoConn *c, size_t max_body, VjoHttpResponse *res
             rc = read_exact(r, &body, max_body, content_length);
     } else {
         /* Read until close. */
+        conn_close = 1;
         for (;;) {
             if (r->pos >= r->len && !rd_fill(r))
                 break;
@@ -261,5 +384,6 @@ int vjo_http_recv(VjoArena *a, VjoConn *c, size_t max_body, VjoHttpResponse *res
     if (!resp->body)
         return VJO_E_OOM;
     resp->body_len = body.len;
+    resp->keep_alive = !conn_close && r->pos == r->len;
     return VJO_OK;
 }

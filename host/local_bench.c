@@ -86,7 +86,7 @@ int main(int argc, char **argv)
         for (int i = 0; i < d.list.n_entries; i++) {
             const VjoEntry *e = &d.list.entries[i];
             digest = hash_string(digest, e->text);
-            snprintf(range, sizeof(range), "%d,%d,%d", e->first_pos16, e->hl_start, e->hl_end);
+            snprintf(range, sizeof(range), "%d,%d,%d", e->pos16, e->hl_start, e->hl_end);
             digest = hash_string(digest, range);
         }
         printf("{\"run\":%d,\"lookup_us\":%.3f,\"read_calls\":%" PRIu64 ",\"read_bytes\":%" PRIu64

@@ -161,16 +161,89 @@ static void rear_sample(void)
     __sync_lock_release(&rear_busy);
 }
 
+/* Player input for change detection (g.input_us32): a press, a release, a
+ * stick entering or leaving its deadzone, a touch starting, moving or
+ * ending (g.input_edge_us32 too); and held, for HELD_INPUT_US after that
+ * (auto-repeat scrolling), not longer: a button held through a scene must
+ * not keep icons from being masked. Only input the game gets, read in its
+ * own pad and touch calls: none while the overlay blocks it, no trigger
+ * combo or held-over button it never sees. */
+#define HELD_INPUT_US 1500000
+
+typedef struct {
+    uint32_t state;
+    int64_t edge_us;
+} Activity;
+
+static void note_activity(Activity *a, uint32_t state)
+{
+    int64_t now = ksceKernelGetSystemTimeWide();
+    if (g.input_block) {
+        a->state = state; /* the game gets none of it: no edge, now or at the unblock */
+        return;
+    }
+    if (state != a->state) {
+        a->state = state;
+        a->edge_us = now;
+        g.input_edge_us32 = (uint32_t)now;
+    } else if (!state || now - a->edge_us > HELD_INPUT_US) {
+        return;
+    }
+    g.input_us32 = (uint32_t)now; /* one store each: written from any thread */
+}
+
+/* Game threads, unsynchronized: two threads reading at once can tear
+ * edge_us, which at worst shortens or lengthens one hold by HELD_INPUT_US.
+ * The pad's per port: a game may read several, one state each. */
+#define HOLD_PORTS 5 /* pad ports: 0 = the Vita's pad, 1-4 = PS TV controllers */
+static Activity touch_activity, pad_activity[HOLD_PORTS];
+
+#define STICK_DEADZONE 32
+/* SceCtrlData.buttons bits the player presses; the higher ones are status
+ * (SCE_CTRL_INTERCEPTED, HEADPHONE, VOLUP/VOLDOWN, POWER). */
+#define PLAYER_BUTTONS 0xFFFFu
+
+/* Bit 0: pushed one way past the deadzone, bit 1: the other way. */
+static uint32_t stick_dir(uint8_t v)
+{
+    return v < 128 - STICK_DEADZONE ? 1u : v > 128 + STICK_DEADZONE ? 2u : 0u;
+}
+
+/* A touch's state: down, and where, in 128-unit squares (a drag moves). */
+static uint32_t touch_state(const KTouchData *t)
+{
+    if (!t->reportNum)
+        return 0;
+    return 1u | ((uint32_t)t->report[0].x >> 7 & 0x3F) << 1 | ((uint32_t)t->report[0].y >> 7 & 0x3F) << 7;
+}
+
 /* Combo delay state (triggers.h), per pad port: a game may also read empty
  * ports, which must not end a press. Pad calls can come from several game
- * threads: one at a time uses it, the others skip the delay. Reset when the
- * triggers change (g.trigger_gen). */
+ * threads: one at a time uses it, the others skip the delay (so a combo's
+ * first button can reach such a thread for a frame, and count as an input
+ * edge in change detection). Reset when the triggers change
+ * (g.trigger_gen). */
 #define COMBO_DELAY_US 300000 /* covers the gap between a combo's two presses */
-#define HOLD_PORTS 5          /* 0 = the Vita's pad, 1-4 = PS TV controllers */
 
 static TrigHold hold[HOLD_PORTS][TRIG_COUNT];
 static volatile int hold_busy;
 static uint32_t hold_gen;
+
+/* At most one line per condition during each overlay opening. */
+static volatile uint32_t input_trace;
+enum { INPUT_TRACE_FIRST = 1, INPUT_TRACE_CROSS = 2, INPUT_TRACE_COPY = 4,
+       INPUT_TRACE_FOREIGN = 8, INPUT_TRACE_EMPTY = 16 };
+
+void input_trace_reset(void)
+{
+    __atomic_store_n(&input_trace, 0, __ATOMIC_RELEASE);
+}
+
+static int input_trace_claim(uint32_t bit)
+{
+    if (__atomic_load_n(&input_trace, __ATOMIC_RELAXED) & bit) return 0;
+    return !(__sync_fetch_and_or(&input_trace, bit) & bit);
+}
 
 static void trig_config(TrigConfig *c)
 {
@@ -182,13 +255,22 @@ static void trig_config(TrigConfig *c)
 }
 
 /* Rewrites the game's pad data (user memory) in place. */
-static void filter_ctrl(int port, SceCtrlData *pad_data, int n, int negative)
+static int filter_ctrl(int hook, int port, SceCtrlData *pad_data, int n, int negative)
 {
     TrigConfig c;
     TrigHold *holds = NULL;
     int64_t now;
-    if (n <= 0 || g.game_pid <= 0 || !g.game_active || ksceKernelGetProcessId() != g.game_pid)
-        return;
+    SceUID caller = ksceKernelGetProcessId();
+    if (n <= 0 || g.game_pid <= 0 || !g.game_active)
+        return n;
+    if (caller != g.game_pid) {
+        if (g.input_block && hook == H_READ_POS2 && input_trace_claim(INPUT_TRACE_FOREIGN))
+            klog("input foreign hook=%d pid=%X game=%X block=%d", hook, caller, g.game_pid, g.input_block);
+        return n;
+    }
+    if (n > 64 && g.input_block)
+        return VJO_ERR_ARG;
+    int returned = n;
     if (n > 64)
         n = 64;
     /* One time for the call's samples: games read one at a time. */
@@ -206,22 +288,49 @@ static void filter_ctrl(int port, SceCtrlData *pad_data, int n, int negative)
             uint32_t buttons;
             uint8_t lx, ly, rx, ry;
         } d;
-        uint32_t pos;
+        uint32_t pos = 0;
+        int copy_rc;
         uintptr_t u = (uintptr_t)&pad_data[i].buttons;
-        if (ksceKernelMemcpyUserToKernel(&d, (const void *)u, sizeof(d)) < 0)
-            break;
-        pos = negative ? ~d.buttons : d.buttons;
         if (g.input_block) {
-            pos = 0;
+            /* Neutral output must not depend on reading the old sample. */
+            int trace = input_trace_claim(INPUT_TRACE_FIRST);
+            if ((g.raw_buttons & SCE_CTRL_CROSS) && input_trace_claim(INPUT_TRACE_CROSS))
+                trace = 1;
+            uint32_t before = 0;
+            int read_rc = 0;
+            if (trace) {
+                read_rc = ksceKernelMemcpyUserToKernel(&d, (const void *)u, sizeof(d));
+                if (read_rc >= 0) before = negative ? ~d.buttons : d.buttons;
+            }
+            d.buttons = negative ? ~0u : 0;
             d.lx = d.ly = d.rx = d.ry = 0x80;
+            copy_rc = ksceKernelMemcpyKernelToUser((void *)u, &d, sizeof(d));
+            if (trace || (copy_rc < 0 && input_trace_claim(INPUT_TRACE_COPY)))
+                klog("input blocked hook=%d pid=%X game=%X read=%08X write=%08X buttons=%08X raw=%08X",
+                     hook, caller, g.game_pid, read_rc, copy_rc, before, g.raw_buttons);
         } else {
+            copy_rc = ksceKernelMemcpyUserToKernel(&d, (const void *)u, sizeof(d));
+            if (copy_rc < 0) {
+                returned = copy_rc;
+                break;
+            }
+            pos = negative ? ~d.buttons : d.buttons;
             pos = trig_filter(&c, holds, pos, now) & ~g.suppress_mask;
+            d.buttons = negative ? ~pos : pos;
+            copy_rc = ksceKernelMemcpyKernelToUser((void *)u, &d, sizeof(d));
         }
-        d.buttons = negative ? ~pos : pos;
-        ksceKernelMemcpyKernelToUser((void *)u, &d, sizeof(d));
+        if (copy_rc < 0) {
+            returned = copy_rc;
+            break;
+        }
+        if (i == n - 1 && port >= 0 && port < HOLD_PORTS)
+            note_activity(&pad_activity[port], (pos & PLAYER_BUTTONS) | stick_dir(d.lx) << 16 |
+                                                       stick_dir(d.ly) << 18 | stick_dir(d.rx) << 20 |
+                                                       stick_dir(d.ry) << 22);
     }
     if (holds)
         __sync_lock_release(&hold_busy);
+    return returned;
 }
 
 #define CTRL_HOOK(idx, name, negative)                                       \
@@ -232,7 +341,10 @@ static void filter_ctrl(int port, SceCtrlData *pad_data, int n, int negative)
         rear_sample();                                                       \
         display_static_fb_sample();                                          \
         if (ret > 0)                                                         \
-            filter_ctrl(port, pad_data, ret, negative);                            \
+            ret = filter_ctrl(idx, port, pad_data, ret, negative);            \
+        else if (g.input_block && ksceKernelGetProcessId() == g.game_pid &&   \
+                 input_trace_claim(INPUT_TRACE_EMPTY))                       \
+            klog("input empty hook=%d pid=%X result=%d", idx, g.game_pid, ret); \
         return ret;                                                          \
     }
 
@@ -254,9 +366,12 @@ CTRL_HOOK(H_READ_POS_EXT2, read_pos_ext2, 0)
  * rear_peek_thid, and passes. */
 static int filter_touch(KTouchData *p, int ret)
 {
-    if (ret <= 0 || ret > 64 || !g.input_block || g.game_pid <= 0 || !g.game_active)
+    if (ret <= 0 || ret > 64 || g.game_pid <= 0 || !g.game_active)
         return ret;
     if (ksceKernelGetProcessId() != g.game_pid)
+        return ret;
+    note_activity(&touch_activity, touch_state(&p[ret - 1]));
+    if (!g.input_block)
         return ret;
     p[0] = p[ret - 1];
     p[0].reportNum = 0;

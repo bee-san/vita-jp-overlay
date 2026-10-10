@@ -1,0 +1,61 @@
+{
+  "date": "2026-10-10",
+  "environment": {
+    "platform": "Linux-7.2.6-1-cachyos-x86_64-with-glibc2.44",
+    "python": "3.14.7",
+    "compiler": "cc (GCC) 16.2.1 20260810"
+  },
+  "source": {
+    "archive": "daijirin4-gpt-6-luna-en-jp-v2.zip",
+    "bytes": 149093667,
+    "sha256": "047ba97645bf0cca0f8e7c7266c51b627f60f0702720ae2188d3495952dca55a",
+    "source_rows": 334751
+  },
+  "converted": {
+    "bytes": 156829495,
+    "sha256": "66f8ee1e448fea85c98d458acde28cb1cdbdbec73b39787cc5fc098a722b51d5",
+    "entries": 334741,
+    "index_records": 602634,
+    "truncated": 53,
+    "reading_only": 2,
+    "skipped_empty": 1,
+    "skipped_long": 9,
+    "max_prepared_definition": 7000,
+    "max_payload": 7021
+  },
+  "runtime_limits": {
+    "result_bytes": 65536,
+    "scratch_cap": 49152,
+    "host_workspace_bytes": 45136,
+    "entries_tokens": 128,
+    "per_position_matches": 8,
+    "caller_arena": 262144,
+    "arm_workspace_bytes": 45040,
+    "workspace_growth_bytes": 768
+  },
+  "lookup": {
+    "cases": 22,
+    "repeats_each": 5,
+    "successful_samples": 110,
+    "peak_bytes": 111088,
+    "median_warm_host_us_range": [
+      13.766,
+      242.4035
+    ],
+    "stress_limit_failures_handled": 2
+  },
+  "combined": {
+    "cases": 6,
+    "repeats_each": 5,
+    "all_pass": true,
+    "peak": 169880,
+    "host_external_two_slot_net_pool_bytes": 47600
+  },
+  "scope": [
+    "Host production core API with real on-disk dictionary and private dialogue fixtures.",
+    "Combined samples include JPEG VjoBuf storage and recorded Lens protobuf replay in a 256 KiB arena.",
+    "Replay bypasses TLS and does not measure JPEG encoding or Paf UI/font/string allocations.",
+    "Native Vita timing and available memory require manual hardware testing.",
+    "No dictionary source, definitions, screenshots or OCR text are included."
+  ]
+}

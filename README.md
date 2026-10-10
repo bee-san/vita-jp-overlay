@@ -6,13 +6,21 @@ This [bee-san fork](https://github.com/bee-san/vita-jp-overlay) of
 [Hachidori Relay](https://github.com/bee-san/hachidori-anki) by default.
 It also supports **locally installed Yomitan dictionaries** with bounded-memory,
 disk-backed lookup. See [Local dictionaries](docs/local-dictionaries.md).
-Native Vita text mode uses OCR once to match a game text source, with a manual
-Japanese-first hook picker as fallback. After selection it reads text directly.
-See [Native text sources](docs/native-text.md) for installation and current
-validation limits. OCR calibration defaults to Google Lens. An **experimental CPU-only ncnn
-backend** runs PP-OCRv5 mobile locally; see [Local OCR](docs/local-ocr.md).
-Jiten and JPDB remain optional backends.
+Google Lens reads the selected screen region. Upstream v0.6 scene detection
+starts OCR as dialogue settles, keeps connections ready, and reuses a matching
+background result when you open the overlay. Local dictionaries still work
+without a dictionary API key or a running computer.
+
+Experiments are isolated on separate branches:
+- [experiment/meiki-ocr](https://github.com/bee-san/vita-jp-overlay/tree/experiment/meiki-ocr): local Meiki OCR and its bounded game worker.
+- [experiment/textractor](https://github.com/bee-san/vita-jp-overlay/tree/experiment/textractor): native Vita text extraction and the source picker. This is Vita-specific code, not the Windows Textractor application.
+
+The normal release contains only the kernel and Shell plugins; neither experimental
+worker is registered or loaded. Jiten and JPDB remain optional backends.
 No dictionary API key is needed for Hachidori.
+
+Connection timings and the GameSentenceMiner comparison are in
+[Lens performance](docs/lens-performance.md).
 
 The idea comes from [meikidroid](https://github.com/rtr46/meikidroid)
 
@@ -21,8 +29,7 @@ The idea comes from [meikidroid](https://github.com/rtr46/meikidroid)
 ## Requirements
 
 - A PS Vita on firmware 3.60 to 3.74 with HENkaku Ensō or h-encore.
-- Wi-Fi for Google Lens, online dictionaries and Anki. Local OCR plus local
-  dictionaries can work offline; the ncnn backend still needs on-console testing.
+- Wi-Fi for Google Lens. Local dictionary lookups need no network; Anki cards can be queued offline.
 - For local dictionaries: a computer with Python 3.9+ to convert dictionary ZIPs
   once, then copy the resulting files to the Vita. The computer can be off while playing.
 - For Hachidori Relay: a computer running Anki with Hachidori Relay v0.0.4 or newer,
@@ -41,14 +48,13 @@ The idea comes from [meikidroid](https://github.com/rtr46/meikidroid)
   USB mode both work. You should end up with:
   - `ur0:tai/VitaJPOverlay_Kernel.skprx`
   - `ur0:tai/VitaJPOverlay_Shell.suprx`
-  - `ur0:tai/VitaJPOverlay_Text.suprx`
   - `ur0:data/VitaJPOverlay/vitajpoverlay.rco`
 3. Open `ur0:tai/config.txt` (or `ux0:tai/config.txt`, if that is the one your taiHEN uses) and
   add two lines:
   - `ur0:tai/VitaJPOverlay_Kernel.skprx` on a new line under `*KERNEL`
   - `ur0:tai/VitaJPOverlay_Shell.suprx` on a new line under `*main`
-   Register `VitaJPOverlay_Text.suprx` under each native game's title ID as
-   described in the [native text guide](docs/native-text.md#install).
+   Disable any existing `VitaJPOverlay_Text.suprx` or `VitaJPOverlay_OCR.suprx`
+   registrations when switching from an experimental build. The FTP installer does this automatically.
 4. Copy the zip's `config.ini` to `ux0:data/VitaJPOverlay/config.ini`. Keep
    `dictionary = hachidori` and set `hachidori_host` to your computer's LAN IP
    as described below. The file is read each time the overlay opens, so later
@@ -92,7 +98,7 @@ You can enable up to eight dictionary files or combine multiple ZIPs. The
 converter and FTP installer are included in the fork's build ZIP. See the
 [installation guide and memory limits](docs/local-dictionaries.md).
 Dictionary lookup needs no computer or internet. Google Lens OCR needs internet;
-pair this with [local ncnn OCR](docs/local-ocr.md) for offline recognition.
+the default release uses Google Lens for recognition.
 The existing Hachidori Relay default is preserved until you select
 `local` (or use `tools/install_dictionary.py --enable`).
 
@@ -148,7 +154,7 @@ In a game:
 | Input      | Action                                                                                                        |
 | ---------- | ------------------------------------------------------------------------------------------------------------- |
 | L + R      | Open or close the overlay (`toggle_button`).                                                                  |
-| Select + R | Subtitles on or off (`subtitle_button`): a text strip; Lens refreshes automatically, ncnn recognizes once when enabled. |
+| Select + R | Subtitles on or off (`subtitle_button`): a text strip that refreshes as dialogue changes. |
 
 
 In the overlay:
@@ -163,7 +169,6 @@ In the overlay:
 | △                | Send the saved queue to AnkiConnect on your computer. |
 | □                | Choose the area to read in this game. Drag a box on the touchscreen, then press × to keep it or ○ to cancel. Holding □ sets the full screen. |
 | ○, or the toggle | Close the overlay.                                                                                                                           |
-| Select + □ | Open the native text source picker. |
 
 Works with PSP games in Adrenaline. They all share one OCR region, because every PSP game runs inside the same emulator app.
 
@@ -189,10 +194,9 @@ All settings live in `ux0:data/VitaJPOverlay/config.ini`. The area to read (□ 
 | `font_size_en`        | 8 to 40                                                             | 14         | Size of the English text: meanings and messages.                                             |
 | `toggle_button`       | `l+r`, `select`, `start`, `select+l`, `select+r`, `rear_double_tap` | `l+r`      | What opens and closes the overlay. Buttons are hidden from the game; rear taps are not.      |
 | `subtitle_button`     | same as `toggle_button`                                             | `select+r` | What turns subtitles on and off.                                                             |
-| `ocr_backend` | `lens`, `ncnn` | `lens` | Online Lens or experimental local CPU OCR; see [setup](docs/local-ocr.md). |
-| `text_source` | `auto`, `hooks`, `ocr` | `auto` | Read a screenshot and show stable native text matches, manual sources without OCR, or the legacy OCR flow. |
-| `ocr_model_dir` | directory path | `ux0:data/VitaJPOverlay/ocr` | Folder holding the pinned mobile recognizer weights. |
-| `ocr_mode` | `auto`, `on_press` | `auto` | Lens background/on-press policy. ncnn always runs on demand. |
+| `ocr_backend` | `lens` | `lens` | Google Lens screenshot recognition. |
+| `text_source` | `ocr` | `ocr` | Screenshot OCR; old `auto` settings migrate to OCR. Hooks require the experimental branch. |
+| `ocr_mode` | `auto`, `on_press` | `auto` | Recognize changing text in the background or only when opening the overlay. |
 | `log_host`            | IPv4 address                                                        | empty      | Send debug logs to `tools/udp_log_listener.py` on that computer.                             |
 | `log_file`            | `on`, `off`                                                         | `off`      | Write a debug log to `ux0:data/VitaJPOverlay/log.txt` (256 KB at most, plus one older file). |
 
@@ -247,8 +251,6 @@ The queue uses the existing **384 KiB temporary Anki arena**, released while idl
 
 - With `ocr_backend = lens`, the chosen area is sent to Google Lens. In `auto` mode,
 and while subtitles are on, that happens every time the area changes while a game is running.
-- With `ocr_backend = ncnn`, OCR runs on the Vita and sends no screenshot to
-  an OCR service. A local failure never switches to Lens automatically.
 - With `dictionary = local`, dictionary lookup stays on the Vita. No dictionary
   request is sent to a computer or cloud service. OCR follows the selected
   backend's behavior described above.
@@ -288,10 +290,9 @@ tools/setup_toolchain.sh
 
 Build and run the tests on your computer:
 
-The default build fetches pinned ncnn sources and model assets. Python 3 and
-Pillow are needed for model preparation and host tests. Use
-`-DVJO_WITH_NCNN=OFF` for a build without local OCR. Details and limitations:
-[local OCR guide](docs/local-ocr.md).
+The default build uses Google Lens and needs no neural model download.
+Python 3 and Pillow are needed for conversion and host JPEG tests. The retained
+ncnn adapter is opt-in with `-DVJO_WITH_NCNN=ON`; the default Shell stays Lens-only.
 
 ```bash
 cmake -S . -B build/host -G Ninja && cmake --build build/host

@@ -80,7 +80,7 @@ void vjo_config_defaults(VjoConfig *c)
     c->subtitle_button = VJO_TRIGGER_SELECT_R;
     c->ocr_mode = VJO_OCR_AUTO;
     c->ocr_backend = VJO_OCR_LENS;
-    c->text_source = VJO_SOURCE_AUTO;
+    c->text_source = VJO_SOURCE_OCR;
     vjo_snprintf(c->ocr_model_dir, sizeof(c->ocr_model_dir), "ux0:data/VitaJPOverlay/ocr");
     vjo_snprintf(c->anki_deck, sizeof(c->anki_deck), "Default");
     vjo_snprintf(c->anki_note_type, sizeof(c->anki_note_type), "Lapis");
@@ -130,8 +130,8 @@ const char *vjo_config_default_text(void)
            "; acts on release.\n"
            "subtitle_button = select+r\n"
            "\n"
-           "; Text: auto (read screenshot and show native text matches) | hooks (manual, no OCR) | ocr\n"
-           "text_source = auto\n"
+           "; Text is read from screenshots using OCR.\n"
+           "text_source = ocr\n"
            "\n"
            "; OCR: lens (online) | ncnn (experimental CPU-only PP-OCRv5 mobile)\n"
            "; ncnn requires the model download and a selected dialogue region; see docs/local-ocr.md.\n"
@@ -453,8 +453,11 @@ static void set_kv(VjoConfig *c, const char *key, const char *val)
     } else if (vjo_ieq(key, "subtitle_button")) {
         set_trigger(c, key, val, &c->subtitle_button);
     } else if (vjo_ieq(key, "text_source")) {
-        if (vjo_ieq(val, "auto")) c->text_source = VJO_SOURCE_AUTO;
-        else if (vjo_ieq(val, "hooks")) c->text_source = VJO_SOURCE_HOOKS;
+        if (vjo_ieq(val, "auto")) c->text_source = VJO_SOURCE_OCR;
+        else if (vjo_ieq(val, "hooks")) {
+            c->text_source = VJO_SOURCE_OCR;
+            warn(c, "%s: hooks are unavailable in this OCR build", key, "");
+        }
         else if (vjo_ieq(val, "ocr")) c->text_source = VJO_SOURCE_OCR;
         else warn(c, "%s: invalid value '%s'", key, val);
     } else if (vjo_ieq(key, "ocr_backend")) {

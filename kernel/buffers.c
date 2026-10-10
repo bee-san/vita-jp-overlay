@@ -1,5 +1,5 @@
-/* Capture buffer, allocated on request. Native text releases an idle buffer;
- * OCR and optional Anki screenshots can request it again. */
+/* Capture buffer, allocated on request for the selected region.
+ * JPEG readers release it before the Lens upload begins. */
 #include <psp2kern/kernel/sysclib.h>
 #include <psp2kern/kernel/sysmem.h>
 
@@ -56,28 +56,15 @@ void buffers_free(void)
     g.alloc_status = VJO_ALLOC_NONE;
 }
 
-void buffers_trim(void)
-{
-    if (!g.capture_release) return;
-    VJO_LOCK();
-    if (g.capture_release && g.capture_state == CAPTURE_IDLE && !(g.capture_once && g.raw_valid)) {
-        g.capture_release = 0;
-        g.raw_valid = 0;
-        buffers_free();
-    }
-    VJO_UNLOCK();
-}
-
 void buffers_read_done(uint32_t row, uint32_t rows)
 {
     /* JPEG reads each row once; local ncnn OCR rereads rows in multiple passes.
-     * Protect a JPEG image from native-source trims until its final user copy,
-     * then free under the capture lock, before the shell starts Lens upload. */
+     * Release under the capture lock after the final successful user copy,
+     * before the shell starts Lens upload. */
     if (g.capture_once && g.raw_valid && row < g.crop_h && rows >= g.crop_h-row) {
         g.raw_valid = 0;
         g.capture_full = 0;
         g.capture_once = 0;
-        g.capture_release = 0;
         buffers_free();
     }
 }

@@ -39,6 +39,7 @@ enum {
     VJO_E_OCR_UNAVAILABLE = -117, /* build has no local OCR */
     VJO_E_CANCELLED = -118,
     VJO_E_OCR_INFERENCE = -119,
+    VJO_E_OCR_MODEL_IO = -120, /* game process could not open/seek/read OCR weights */
 };
 
 #endif

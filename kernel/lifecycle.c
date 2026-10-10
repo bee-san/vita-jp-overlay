@@ -25,11 +25,15 @@ static VjoForeground fg_load(void)
 
 static void fg_store(const VjoForeground *f, uint32_t iev)
 {
+    /* Always game_lock -> capture lock, shared with OCR submit/take/read. */
+    VJO_LOCK();
     if ((iev & (IEV_GAME_START | IEV_GAME_EXIT)) || g.game_active != f->game_active)
         __atomic_add_fetch(&g.text_epoch, 1, __ATOMIC_RELEASE);
     g.game_active = f->game_active;
     g.game_pid = f->game_pid;
     g.prev_game_pid = f->prev;
+    game_ocr_foreground_changed_locked();
+    VJO_UNLOCK();
     if (iev)
         ksceKernelSetEventFlag(g.ievf, iev);
 }
@@ -42,6 +46,8 @@ static int procevent_patched(int pid, int ev, int a3, int a4, int *a5, int a6)
         goto out;
     f = fg_load();
     iev = fg_process_event(&f, pid, ev);
+    if (ev == PROCEV_EXIT)
+        game_ocr_process_gone(pid); /* Suspend cancels but never unpins a reader. */
     if ((iev & IEV_GAME_EXIT) && (iev & IEV_GAME_START))
         klog("pid 0x%X gone: back to game pid 0x%X", pid, f.game_pid);
     fg_store(&f, iev);

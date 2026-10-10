@@ -25,3 +25,10 @@ VitaJPOverlay_Kernel:
         - vjoTextControl
         - vjoTextReference
         - vjoTextRead
+        - vjoOcrRegister
+        - vjoOcrTake
+        - vjoOcrCancelled
+        - vjoOcrComplete
+        - vjoOcrSubmit
+        - vjoOcrRead
+        - vjoOcrCancel

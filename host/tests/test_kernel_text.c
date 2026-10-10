@@ -20,6 +20,8 @@ static unsigned capture_copies;
 static uint32_t capture_storage[VJO_MAX_W * VJO_MAX_H + 8];
 static uint32_t frame_pixels[VJO_MAX_W * VJO_MAX_H];
 void klog(const char *fmt, ...) {}
+/* This suite exercises the pre-existing non-OCR capture path. */
+int game_ocr_capture_busy_locked(void) { return 0; }
 
 SceUID ksceKernelGetProcessId(void) { return caller; }
 uint64_t ksceKernelGetSystemTimeWide(void) { return 1000000; }

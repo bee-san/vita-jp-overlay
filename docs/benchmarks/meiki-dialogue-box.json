@@ -1,0 +1,479 @@
+{
+  "scope": "host actual overlay C adapter, C preprocessing, bounded MNN callback and C decoder; not console RAM or latency",
+  "input_mode": "dialogue-box",
+  "crop_pad_factor": 1,
+  "detected_line_limit": 8,
+  "environment": {
+    "platform": "Linux-7.2.6-1-cachyos-x86_64-with-glibc2.44",
+    "machine": "x86_64"
+  },
+  "repetitions": 2,
+  "cli_sha256": "3abc47b100c02fb499a2f75643e1508eb78f7474e39cda38c1f320ef7c619842",
+  "model_sha256": "b7ba3219cd1bfeef5cb6b42ef6686683b991c6561b7ad3b1c41d32817deba21e",
+  "detector_sha256": "f0865ed291846a130905527f67c33f17e64d0f2c5eb38378ed1faea57f74b1ba",
+  "uncertain_policy": "whole-region CER excludes any region with uncertain annotations; those regions are exercised and reported separately",
+  "manifest_sha256": {
+    "vita-test": "5fa68d04648c246c1a0fd2966c8c13a8a0a8d49521288d0663a8770518ae1122",
+    "psp-test": "2b8db0849a42673b72f86d5466439719b2a9f8012c68e3c560fce3374e4076bc"
+  },
+  "exclusions": {
+    "vita-test": {
+      "uncertain_regions": 2
+    },
+    "psp-test": {
+      "uncertain_regions": 0
+    }
+  },
+  "sets": {
+    "vita-test": {
+      "regions": {
+        "fixtures": 84,
+        "inference_requests": 168,
+        "scored_fixtures": 82,
+        "statuses": {
+          "0": 84
+        },
+        "repeat_text_differences": 0,
+        "peak_model_tensor_bytes": 13235648,
+        "max_retained_pool_bytes": 0,
+        "allocation_failures": 0,
+        "score": {
+          "all": {
+            "lines": 82,
+            "chars": 2506,
+            "errors": 166,
+            "cer": 0.06624,
+            "exact": 0.45122
+          },
+          "styles": {
+            "bright-on-dark": {
+              "lines": 70,
+              "chars": 2194,
+              "errors": 137,
+              "cer": 0.06244,
+              "exact": 0.42857
+            },
+            "coloured": {
+              "lines": 10,
+              "chars": 279,
+              "errors": 11,
+              "cer": 0.03943,
+              "exact": 0.3
+            },
+            "coloured-name": {
+              "lines": 8,
+              "chars": 217,
+              "errors": 9,
+              "cer": 0.04147,
+              "exact": 0.25
+            },
+            "dark-on-light": {
+              "lines": 21,
+              "chars": 583,
+              "errors": 38,
+              "cer": 0.06518,
+              "exact": 0.52381
+            },
+            "furigana": {
+              "lines": 2,
+              "chars": 66,
+              "errors": 7,
+              "cer": 0.10606,
+              "exact": 0.0
+            },
+            "mincho": {
+              "lines": 17,
+              "chars": 676,
+              "errors": 75,
+              "cer": 0.11095,
+              "exact": 0.29412
+            },
+            "name": {
+              "lines": 53,
+              "chars": 1685,
+              "errors": 122,
+              "cer": 0.0724,
+              "exact": 0.39623
+            },
+            "outlined": {
+              "lines": 30,
+              "chars": 984,
+              "errors": 33,
+              "cer": 0.03354,
+              "exact": 0.46667
+            }
+          },
+          "games": {
+            "v10856": {
+              "lines": 1,
+              "chars": 50,
+              "errors": 2,
+              "cer": 0.04,
+              "exact": 0.0
+            },
+            "v13072": {
+              "lines": 1,
+              "chars": 29,
+              "errors": 0,
+              "cer": 0.0,
+              "exact": 1.0
+            },
+            "v16460": {
+              "lines": 9,
+              "chars": 369,
+              "errors": 64,
+              "cer": 0.17344,
+              "exact": 0.22222
+            },
+            "v16566": {
+              "lines": 8,
+              "chars": 230,
+              "errors": 27,
+              "cer": 0.11739,
+              "exact": 0.5
+            },
+            "v17286": {
+              "lines": 7,
+              "chars": 190,
+              "errors": 13,
+              "cer": 0.06842,
+              "exact": 0.57143
+            },
+            "v17750": {
+              "lines": 8,
+              "chars": 163,
+              "errors": 5,
+              "cer": 0.03067,
+              "exact": 0.625
+            },
+            "v17829": {
+              "lines": 5,
+              "chars": 127,
+              "errors": 7,
+              "cer": 0.05512,
+              "exact": 0.0
+            },
+            "v18030": {
+              "lines": 5,
+              "chars": 121,
+              "errors": 5,
+              "cer": 0.04132,
+              "exact": 0.4
+            },
+            "v19339": {
+              "lines": 2,
+              "chars": 62,
+              "errors": 2,
+              "cer": 0.03226,
+              "exact": 0.5
+            },
+            "v19850": {
+              "lines": 5,
+              "chars": 94,
+              "errors": 2,
+              "cer": 0.02128,
+              "exact": 0.8
+            },
+            "v20326": {
+              "lines": 5,
+              "chars": 179,
+              "errors": 7,
+              "cer": 0.03911,
+              "exact": 0.4
+            },
+            "v21782": {
+              "lines": 6,
+              "chars": 142,
+              "errors": 6,
+              "cer": 0.04225,
+              "exact": 0.66667
+            },
+            "v21789": {
+              "lines": 8,
+              "chars": 335,
+              "errors": 5,
+              "cer": 0.01493,
+              "exact": 0.625
+            },
+            "v22122": {
+              "lines": 3,
+              "chars": 128,
+              "errors": 4,
+              "cer": 0.03125,
+              "exact": 0.33333
+            },
+            "v3820": {
+              "lines": 5,
+              "chars": 128,
+              "errors": 8,
+              "cer": 0.0625,
+              "exact": 0.4
+            },
+            "v7721": {
+              "lines": 4,
+              "chars": 159,
+              "errors": 9,
+              "cer": 0.0566,
+              "exact": 0.0
+            }
+          },
+          "game_macro_cer": 0.05166
+        },
+        "detection": {
+          "known_lines": 202,
+          "uncertain_lines": 0,
+          "matched_known_lines": 200,
+          "published_detections": 212,
+          "unmatched_detections": 12,
+          "line_recall": 0.9900990099009901,
+          "line_precision": 0.9433962264150944
+        },
+        "unknown_regions": {
+          "fixtures": 2,
+          "statuses": {
+            "0": 2
+          },
+          "detection": {
+            "known_lines": 4,
+            "uncertain_lines": 2,
+            "matched_known_lines": 3,
+            "published_detections": 3,
+            "unmatched_detections": 0,
+            "line_recall": 0.75,
+            "line_precision": 1.0
+          }
+        }
+      }
+    },
+    "psp-test": {
+      "regions": {
+        "fixtures": 93,
+        "inference_requests": 186,
+        "scored_fixtures": 93,
+        "statuses": {
+          "-116": 1,
+          "0": 92
+        },
+        "repeat_text_differences": 0,
+        "peak_model_tensor_bytes": 13235648,
+        "max_retained_pool_bytes": 0,
+        "allocation_failures": 0,
+        "score": {
+          "all": {
+            "lines": 93,
+            "chars": 2510,
+            "errors": 312,
+            "cer": 0.1243,
+            "exact": 0.26882
+          },
+          "styles": {
+            "bright-on-dark": {
+              "lines": 55,
+              "chars": 1563,
+              "errors": 161,
+              "cer": 0.10301,
+              "exact": 0.23636
+            },
+            "coloured": {
+              "lines": 12,
+              "chars": 270,
+              "errors": 30,
+              "cer": 0.11111,
+              "exact": 0.25
+            },
+            "coloured-name": {
+              "lines": 7,
+              "chars": 198,
+              "errors": 10,
+              "cer": 0.05051,
+              "exact": 0.28571
+            },
+            "dark-on-light": {
+              "lines": 46,
+              "chars": 1265,
+              "errors": 174,
+              "cer": 0.13755,
+              "exact": 0.26087
+            },
+            "furigana": {
+              "lines": 16,
+              "chars": 316,
+              "errors": 101,
+              "cer": 0.31962,
+              "exact": 0.0
+            },
+            "mincho": {
+              "lines": 32,
+              "chars": 984,
+              "errors": 64,
+              "cer": 0.06504,
+              "exact": 0.28125
+            },
+            "name": {
+              "lines": 60,
+              "chars": 1858,
+              "errors": 241,
+              "cer": 0.12971,
+              "exact": 0.2
+            },
+            "no-box": {
+              "lines": 3,
+              "chars": 59,
+              "errors": 13,
+              "cer": 0.22034,
+              "exact": 0.0
+            },
+            "outlined": {
+              "lines": 31,
+              "chars": 792,
+              "errors": 94,
+              "cer": 0.11869,
+              "exact": 0.22581
+            },
+            "small": {
+              "lines": 56,
+              "chars": 1641,
+              "errors": 207,
+              "cer": 0.12614,
+              "exact": 0.30357
+            }
+          },
+          "games": {
+            "v10856": {
+              "lines": 9,
+              "chars": 181,
+              "errors": 50,
+              "cer": 0.27624,
+              "exact": 0.0
+            },
+            "v11095": {
+              "lines": 7,
+              "chars": 207,
+              "errors": 3,
+              "cer": 0.01449,
+              "exact": 0.57143
+            },
+            "v11504": {
+              "lines": 9,
+              "chars": 251,
+              "errors": 23,
+              "cer": 0.09163,
+              "exact": 0.11111
+            },
+            "v11708": {
+              "lines": 5,
+              "chars": 105,
+              "errors": 6,
+              "cer": 0.05714,
+              "exact": 0.2
+            },
+            "v12155": {
+              "lines": 4,
+              "chars": 160,
+              "errors": 102,
+              "cer": 0.6375,
+              "exact": 0.0
+            },
+            "v12865": {
+              "lines": 8,
+              "chars": 171,
+              "errors": 52,
+              "cer": 0.30409,
+              "exact": 0.0
+            },
+            "v12940": {
+              "lines": 6,
+              "chars": 181,
+              "errors": 9,
+              "cer": 0.04972,
+              "exact": 0.16667
+            },
+            "v13072": {
+              "lines": 5,
+              "chars": 117,
+              "errors": 9,
+              "cer": 0.07692,
+              "exact": 0.4
+            },
+            "v15910": {
+              "lines": 8,
+              "chars": 280,
+              "errors": 6,
+              "cer": 0.02143,
+              "exact": 0.625
+            },
+            "v3396": {
+              "lines": 10,
+              "chars": 233,
+              "errors": 15,
+              "cer": 0.06438,
+              "exact": 0.3
+            },
+            "v3542": {
+              "lines": 6,
+              "chars": 124,
+              "errors": 9,
+              "cer": 0.07258,
+              "exact": 0.33333
+            },
+            "v4147": {
+              "lines": 5,
+              "chars": 88,
+              "errors": 6,
+              "cer": 0.06818,
+              "exact": 0.4
+            },
+            "v4671": {
+              "lines": 5,
+              "chars": 220,
+              "errors": 20,
+              "cer": 0.09091,
+              "exact": 0.0
+            },
+            "v7634": {
+              "lines": 6,
+              "chars": 192,
+              "errors": 2,
+              "cer": 0.01042,
+              "exact": 0.66667
+            }
+          },
+          "game_macro_cer": 0.13112
+        },
+        "detection": {
+          "known_lines": 245,
+          "uncertain_lines": 0,
+          "matched_known_lines": 228,
+          "published_detections": 247,
+          "unmatched_detections": 19,
+          "line_recall": 0.9306122448979591,
+          "line_precision": 0.9230769230769231
+        },
+        "unknown_regions": {
+          "fixtures": 0,
+          "statuses": {},
+          "detection": {}
+        }
+      }
+    }
+  },
+  "region_ordering": "upstream stable top-to-bottom y ordering; equal-y boxes retain detector order",
+  "line_limit_refusal": {
+    "set": "psp-test",
+    "regions": 1,
+    "annotated_lines": 12,
+    "raw_detections": 10,
+    "reference_characters": 88,
+    "refusal_errors": 88,
+    "uncapped_reference_errors": 11,
+    "additional_errors_due_to_cap": 77
+  },
+  "reference_comparison": {
+    "non_refused_regions": 176,
+    "detected_box_mismatches": 0,
+    "normalized_recognized_text_mismatches": 0,
+    "vita_extra_errors_from_same_y_detector_order": 10,
+    "vita_known_same_y_region_count": 1,
+    "uncertain_regions_with_order_differences": 2
+  }
+}

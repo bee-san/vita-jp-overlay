@@ -11,6 +11,8 @@ Japanese-first hook picker as fallback. After selection it reads text directly.
 See [Native text sources](docs/native-text.md) for installation and current
 validation limits. OCR calibration defaults to Google Lens. An **experimental CPU-only ncnn
 backend** runs PP-OCRv5 mobile locally; see [Local OCR](docs/local-ocr.md).
+An optional [Meiki backend](docs/meiki-ocr.md) isolates its bounded runtime
+in a separate user module. Physical game compatibility remains unverified.
 Jiten and JPDB remain optional backends.
 No dictionary API key is needed for Hachidori.
 
@@ -189,10 +191,11 @@ All settings live in `ux0:data/VitaJPOverlay/config.ini`. The area to read (□ 
 | `font_size_en`        | 8 to 40                                                             | 14         | Size of the English text: meanings and messages.                                             |
 | `toggle_button`       | `l+r`, `select`, `start`, `select+l`, `select+r`, `rear_double_tap` | `l+r`      | What opens and closes the overlay. Buttons are hidden from the game; rear taps are not.      |
 | `subtitle_button`     | same as `toggle_button`                                             | `select+r` | What turns subtitles on and off.                                                             |
-| `ocr_backend` | `lens`, `ncnn` | `lens` | Online Lens or experimental local CPU OCR; see [setup](docs/local-ocr.md). |
 | `text_source` | `auto`, `hooks`, `ocr` | `auto` | Read a screenshot and show stable native text matches, manual sources without OCR, or the legacy OCR flow. |
+| `ocr_backend` | `lens`, `ncnn`, `meiki` | `lens` | Online Lens or experimental local CPU OCR; see [ncnn](docs/local-ocr.md) and [Meiki](docs/meiki-ocr.md). |
 | `ocr_model_dir` | directory path | `ux0:data/VitaJPOverlay/ocr` | Folder holding the pinned mobile recognizer weights. |
-| `ocr_mode` | `auto`, `on_press` | `auto` | Lens background/on-press policy. ncnn always runs on demand. |
+| `ocr_mode` | `auto`, `on_press` | `auto` | Lens background/on-press policy. Local OCR always runs on demand. |
+| `meiki_layout` | `single_line`, `dialogue_box` | `single_line` | Recognize one selected line or detect up to eight crops inside a selected dialogue area. |
 | `log_host`            | IPv4 address                                                        | empty      | Send debug logs to `tools/udp_log_listener.py` on that computer.                             |
 | `log_file`            | `on`, `off`                                                         | `off`      | Write a debug log to `ux0:data/VitaJPOverlay/log.txt` (256 KB at most, plus one older file). |
 

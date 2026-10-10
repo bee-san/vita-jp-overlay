@@ -17,6 +17,7 @@ int buffers_alloc(uint32_t bytes)
     void *base = NULL;
     SceUID uid;
 
+    if (game_ocr_capture_busy_locked()) return VJO_ERR_BUSY;
     if (!bytes || bytes > RAW_SIZE || g.capture_state != CAPTURE_IDLE)
         return VJO_ERR_ARG;
     bytes = ALIGN(bytes, 0x1000);
@@ -46,6 +47,7 @@ int buffers_alloc(uint32_t bytes)
 
 void buffers_free(void)
 {
+    if (game_ocr_capture_busy_locked()) return;
     if (g.mem_uid > 0) {
         ksceKernelFreeMemBlock(g.mem_uid);
         klog("capture buffer freed");

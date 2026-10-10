@@ -81,6 +81,7 @@ void vjo_config_defaults(VjoConfig *c)
     c->ocr_mode = VJO_OCR_AUTO;
     c->ocr_backend = VJO_OCR_LENS;
     c->text_source = VJO_SOURCE_AUTO;
+    c->meiki_layout = VJO_MEIKI_SINGLE_LINE;
     vjo_snprintf(c->ocr_model_dir, sizeof(c->ocr_model_dir), "ux0:data/VitaJPOverlay/ocr");
     vjo_snprintf(c->anki_deck, sizeof(c->anki_deck), "Default");
     vjo_snprintf(c->anki_note_type, sizeof(c->anki_note_type), "Lapis");
@@ -133,11 +134,13 @@ const char *vjo_config_default_text(void)
            "; Text: auto (read screenshot and show native text matches) | hooks (manual, no OCR) | ocr\n"
            "text_source = auto\n"
            "\n"
-           "; OCR: lens (online) | ncnn (experimental CPU-only PP-OCRv5 mobile)\n"
-           "; ncnn requires the model download and a selected dialogue region; see docs/local-ocr.md.\n"
+           "; OCR: lens (online) | ncnn (PP-OCRv5 mobile) | meiki (Meiki horizontal OCR)\n"
+           "; Local OCR requires its matching model and a selected dialogue region; see docs/local-ocr.md.\n"
            "; Local OCR runs only on a button press, including subtitle refresh. No cloud fallback.\n"
            "ocr_backend = lens\n"
            "ocr_model_dir = ux0:data/VitaJPOverlay/ocr\n"
+           "; Meiki: single_line (select one line) | dialogue_box (detect horizontal lines in the selection).\n"
+           "meiki_layout = single_line\n"
            "\n"
            "; auto: recognize text in the background when the region changes (Lens only)\n"
            "; on_press: recognize only when the overlay is opened\n"
@@ -462,6 +465,15 @@ static void set_kv(VjoConfig *c, const char *key, const char *val)
             c->ocr_backend = VJO_OCR_LENS;
         else if (vjo_ieq(val, "ncnn"))
             c->ocr_backend = VJO_OCR_NCNN;
+        else if (vjo_ieq(val, "meiki"))
+            c->ocr_backend = VJO_OCR_MEIKI;
+        else
+            warn(c, "%s: invalid value '%s'", key, val);
+    } else if (vjo_ieq(key, "meiki_layout")) {
+        if (vjo_ieq(val, "single_line"))
+            c->meiki_layout = VJO_MEIKI_SINGLE_LINE;
+        else if (vjo_ieq(val, "dialogue_box"))
+            c->meiki_layout = VJO_MEIKI_DIALOGUE_BOX;
         else
             warn(c, "%s: invalid value '%s'", key, val);
     } else if (vjo_ieq(key, "ocr_mode")) {

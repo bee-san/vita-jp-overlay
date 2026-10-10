@@ -533,14 +533,17 @@ int vjo_anki_start(void)
     return 0;
 }
 
-void vjo_anki_stop(void)
+int vjo_anki_stop(void)
 {
     running = 0;
     if (evf >= 0)
         sceKernelSetEventFlag(evf, EV_QUIT);
     if (thread >= 0) {
-        sceKernelWaitThreadEnd(thread, NULL, NULL);
-        sceKernelDeleteThread(thread);
+        if (sceKernelWaitThreadEnd(thread, NULL, NULL) < 0 ||
+            sceKernelDeleteThread(thread) < 0) {
+            vjo_log("Anki thread cleanup failed; keeping resources for a stop retry");
+            return -1;
+        }
     }
     thread = -1;
     if (evf >= 0)
@@ -548,4 +551,5 @@ void vjo_anki_stop(void)
     if (box_lock >= 0)
         sceKernelDeleteMutex(box_lock);
     evf = box_lock = -1;
+    return 0;
 }

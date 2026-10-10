@@ -224,9 +224,14 @@ int vjoRegisterShell(void)
         klog("shell registration refused: pid 0x%X has no " SHELL_MODULE, pid);
         ret = VJO_ERR_PERM;
     } else if (g.shell_pid != pid) {
+        ksceKernelLockMutex(g.game_lock, 1, NULL);
+        VJO_LOCK();
         klog("shell registered: pid 0x%X (was 0x%X)", pid, g.shell_pid);
         g.shell_pid = pid;
         g.input_block = 0;
+        game_ocr_shell_changed_locked();
+        VJO_UNLOCK();
+        ksceKernelUnlockMutex(g.game_lock, 1);
         if (g.game_pid > 0)
             ksceKernelSetEventFlag(g.evf, VJO_EV_GAME_START); /* re-classify the foreground app */
     }
@@ -374,19 +379,20 @@ int vjoRequestCapture(uint32_t flags)
 int vjoReadRaw(uint32_t row, uint32_t n, void *dst)
 {
     uint32_t state;
-    if (!caller_ok())
-        return VJO_ERR_PERM;
+    SceUID pid = ksceKernelGetProcessId();
     int ret;
     ENTER_SYSCALL(state);
     VJO_LOCK();
-    if (g.capture_state != CAPTURE_IDLE || !g.raw_valid || !g.raw || row >= g.crop_h) {
+    if (!caller_ok() && !game_ocr_raw_caller_locked(pid)) {
+        ret = VJO_ERR_PERM;
+    } else if (g.capture_state != CAPTURE_IDLE || !g.raw_valid || !g.raw || row >= g.crop_h) {
         ret = -1;
     } else {
         uint32_t stride = g.raw_stride;
         if (n > g.crop_h - row)
             n = g.crop_h - row;
         ret = ksceKernelMemcpyKernelToUser(dst, g.raw + row * stride, n * stride) < 0 ? -1 : (int)n;
-        if (ret > 0) buffers_read_done(row, (uint32_t)ret);
+        if (ret > 0 && caller_ok()) buffers_read_done(row, (uint32_t)ret);
     }
     VJO_UNLOCK();
     EXIT_SYSCALL(state);
@@ -421,6 +427,7 @@ int module_start(SceSize argc, const void *args)
     (void)argc;
     (void)args;
     memset(&g, 0, sizeof(g));
+    game_ocr_init();
     g.trigger[TRIG_TOGGLE] = VJO_TRIGGER_L_R;
     g.trigger[TRIG_SUBTITLE] = VJO_TRIGGER_SELECT_R;
     g.evf = ksceKernelCreateEventFlag("VjoEvents", SCE_EVENT_WAITMULTIPLE, 0, NULL);
@@ -460,6 +467,13 @@ int module_stop(SceSize argc, const void *args)
 {
     (void)argc;
     (void)args;
+    VJO_LOCK();
+    int busy = game_ocr_shutdown_locked();
+    VJO_UNLOCK();
+    if (busy) {
+        klog("OCR reader still owns capture; refusing kernel unload");
+        return SCE_KERNEL_STOP_FAIL;
+    }
     worker_run = 0;
     if (worker_uid >= 0) {
         ksceKernelSetEventFlag(g.ievf, IEV_QUIT);
@@ -468,7 +482,9 @@ int module_stop(SceSize argc, const void *args)
     }
     release_hooks();
     text_shutdown();
+    VJO_LOCK();
     buffers_free();
+    VJO_UNLOCK();
     delete_sync_objects();
     return SCE_KERNEL_STOP_SUCCESS;
 }

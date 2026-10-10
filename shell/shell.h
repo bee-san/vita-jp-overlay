@@ -94,7 +94,8 @@ void vjo_post_hook(uint32_t session, uint32_t id);
 
 /* worker.c */
 int vjo_worker_start(void);
-void vjo_worker_stop(void);
+/* Failure keeps remaining Shell resources for a later stop retry. */
+int vjo_worker_stop(void);
 /* Captures the screen (flags: VJO_CAPTURE_*) and encodes it as a JPEG into
  * out; serialized with the OCR job's capture (one kernel buffer). Returns
  * VJO_OK or a VJO_E_* code. */
@@ -102,7 +103,7 @@ int vjo_capture_jpeg(VjoArena *a, uint32_t flags, int quality, VjoBuf *out, VjoS
 
 /* anki.c: AnkiConnect thread */
 int vjo_anki_start(void);
-void vjo_anki_stop(void);
+int vjo_anki_stop(void);
 /* Settings for the next request (control thread, after each config load). */
 void vjo_anki_configure(const VjoConfig *cfg);
 /* Refresh the on-disk queue count (control thread, no network). */
@@ -120,6 +121,11 @@ void vjo_platform_vita(VjoPlatform *p);
 /* Reuses ScePaf's existing heap. Returns NULL when its bounded allocation fails. */
 void *vjo_shell_heap_alloc(size_t bytes);
 void vjo_shell_heap_free(void *ptr);
+/* Paf/physical-pool reporting; optional probes run only in diagnostic builds. */
+void vjo_paf_memory_report(void);
+#ifdef VJO_MEMORY_DIAGNOSTICS
+void vjo_paf_probe_once(void);
+#endif
 /* This console's IPv4 address and netmask (host byte order); -1 if none. */
 int vjo_net_local_ipv4(uint32_t *ip, uint32_t *mask);
 /* Connects to port of up to VJO_NET_PROBE_MAX hosts (host byte order) at

@@ -22,6 +22,18 @@ HOOKS = {
     "vjoTextReference": 0x2B6DDFAB,
     "vjoTextRead": 0x834C749E,
 }
+OCR_SHELL = {
+    "vjoOcrSubmit": 0x6884594D,
+    "vjoOcrRead": 0x4A6D4404,
+    "vjoOcrCancel": 0xA39F058A,
+}
+OCR_WORKER = {
+    "vjoOcrRegister": 0x95013D83,
+    "vjoOcrTake": 0xF90604FB,
+    "vjoOcrCancelled": 0x0F694144,
+    "vjoOcrComplete": 0x2B293C8A,
+    "vjoReadRaw": 0x65A3A8A3,
+}
 WEAK_STUB = (0xE3E00000, 0xE12FFF1E, 0xE1A00000, 0)
 # Sysmem's ForKernel library was renumbered in 3.63. A direct strong import
 # makes an otherwise valid plugin fail before module_start on the other ABI.
@@ -167,16 +179,32 @@ class SelfFile:
             offset += size
 
 
-def audit(kernel, shell, require_hooks=False):
+def check_weak_imports(module, exports, version):
+    import_version, attributes, imports = module.library(False)
+    require(attributes == 8, f"{module.name} custom syscalls must use weak imports")
+    require(version == import_version, "Custom syscall library versions differ")
+    for nid, (segment, offset) in imports.items():
+        require(nid in exports, f"{module.name} imports missing syscall 0x{nid:08x}")
+        require(module.segments[segment][2] & 1 and offset % 4 == 0,
+                "Import stub must be aligned ARM code in an executable segment")
+        words = unpack("<4I", module.read(segment, offset, 16), 0)
+        require(words == WEAK_STUB,
+                f"Unexpected unbound weak stub for syscall 0x{nid:08x}")
+    return imports
+
+
+def audit(kernel, shell, require_hooks=False, game=None):
     require(kernel.name == "VitaJPOverlay_Kernel", "Wrong kernel module name")
     require(shell.name == "VitaJPOverlay_Shell", "Wrong shell module name")
     kernel.check_firmware_imports()
     version, attributes, exports = kernel.library(True)
-    import_version, import_attributes, imports = shell.library(False)
+    imports = check_weak_imports(shell, exports, version)
     require(attributes == 0x4001, "Kernel library must export syscalls (0x4001)")
-    require(import_attributes == 8, "Shell custom syscalls must use weak imports")
-    require(version == import_version, "Custom syscall library versions differ")
     required = dict(REQUIRED, **(HOOKS if require_hooks else {}))
+    if game:
+        required.update(OCR_SHELL)
+        for name, nid in OCR_WORKER.items():
+            require(nid in exports, f"Kernel does not export {name}")
     for name, nid in required.items():
         require(nid in exports, f"Kernel does not export {name}")
         if name != "vjoTextSubmit":
@@ -187,14 +215,7 @@ def audit(kernel, shell, require_hooks=False):
         require(kernel.segments[segment][2] & 1, "Syscall target is not executable")
         require(address % (2 if thumb else 4) == 0, "Misaligned syscall target")
         kernel.read(segment, address, 2 if thumb else 4)
-    for nid, (segment, offset) in imports.items():
-        require(nid in exports, f"Shell imports missing syscall 0x{nid:08x}")
-        require(shell.segments[segment][2] & 1 and offset % 4 == 0,
-                "Import stub must be aligned ARM code in an executable segment")
-        words = unpack("<4I", shell.read(segment, offset, 16), 0)
-        require(words == WEAK_STUB,
-                f"Unexpected unbound weak stub for syscall 0x{nid:08x}")
-    return {
+    report = {
         "result": "pass",
         "scope": "packaged metadata and relocations; runtime binding and boot unverified",
         "library_nid": f"0x{LIBRARY_NID:08x}",
@@ -205,16 +226,29 @@ def audit(kernel, shell, require_hooks=False):
         "kernel_sha256": kernel.sha256,
         "shell_sha256": shell.sha256,
     }
+    if game:
+        require(game.name == "VitaJPOverlay_OCR", "Wrong game OCR module name")
+        game.check_firmware_imports()
+        game_imports = check_weak_imports(game, exports, version)
+        for name, nid in OCR_WORKER.items():
+            require(nid in game_imports, f"Game OCR worker does not import {name}")
+        for name, nid in {**HOOKS, **OCR_SHELL}.items():
+            require(nid not in game_imports, f"Game OCR worker unexpectedly imports {name}")
+        report.update(game_imports=len(game_imports), game_sha256=game.sha256,
+                      game_ocr_required=True)
+    return report
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--kernel", required=True, type=Path)
     parser.add_argument("--shell", required=True, type=Path)
+    parser.add_argument("--game", type=Path, help="Verify the OCR-only game worker and its IPC")
     parser.add_argument("--require-hooks", action="store_true")
     args = parser.parse_args()
     try:
-        report = audit(SelfFile(args.kernel), SelfFile(args.shell), args.require_hooks)
+        report = audit(SelfFile(args.kernel), SelfFile(args.shell), args.require_hooks,
+                       SelfFile(args.game) if args.game else None)
     except (InvalidABI, OSError, UnicodeError, zlib.error) as error:
         parser.exit(1, f"Syscall ABI verification failed: {error}\n")
     json.dump(report, sys.stdout, indent=2)

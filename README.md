@@ -190,7 +190,7 @@ All settings live in `ux0:data/VitaJPOverlay/config.ini`. The area to read (□ 
 | `toggle_button`       | `l+r`, `select`, `start`, `select+l`, `select+r`, `rear_double_tap` | `l+r`      | What opens and closes the overlay. Buttons are hidden from the game; rear taps are not.      |
 | `subtitle_button`     | same as `toggle_button`                                             | `select+r` | What turns subtitles on and off.                                                             |
 | `ocr_backend` | `lens`, `ncnn` | `lens` | Online Lens or experimental local CPU OCR; see [setup](docs/local-ocr.md). |
-| `text_source` | `auto`, `hooks`, `ocr` | `auto` | One-time OCR matching, manual native sources without OCR, or the legacy OCR flow. |
+| `text_source` | `auto`, `hooks`, `ocr` | `auto` | Read a screenshot and show stable native text matches, manual sources without OCR, or the legacy OCR flow. |
 | `ocr_model_dir` | directory path | `ux0:data/VitaJPOverlay/ocr` | Folder holding the pinned mobile recognizer weights. |
 | `ocr_mode` | `auto`, `on_press` | `auto` | Lens background/on-press policy. ncnn always runs on demand. |
 | `log_host`            | IPv4 address                                                        | empty      | Send debug logs to `tools/udp_log_listener.py` on that computer.                             |

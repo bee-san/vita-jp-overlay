@@ -1,15 +1,17 @@
 # Native Vita text sources
 
-`text_source = auto` uses OCR once to choose a source of Japanese text inside
-the current Vita game. A selected source feeds the existing overlay and
+`text_source = auto` reads the visible screenshot with OCR when choosing a
+source of Japanese text inside the current Vita game. Google Lens is the
+default OCR backend (`ocr_backend = lens`). A selected source feeds the existing overlay and
 dictionaries directly, without OCR, screen coordinates, capture buffers or
 framebuffer checksum polling. `text_source = hooks` opens the manual picker
 without making an OCR request. `text_source = ocr` keeps the existing OCR flow.
 
 This is an experimental native taiHEN implementation. LunaHook/Textractor's
 Windows injection and emulator JIT code is not a Vita binary. This implementation
-uses bounded memory discovery, common string imports and optional signed
-ARM/Thumb register profiles. Custom engine encodings, ruby/control-code filters
+uses common string imports and optional signed ARM/Thumb register profiles.
+The kernel also supports bounded memory discovery, but the normal picker does
+not start that scan. Custom engine encodings, ruby/control-code filters
 and per-glyph accumulation need game-specific work. No commercial VN or physical
 Vita compatibility is claimed by the synthetic self-test.
 
@@ -32,35 +34,47 @@ tools/install_ftp.sh --text-title PCSG00001 --text-title PCSG00002 VITA_IP
 ```
 
 Reboot after installing plugins. Settings are reread when the overlay opens.
-No additional plugin is needed for memory discovery alone, but import and
+The kernel supports memory discovery alone, but the default import and
 register hooks require the text plugin in the game process. Use per-title
 entries so an untested interceptor does not load into every app.
 
 ## Choose a source
 
-1. Show a dialogue line, then open the overlay with L+R. Automatic mode makes
-   one OCR attempt and scans normal cached main-memory allocations in bounded
-   chunks. If OCR fails, the manual picker remains available. Discovery may
-   take time; the picker updates while it runs.
-2. A unique best Japanese match of at least **80%** is selected automatically.
+1. Show a dialogue line, then open the overlay with L+R. Automatic mode reads
+   one screenshot and displays the OCR excerpt above a fixed list of matches.
+   It listens to intercepted game calls; opening does not scan all game memory.
+   While OCR runs, raw candidates are hidden. An OCR failure displays its error
+   and a retry action instead of misleading match percentages.
+2. The picker shows up to five sources with at least **50%** text similarity.
    Similarity is Unicode Levenshtein distance divided by the longer normalized
    string's length. Whitespace and punctuation are ignored; fullwidth ASCII is
-   folded. At least four normalized characters are required. Equal best scores
-   require a manual choice.
-3. The picker shows at most five candidates. Japanese text ranks first, followed
-   by OCR score, Japanese fraction, length, observed changes and stable ID.
-   Use ▲/▼ and × to choose. A **hook** observes a call site; a **pointer** follows
-   a changing string pointer; a **buffer** rereads the same address. A static
-   script buffer can match perfectly yet never advance: choose a hook or pointer
-   if that happens.
-4. Advance dialogue to confirm that the selected source changes correctly.
-   The overlay waits 300 ms after text changes before starting a new lookup.
-   Select+□ reopens the picker. □ rescans; △ explicitly retries OCR in automatic
-   mode. Select+□ inside the picker chooses an OCR calibration region.
+   folded. At least four normalized characters are required. This percentage is
+   text agreement with OCR, not OCR confidence or proof the source is dialogue.
+   No source is selected automatically. In manual `hooks` mode, sources appear
+   without scores and no screenshot is uploaded.
+3. Use ▲/▼ to compare previews and × to use the selected text. The rows stay
+   fixed while choosing, even if the game emits thousands of calls. If a source
+   changes before confirmation, the picker refreshes with an explanation rather
+   than silently selecting text different from its preview.
+4. Advance dialogue to confirm the selected source changes correctly. The
+   overlay waits 300 ms after text changes before starting a dictionary lookup.
+   Select+□ reopens the picker and takes a new screenshot in automatic mode.
+   Inside the picker, □ refreshes sources against the existing screenshot,
+   △ reads the screenshot again, and Select+□ chooses the OCR region. Closing,
+   advancing dialogue and reopening also reads a fresh screenshot if no source
+   has been selected. A closed in-flight screenshot is discarded safely.
+
+Google Lens matching uses one temporary **384 KiB** shell arena, allocated from
+USER_RW or the existing Paf heap, with no dictionary lookup during that job.
+The full bounded OCR text is copied to the kernel matcher and a 256-byte excerpt
+is retained in the view; the arena is released after the network job completes.
+The kernel's separate raw capture buffer remains necessary. Live memory
+availability, Lens service availability and OCR quality still depend on the game,
+region and network; failures are shown and never converted into fake matches.
 
 Selections are scoped to a foreground process session and cleared on game
 switch, suspend/resume or invalid allocation identity. A blank selected buffer
-waits for text; a freed buffer returns to manual discovery. Losing a source
+waits for text; a freed buffer returns to the picker. Losing a source
 clears the old OCR scores and does not automatically make another OCR request.
 Hooks mode does not upload screen crops. Dictionary and Anki network settings
 still apply, and optional Anki screenshots can request a capture independently.

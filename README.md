@@ -6,7 +6,10 @@ This [bee-san fork](https://github.com/bee-san/vita-jp-overlay) of
 [Hachidori Relay](https://github.com/bee-san/hachidori-anki) by default.
 It also supports **locally installed Yomitan dictionaries** with bounded-memory,
 disk-backed lookup. See [Local dictionaries](docs/local-dictionaries.md).
-Text recognition defaults to Google Lens. An **experimental CPU-only ncnn
+Native Vita text mode uses OCR once to match a game text source, with a manual
+Japanese-first hook picker as fallback. After selection it reads text directly.
+See [Native text sources](docs/native-text.md) for installation and current
+validation limits. OCR calibration defaults to Google Lens. An **experimental CPU-only ncnn
 backend** runs PP-OCRv5 mobile locally; see [Local OCR](docs/local-ocr.md).
 Jiten and JPDB remain optional backends.
 No dictionary API key is needed for Hachidori.
@@ -38,11 +41,14 @@ The idea comes from [meikidroid](https://github.com/rtr46/meikidroid)
   USB mode both work. You should end up with:
   - `ur0:tai/VitaJPOverlay_Kernel.skprx`
   - `ur0:tai/VitaJPOverlay_Shell.suprx`
+  - `ur0:tai/VitaJPOverlay_Text.suprx`
   - `ur0:data/VitaJPOverlay/vitajpoverlay.rco`
 3. Open `ur0:tai/config.txt` (or `ux0:tai/config.txt`, if that is the one your taiHEN uses) and
   add two lines:
   - `ur0:tai/VitaJPOverlay_Kernel.skprx` on a new line under `*KERNEL`
   - `ur0:tai/VitaJPOverlay_Shell.suprx` on a new line under `*main`
+   Register `VitaJPOverlay_Text.suprx` under each native game's title ID as
+   described in the [native text guide](docs/native-text.md#install).
 4. Copy the zip's `config.ini` to `ux0:data/VitaJPOverlay/config.ini`. Keep
    `dictionary = hachidori` and set `hachidori_host` to your computer's LAN IP
    as described below. The file is read each time the overlay opens, so later
@@ -157,6 +163,7 @@ In the overlay:
 | △                | Send the saved queue to AnkiConnect on your computer. |
 | □                | Choose the area to read in this game. Drag a box on the touchscreen, then press × to keep it or ○ to cancel. Holding □ sets the full screen. |
 | ○, or the toggle | Close the overlay.                                                                                                                           |
+| Select + □ | Open the native text source picker. |
 
 Works with PSP games in Adrenaline. They all share one OCR region, because every PSP game runs inside the same emulator app.
 
@@ -183,6 +190,7 @@ All settings live in `ux0:data/VitaJPOverlay/config.ini`. The area to read (□ 
 | `toggle_button`       | `l+r`, `select`, `start`, `select+l`, `select+r`, `rear_double_tap` | `l+r`      | What opens and closes the overlay. Buttons are hidden from the game; rear taps are not.      |
 | `subtitle_button`     | same as `toggle_button`                                             | `select+r` | What turns subtitles on and off.                                                             |
 | `ocr_backend` | `lens`, `ncnn` | `lens` | Online Lens or experimental local CPU OCR; see [setup](docs/local-ocr.md). |
+| `text_source` | `auto`, `hooks`, `ocr` | `auto` | One-time OCR matching, manual native sources without OCR, or the legacy OCR flow. |
 | `ocr_model_dir` | directory path | `ux0:data/VitaJPOverlay/ocr` | Folder holding the pinned mobile recognizer weights. |
 | `ocr_mode` | `auto`, `on_press` | `auto` | Lens background/on-press policy. ncnn always runs on demand. |
 | `log_host`            | IPv4 address                                                        | empty      | Send debug logs to `tools/udp_log_listener.py` on that computer.                             |

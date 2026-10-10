@@ -1,5 +1,5 @@
-/* Per-game capture buffer. Allocated when a game starts and freed when it
- * exits, never at boot, so nothing is held while no game runs. */
+/* Capture buffer, allocated on request. Native text releases an idle buffer;
+ * OCR and optional Anki screenshots can request it again. */
 #include <psp2kern/kernel/sysclib.h>
 #include <psp2kern/kernel/sysmem.h>
 
@@ -42,4 +42,26 @@ void buffers_free(void)
     g.mem_uid = 0;
     g.raw = NULL;
     g.alloc_status = VJO_ALLOC_NONE;
+}
+
+void buffers_trim(void)
+{
+    if (!g.capture_release) return;
+    VJO_LOCK();
+    if (g.capture_release && g.capture_state == CAPTURE_IDLE && !(g.capture_full && g.raw_valid)) {
+        g.capture_release = 0;
+        g.raw_valid = 0;
+        buffers_free();
+    }
+    VJO_UNLOCK();
+}
+
+void buffers_read_done(uint32_t row, uint32_t rows)
+{
+    /* Native source changes must not free an Anki image before its reader
+     * finishes. The final copied row ends that ownership. */
+    if (g.capture_full && row < g.crop_h && rows >= g.crop_h-row) {
+        g.capture_full = 0;
+        g.capture_release = 1;
+    }
 }

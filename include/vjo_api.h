@@ -5,7 +5,7 @@
 
 #include <stdint.h>
 
-#define VJO_API_VERSION 7
+#define VJO_API_VERSION 8
 
 /* Normalized rectangle, 0..65535 on both axes. w == 0 means full screen. */
 typedef struct {

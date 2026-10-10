@@ -1,0 +1,14 @@
+vjo-hook-test:
+  attributes: 0
+  version:
+    major: 1
+    minor: 0
+  main:
+    start: _start
+  libraries:
+    # Test transport only. On hardware this library belongs to the kernel.
+    VitaJPOverlayForUser:
+      syscall: false
+      functions:
+        - vjoGetVersion
+        - vjoTextSubmit

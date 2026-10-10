@@ -4,6 +4,7 @@
 #include "client.h"
 #include "replay.h"
 #include <psp2/host_stubs.h>
+#include "../../include/vjo_text.h"
 
 static VjoState kernel_state;
 static uint64_t test_now;
@@ -21,8 +22,22 @@ int vjoSetRegion(const VjoRect *r) { return 0; }
 int vjoSetTriggers(int toggle, int subtitle) { return 0; }
 int vjoSetGameActive(int pid, int active) { return 0; }
 int vjoSetInputBlock(int on) { return 0; }
-int vjoRequestCapture(uint32_t flags) { return VJO_ERR_NO_GAME; }
+static int capture_calls;
+int vjoRequestCapture(uint32_t flags) { capture_calls++; return VJO_ERR_NO_GAME; }
 int vjoReadRaw(uint32_t row, uint32_t n, void *dst) { return -1; }
+static VjoTextSnapshot hook_snapshot;
+int vjoTextRead(VjoTextSnapshot *out) { *out = hook_snapshot; return 0; }
+int vjoTextControl(uint32_t session, int mode, uint32_t selected) {
+    if (session != hook_snapshot.session) return -1;
+    hook_snapshot.selected = selected;
+    memset(&hook_snapshot.current, 0, sizeof(hook_snapshot.current));
+    for (unsigned i = 0; i < hook_snapshot.count; i++)
+        if (hook_snapshot.candidates[i].id == selected) hook_snapshot.current = hook_snapshot.candidates[i];
+    hook_snapshot.sequence++;
+    return 0;
+}
+static int anchor_calls;
+int vjoTextReference(uint32_t session, const char *text) { anchor_calls++; return 0; }
 
 #include "../../shell/worker.c"
 
@@ -68,6 +83,13 @@ static void setup(const char *ini)
     vjo_config_defaults(&loaded_config);
     vjo_config_parse(&loaded_config, ini, strlen(ini));
     cfg = loaded_config;
+    native_game = text_calibrated = text_started = job_native = job_anchor = 0;
+    memset(&hook_snapshot, 0, sizeof(hook_snapshot));
+    hook_snapshot.session = 42;
+    memset(&text_state, 0, sizeof(text_state));
+    seen_hook_id = 0; seen_hook_text[0] = 0;
+    anchor_calls = 0;
+    capture_calls = 0;
     running = 1;
     region_selected = job_region_selected = 0;
     capture_generation = job_generation = 0;
@@ -346,7 +368,156 @@ static void test_region_change_redoes_subtitle_job(void)
     TEST_CHECK(g_view.strip_on && g_view.strip_busy && !g_view.open);
 }
 
+static void native_setup(const char *mode)
+{
+    setup(mode);
+    native_game = 1;
+    hook_snapshot.pid = 7;
+    hook_snapshot.count = 1;
+    VjoTextCandidate *c = &hook_snapshot.candidates[0];
+    c->id = 10; c->kind = VJO_TEXT_CALL; c->encoding = VJO_TEXT_UTF8;
+    c->japanese = c->length = 6; c->updates = 1;
+    strcpy(c->text, "猫を見ました");
+}
+
+static void test_manual_hook_bypasses_capture_and_ocr(void)
+{
+    native_setup(RELAY_CONFIG "text_source = hooks\nocr_backend = ncnn\n");
+    open_overlay();
+    TEST_CHECK(g_view.hook_picker && g_view.hook_count == 1 && !job_running);
+    vjo_post_hook(hook_snapshot.session, 10);
+    on_command();
+    TEST_ASSERT(job_running && job_native && !g_view.hook_picker);
+    uint32_t checksum = 123;
+    TEST_CHECK(run_job(&results[job_idx], &cache_data[job_idx], &checksum) == VJO_OK);
+    TEST_CHECK(!capture_calls && !anchor_calls && relay_connections > 0 && checksum == 0);
+    TEST_CHECK(!strcmp(cache_data[job_idx].sentence, "猫を見ました"));
+    on_job_text(); on_job_done();
+    TEST_CHECK(!job_running && cache_ok && g_view.list && !g_view.hook_picker);
+}
+
+static void test_automatic_hooks_match_once_and_handle_ocr_failure(void)
+{
+    native_setup(RELAY_CONFIG "text_source = auto\n");
+    stable_pending = 1; auto_prefetch();
+    TEST_CHECK(!job_running); /* never continuous OCR while finding a hook */
+    open_overlay();
+    TEST_ASSERT(job_running && job_anchor && !job_native);
+    uint32_t checksum = 0;
+    TEST_CHECK(run_job(&results[job_idx], &cache_data[job_idx], &checksum) != VJO_OK);
+    on_job_done();
+    TEST_CHECK(g_view.hook_picker && text_calibrated && capture_calls == 1);
+    open_overlay();
+    TEST_CHECK(!job_running && capture_calls == 1);
+    hook_snapshot.candidates[0].score = 80;
+    poll_hooks();
+    TEST_CHECK(hook_snapshot.selected == 10 && !g_view.hook_picker && capture_calls == 1);
+    test_now += 300001; poll_hooks();
+    TEST_ASSERT(job_running && job_native && !job_anchor);
+    TEST_CHECK(run_job(&results[job_idx], &cache_data[job_idx], &checksum) == VJO_OK);
+    TEST_CHECK(capture_calls == 1);
+}
+
+static void test_ambiguous_and_stale_hook_choices(void)
+{
+    native_setup(RELAY_CONFIG "text_source = hooks\n");
+    open_overlay();
+    hook_snapshot.count = 2;
+    hook_snapshot.candidates[1] = hook_snapshot.candidates[0];
+    hook_snapshot.candidates[1].id = 11;
+    hook_snapshot.candidates[0].score = hook_snapshot.candidates[1].score = 80;
+    text_calibrated = 1;
+    poll_hooks();
+    TEST_CHECK(!hook_snapshot.selected && g_view.hook_picker && !job_running);
+    vjo_post_hook(hook_snapshot.session-1, 10);
+    on_command();
+    TEST_CHECK(!hook_snapshot.selected && !job_running);
+    TEST_CHECK(!capture_calls && !relay_connections);
+}
+
+static void test_hook_picker_without_dictionary_settings(void)
+{
+    native_setup("text_source = hooks\n");
+    open_overlay();
+    TEST_CHECK(g_view.hook_picker && !g_view.status_is_error && !job_running);
+    vjo_post_hook(hook_snapshot.session, 10); on_command();
+    TEST_ASSERT(job_running && job_native && !job_lookup);
+    uint32_t checksum;
+    TEST_CHECK(run_job(&results[job_idx], &cache_data[job_idx], &checksum) == VJO_OK);
+    on_job_text(); on_job_done();
+    TEST_CHECK(g_view.list && !capture_calls && !relay_connections);
+}
+
+static void test_changed_hook_discards_old_lookup(void)
+{
+    native_setup(RELAY_CONFIG "text_source = hooks\n");
+    vjoTextControl(hook_snapshot.session, VJO_TEXT_FOLLOW, 10);
+    open_overlay();
+    TEST_ASSERT(job_running && job_native);
+    uint32_t checksum;
+    TEST_CHECK(run_job(&results[job_idx], &cache_data[job_idx], &checksum) == VJO_OK);
+    strcpy(hook_snapshot.current.text, "犬を見ました");
+    poll_hooks();
+    on_job_done();
+    TEST_CHECK(job_running && job_native && !strcmp(job_hook_text, "犬を見ました"));
+    TEST_CHECK(!g_view.list && !capture_calls);
+}
+
+static void test_lost_hook_stays_manual(void)
+{
+    native_setup(RELAY_CONFIG "text_source = auto\n");
+    vjoTextControl(hook_snapshot.session, VJO_TEXT_FOLLOW, 10);
+    text_calibrated = 1;
+    open_overlay();
+    poll_hooks();
+    TEST_ASSERT(seen_hook_id == 10);
+    uint32_t checksum;
+    TEST_CHECK(run_job(&results[job_idx], &cache_data[job_idx], &checksum) == VJO_OK);
+    hook_snapshot.selected = 0; memset(&hook_snapshot.current, 0, sizeof(hook_snapshot.current));
+    /* The transport clears the old OCR reference when the source is lost. */
+    hook_snapshot.candidates[0].score = 0;
+    poll_hooks(); on_job_done();
+    TEST_CHECK(text_calibrated && g_view.hook_picker && !job_running && anchor_calls == 1);
+    TEST_CHECK(!capture_calls);
+}
+
+static void test_hook_cache_uses_unfiltered_source(void)
+{
+    native_setup("text_source = hooks\n");
+    strcpy(hook_snapshot.candidates[0].text, "English speaker\n猫を見ました");
+    vjoTextControl(hook_snapshot.session, VJO_TEXT_FOLLOW, 10);
+    open_overlay(); poll_hooks();
+    uint32_t checksum;
+    TEST_CHECK(run_job(&results[job_idx], &cache_data[job_idx], &checksum) == VJO_OK);
+    on_job_done();
+    TEST_ASSERT(cache_ok && !job_running);
+    TEST_CHECK(strcmp(cache_data[active].sentence, seen_hook_text) != 0);
+    test_now += 400000; poll_hooks();
+    TEST_CHECK(cache_ok && !job_running && !capture_calls);
+}
+
+static void test_blank_selected_hook_recovers(void)
+{
+    native_setup("text_source = hooks\n");
+    vjoTextControl(hook_snapshot.session, VJO_TEXT_FOLLOW, 10);
+    hook_snapshot.current.text[0] = 0;
+    hook_snapshot.candidates[0].text[0] = 0;
+    open_overlay(); poll_hooks();
+    TEST_ASSERT(g_view.hook_picker && !job_running);
+    strcpy(hook_snapshot.current.text, "猫を見ました");
+    poll_hooks(); test_now += 400000; poll_hooks();
+    TEST_CHECK(!g_view.hook_picker && job_running && job_native && !capture_calls);
+}
+
 TEST_LIST = {
+    {"manual_hook_bypasses_capture_and_ocr", test_manual_hook_bypasses_capture_and_ocr},
+    {"automatic_hooks_match_once_and_handle_ocr_failure", test_automatic_hooks_match_once_and_handle_ocr_failure},
+    {"ambiguous_and_stale_hook_choices", test_ambiguous_and_stale_hook_choices},
+    {"hook_picker_without_dictionary_settings", test_hook_picker_without_dictionary_settings},
+    {"changed_hook_discards_old_lookup", test_changed_hook_discards_old_lookup},
+    {"lost_hook_stays_manual", test_lost_hook_stays_manual},
+    {"hook_cache_uses_unfiltered_source", test_hook_cache_uses_unfiltered_source},
+    {"blank_selected_hook_recovers", test_blank_selected_hook_recovers},
     {"ncnn_manual_and_no_fallback", test_ncnn_manual_and_no_fallback},
     {"ocr_context_changes", test_ocr_context_changes},
     {"region_change_redoes_subtitle_job", test_region_change_redoes_subtitle_job},

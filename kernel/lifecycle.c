@@ -25,6 +25,8 @@ static VjoForeground fg_load(void)
 
 static void fg_store(const VjoForeground *f, uint32_t iev)
 {
+    if ((iev & (IEV_GAME_START | IEV_GAME_EXIT)) || g.game_active != f->game_active)
+        __atomic_add_fetch(&g.text_epoch, 1, __ATOMIC_RELEASE);
     g.game_active = f->game_active;
     g.game_pid = f->game_pid;
     g.prev_game_pid = f->prev;

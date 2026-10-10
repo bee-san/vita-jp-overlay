@@ -11,17 +11,19 @@ if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
   endif()
 endif()
 
-project(VitaJPOverlay C CXX)
+project(VitaJPOverlay C CXX ASM)
 # taihen's TAI_CONTINUE relies on K&R-style `()` casts, which C23 (GCC 15 default) rejects.
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_EXTENSIONS ON)
 include("$ENV{VITASDK}/share/vita.cmake" REQUIRED)
+set(VJO_ELF_FLAGS "${VITA_ELF_CREATE_FLAGS}")
+set(VJO_SELF_FLAGS "${VITA_MAKE_FSELF_FLAGS}")
 
 set(ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
 set(VJO_ROOT ${ROOT})
 set(VJO_BUILD_VITA ON)
 option(VJO_WITH_NCNN "Build the CPU-only local mobile OCR recognizer" ON)
-set(VJO_VERSION "0.5-local.2")
+set(VJO_VERSION "0.6-hooks.1")
 
 # ---------------- kernel ----------------
 add_executable(VitaJPOverlay_Kernel
@@ -29,11 +31,16 @@ add_executable(VitaJPOverlay_Kernel
   ${ROOT}/kernel/log.c
   ${ROOT}/kernel/buffers.c
   ${ROOT}/kernel/capture.c
+  ${ROOT}/kernel/capture_request.c
   ${ROOT}/kernel/display.c
   ${ROOT}/kernel/input.c
   ${ROOT}/kernel/lifecycle.c
   ${ROOT}/kernel/foreground.c
-  ${ROOT}/kernel/triggers.c)
+  ${ROOT}/kernel/triggers.c
+  ${ROOT}/kernel/text.c
+  ${ROOT}/core/text_source.c
+  ${ROOT}/core/text_scan.c
+  ${ROOT}/core/utf.c)
 target_compile_options(VitaJPOverlay_Kernel PRIVATE -Wall -Wextra -Wno-unused-parameter -O2 -std=gnu99 -fno-builtin)
 target_link_options(VitaJPOverlay_Kernel PRIVATE -nostdlib -Wl,-q)
 target_link_libraries(VitaJPOverlay_Kernel
@@ -42,11 +49,14 @@ target_link_libraries(VitaJPOverlay_Kernel
   SceThreadmgrForDriver_stub
   SceSysclibForDriver_stub
   SceSysmemForDriver_stub
+  SceSysmemForKernel_stub
   SceCpuForDriver_stub
   SceDisplayForDriver_stub
   SceCtrlForDriver_stub
   SceTouchForDriver_stub
   SceIofilemgrForDriver_stub)
+set(VITA_ELF_CREATE_FLAGS "${VJO_ELF_FLAGS}")
+set(VITA_MAKE_FSELF_FLAGS "${VJO_SELF_FLAGS}")
 vita_create_self(VitaJPOverlay_Kernel.skprx VitaJPOverlay_Kernel
   UNSAFE
   CONFIG ${ROOT}/kernel/exports.yml)
@@ -68,7 +78,7 @@ add_library(vjo_core_vita STATIC
   ${ROOT}/core/config.c ${ROOT}/core/regions.c ${ROOT}/core/http.c ${ROOT}/core/tls.c
   ${ROOT}/core/tls_roots.c ${ROOT}/core/client.c ${ROOT}/core/styled.c ${ROOT}/core/jpegsw.c
   ${ROOT}/core/base64.c ${ROOT}/core/anki.c ${ROOT}/core/anki_queue.c ${ROOT}/core/net.c ${ROOT}/core/hachidori.c ${ROOT}/core/local_dict.c
-  ${ROOT}/core/ocr_lines.c)
+  ${ROOT}/core/ocr_lines.c ${ROOT}/core/text_source.c ${ROOT}/core/text_match.c ${ROOT}/core/text_scan.c ${ROOT}/core/hook_profile.c)
 target_include_directories(vjo_core_vita PUBLIC ${ROOT}/core ${ROOT}/include)
 target_link_libraries(vjo_core_vita PUBLIC vjo_bearssl)
 target_compile_options(vjo_core_vita PRIVATE -O2 -Wall -Wextra -Wno-unused-parameter -fno-builtin -fshort-wchar
@@ -119,9 +129,44 @@ target_link_libraries(VitaJPOverlay_Shell
   SceAppMgr_stub_weak
   vjo_bearssl  # again after the core: its integer division comes from libgcc
   gcc)
+set(VITA_ELF_CREATE_FLAGS "${VJO_ELF_FLAGS}")
+set(VITA_MAKE_FSELF_FLAGS "${VJO_SELF_FLAGS}")
 vita_create_self(VitaJPOverlay_Shell.suprx VitaJPOverlay_Shell
   UNSAFE
   CONFIG ${ROOT}/shell/exports.yml)
+
+# ---------------- native game text hooks ----------------
+add_executable(VitaJPOverlay_Text ${ROOT}/text/main.c ${ROOT}/text/observer.S
+  ${ROOT}/core/hook_profile.c ${ROOT}/shell/libc_shim.c)
+add_dependencies(VitaJPOverlay_Text vjo_kernel_stubs)
+target_compile_options(VitaJPOverlay_Text PRIVATE -O2 -Wall -Wextra -Wno-unused-parameter
+  -fno-builtin -fshort-wchar -ffunction-sections -fdata-sections)
+target_link_options(VitaJPOverlay_Text PRIVATE -nostdlib -nostartfiles -Wl,-q -Wl,--gc-sections -Wl,--undefined=module_stop)
+target_link_directories(VitaJPOverlay_Text PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/vjo_kernel_stubs)
+target_link_libraries(VitaJPOverlay_Text VitaJPOverlay_Kernel_stub_weak taihen_stub
+  SceLibKernel_stub SceKernelThreadMgr_stub SceKernelModulemgr_stub SceProcessmgr_stub SceIofilemgr_stub SceAppMgr_stub_weak gcc)
+set(VITA_ELF_CREATE_FLAGS "${VJO_ELF_FLAGS}")
+set(VITA_MAKE_FSELF_FLAGS "${VJO_SELF_FLAGS}")
+vita_create_self(VitaJPOverlay_Text.suprx VitaJPOverlay_Text UNSAFE CONFIG ${ROOT}/text/exports.yml)
+
+# Actual ARM observer and production user plugin with a test transport. The
+# kernel's process isolation and ScePaf overlay require separate validation.
+option(VJO_TEXT_TEST_APP "Build the text-capture ARM self-test VPK" OFF)
+if(VJO_TEXT_TEST_APP)
+  # VitaSDK's helper accumulates CONFIG arguments globally. A standalone app
+  # must not inherit the three plugins' export files.
+  set(VITA_ELF_CREATE_FLAGS "${VJO_ELF_FLAGS}")
+  set(VITA_MAKE_FSELF_FLAGS "${VJO_SELF_FLAGS}")
+  add_executable(vjo-hook-test ${ROOT}/text/tests/main.c ${ROOT}/text/tests/cases.c
+    ${ROOT}/text/tests/observer_probe.S ${ROOT}/text/tests/profile_probe.S ${ROOT}/text/observer.S
+    ${ROOT}/core/text_source.c ${ROOT}/core/text_match.c ${ROOT}/core/text_scan.c ${ROOT}/core/hook_profile.c ${ROOT}/core/utf.c)
+  target_compile_options(vjo-hook-test PRIVATE -O2 -Wall -Wextra -Werror -mcpu=cortex-a9 -mfpu=neon -mfloat-abi=hard)
+  target_link_libraries(vjo-hook-test SceIofilemgr_stub SceProcessmgr_stub SceLibKernel_stub SceKernelModulemgr_stub taihen_stub)
+  vita_create_self(vjo-hook-test.self vjo-hook-test CONFIG ${ROOT}/text/tests/exports.yml)
+  vita_create_vpk(vjo-hook-test.vpk VJOHK0001 vjo-hook-test.self VERSION 01.00 NAME "Vita text hook self-test"
+    FILE ${CMAKE_CURRENT_BINARY_DIR}/VitaJPOverlay_Text.suprx VitaJPOverlay_Text.suprx)
+  add_dependencies(vjo-hook-test.vpk-vpk VitaJPOverlay_Text.suprx-self)
+endif()
 
 # ---------------- RCO ----------------
 find_program(PSP2CXML psp2cxml-tool HINTS ${ROOT}/.refs/toolchain/psp2cxml-tool/mbuild ${ROOT}/.refs/psp2cxml-tool/mbuild ENV PATH REQUIRED)
@@ -142,15 +187,16 @@ add_custom_target(release
   COMMAND ${CMAKE_COMMAND} -E make_directory ${STAGE}/ur0/tai ${STAGE}/ur0/data/VitaJPOverlay
   COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_BINARY_DIR}/VitaJPOverlay_Kernel.skprx ${STAGE}/ur0/tai/
   COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_BINARY_DIR}/VitaJPOverlay_Shell.suprx ${STAGE}/ur0/tai/
+  COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_BINARY_DIR}/VitaJPOverlay_Text.suprx ${STAGE}/ur0/tai/
   COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_BINARY_DIR}/vitajpoverlay.rco ${STAGE}/ur0/data/VitaJPOverlay/
   COMMAND ${CMAKE_COMMAND} -E copy ${ROOT}/README.md ${ROOT}/LICENSE ${STAGE}/
   COMMAND ${CMAKE_COMMAND} -E copy ${ROOT}/docs/config.example.ini ${STAGE}/config.ini
   COMMAND ${CMAKE_COMMAND} -E make_directory ${STAGE}/tools ${STAGE}/docs/benchmarks ${STAGE}/third_party
-  COMMAND ${CMAKE_COMMAND} -E copy ${ROOT}/tools/convert_dictionary.py ${ROOT}/tools/install_dictionary.py ${ROOT}/tools/prepare_ocr.py ${STAGE}/tools/
-  COMMAND ${CMAKE_COMMAND} -E copy ${ROOT}/docs/local-dictionaries.md ${ROOT}/docs/local-ocr.md ${ROOT}/docs/lookup-performance.md ${STAGE}/docs/
-  COMMAND ${CMAKE_COMMAND} -E copy ${ROOT}/docs/benchmarks/local-lookup-jitendex.json ${STAGE}/docs/benchmarks/
+  COMMAND ${CMAKE_COMMAND} -E copy ${ROOT}/tools/convert_dictionary.py ${ROOT}/tools/install_dictionary.py ${ROOT}/tools/prepare_ocr.py ${ROOT}/tools/test_vita3k_hooks.py ${STAGE}/tools/
+  COMMAND ${CMAKE_COMMAND} -E copy ${ROOT}/docs/local-dictionaries.md ${ROOT}/docs/local-ocr.md ${ROOT}/docs/lookup-performance.md ${ROOT}/docs/native-text.md ${STAGE}/docs/
+  COMMAND ${CMAKE_COMMAND} -E copy ${ROOT}/docs/benchmarks/local-lookup-jitendex.json ${ROOT}/docs/benchmarks/native-text.json ${STAGE}/docs/benchmarks/
   COMMAND ${CMAKE_COMMAND} -E copy ${ROOT}/third_party/README.md ${STAGE}/third_party/
   COMMAND ${CMAKE_COMMAND} -E copy_directory ${ROOT}/third_party/licenses ${STAGE}/third_party/licenses
   COMMAND ${CMAKE_COMMAND} -E chdir ${STAGE} ${CMAKE_COMMAND} -E tar cf ${CMAKE_CURRENT_BINARY_DIR}/VitaJPOverlay-${VJO_VERSION}.zip --format=zip ur0 config.ini README.md LICENSE tools docs third_party
-  DEPENDS VitaJPOverlay_Kernel.skprx-self VitaJPOverlay_Shell.suprx-self vjo_rco
+  DEPENDS VitaJPOverlay_Kernel.skprx-self VitaJPOverlay_Shell.suprx-self VitaJPOverlay_Text.suprx-self vjo_rco
   COMMENT "Packaging VitaJPOverlay-${VJO_VERSION}.zip")

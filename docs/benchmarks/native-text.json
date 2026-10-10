@@ -1,0 +1,71 @@
+{
+  "date": "2026-10-10",
+  "environment": {
+    "host": "Linux-7.2.6-1-cachyos-x86_64-with-glibc2.44",
+    "host_compiler": "16.2.1",
+    "vita_compiler": "15.2.0",
+    "vita3k": "0.2.1 4154-b75d5e62",
+    "renderer": "OpenGL llvmpipe",
+    "ncnn_revision": "3798be64cfeeebc0afcfcebfb43ed5c9e1b72e82"
+  },
+  "host": {
+    "configure": "cmake -S . -B build/host -G Ninja -DVJO_WITH_NCNN=OFF",
+    "build": "cmake --build build/host -j4",
+    "test": "ctest --test-dir build/host --output-on-failure",
+    "ctest_suites_passed": 10,
+    "ctest_suites_failed": 0,
+    "kernel_policy_cases": 7,
+    "shell_worker_cases": 22
+  },
+  "vita": {
+    "configure": "cmake -S vita -B build/vita-full -G Ninja -DCMAKE_BUILD_TYPE=Release -DVJO_TEXT_TEST_APP=ON",
+    "build": "cmake --build build/vita-full -j4",
+    "local_ocr_included": true,
+    "plugin_file_bytes": {
+      "VitaJPOverlay_Kernel.skprx": 39048,
+      "VitaJPOverlay_Shell.suprx": 631736,
+      "VitaJPOverlay_Text.suprx": 7540
+    },
+    "linked_sections": "   text\t   data\t    bss\t    dec\t    hex\tfilename\n  41080\t     28\t  54440\t  95548\t  1753c\tVitaJPOverlay_Kernel\n 884202\t    144\t 175972\t1060318\t 102dde\tVitaJPOverlay_Shell\n   3880\t     16\t    496\t   4392\t   1128\tVitaJPOverlay_Text\n"
+  },
+  "vita3k": {
+    "command": "python3 tools/test_vita3k_hooks.py --vpk build/vita-full/vjo-hook-test.vpk",
+    "portable_checks": 38,
+    "observer_checks": 192,
+    "plugin_checks": 14,
+    "failures": 0,
+    "raw_output": [
+      "portable checks=38 failures=0 sources_bytes=26480 cp932_bytes=22560",
+      "observer mode=arm sp=80044EB8/80044EB8 flags=600F0000 fpscr=02000010 entry_fpscr=02000010 failures=0",
+      "observer mode=thumb sp=80044EB4/80044EB4 flags=600F0000 fpscr=02000000 entry_fpscr=02000000 failures=0",
+      "observer checks=192 failures=0",
+      "plugin uid=00000007 start=0",
+      "plugin checks=14 failures=0 call_events=4 register_events=2 matching_sources=6",
+      "RESULT PASS"
+    ],
+    "transport": "test exports in the self-test app; production user plugin loaded unchanged",
+    "fpscr_note": "The first ARM probe enters with the host inexact bit set. Checks compare full entry/exit FPSCR and verify control bits, after the callback clobbers FPSCR and APSR."
+  },
+  "bounds": {
+    "sources": 24,
+    "displayed_candidates": 5,
+    "source_table_bytes": 26480,
+    "cp932_readonly_bytes": 22560,
+    "snapshot_bytes": 6392,
+    "scan_buffer_bytes": 5122,
+    "capture_buffer_bytes": 2088960,
+    "capture_buffer_policy": "allocate on request; release idle native buffer; defer Anki full-image release until final row is copied; host tested",
+    "codepoints_per_source": 256,
+    "utf8_bytes_per_source": 1024
+  },
+  "unmeasured": {
+    "real_screenshot_CER": null,
+    "commercial_game_compatibility": null,
+    "physical_vita_execution": null,
+    "SceShell_Paf_rendering": null,
+    "console_peak_memory_bytes": null,
+    "console_hook_latency_us": null,
+    "console_scan_duration_s": null,
+    "adrenaline_hooks": null
+  }
+}

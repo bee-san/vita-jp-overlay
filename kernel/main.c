@@ -9,6 +9,7 @@
 #include <taihen.h>
 
 #include "vjo_kernel.h"
+#include "text.h"
 
 VjoKernelState g;
 
@@ -158,10 +159,9 @@ static int worker(SceSize args, void *argp)
             VJO_UNLOCK();
             ksceKernelSetEventFlag(g.evf, VJO_EV_GAME_START);
         }
-        /* Buffers only for processes the shell confirmed as games. */
+        /* Pixel buffers are allocated only by an explicit capture request. */
         if ((bits & IEV_ACTIVATE) && g.game_pid > 0 && g.game_active) {
             VJO_LOCK();
-            buffers_alloc();
             reset_change_detection();
             VJO_UNLOCK();
         }
@@ -181,6 +181,8 @@ static int worker(SceSize args, void *argp)
         }
 
         input_poll();
+        text_tick();
+        buffers_trim();
         if (++tick % CHECK_EVERY == 0)
             change_detection();
         kernel_file_flush();
@@ -361,25 +363,8 @@ int vjoRequestCapture(uint32_t flags)
     int ret;
     if (!caller_ok())
         return VJO_ERR_PERM;
-    if (g.game_pid <= 0 || !g.game_active)
-        return VJO_ERR_NO_GAME;
-    if (g.alloc_status != VJO_ALLOC_OK)
-        return VJO_ERR_NO_MEMORY;
     ENTER_SYSCALL(state);
-    VJO_LOCK();
-    if (g.capture_state != CAPTURE_IDLE) {
-        ret = VJO_ERR_BUSY;
-    } else {
-        g.capture_seq = (g.capture_seq + 1) & 0x7FFFFFFF;
-        if (!g.capture_seq)
-            g.capture_seq = 1;
-        ret = (int)g.capture_seq;
-        g.raw_valid = 0;
-        g.capture_full = (flags & VJO_CAPTURE_FULL) != 0;
-        g.capture_requested_us = ksceKernelGetSystemTimeWide();
-        g.capture_state = CAPTURE_PENDING;
-    }
-    VJO_UNLOCK();
+    ret = capture_request(flags);
     EXIT_SYSCALL(state);
     return ret;
 }
@@ -400,6 +385,7 @@ int vjoReadRaw(uint32_t row, uint32_t n, void *dst)
         if (n > g.crop_h - row)
             n = g.crop_h - row;
         ret = ksceKernelMemcpyKernelToUser(dst, g.raw + row * stride, n * stride) < 0 ? -1 : (int)n;
+        if (ret > 0) buffers_read_done(row, (uint32_t)ret);
     }
     VJO_UNLOCK();
     EXIT_SYSCALL(state);
@@ -444,6 +430,10 @@ int module_start(SceSize argc, const void *args)
         delete_sync_objects();
         return SCE_KERNEL_START_FAILED;
     }
+    if (text_init() < 0) {
+        delete_sync_objects();
+        return SCE_KERNEL_START_FAILED;
+    }
 
     {
         int d = display_hook_install(), i = input_hooks_install(), l = lifecycle_hooks_install();
@@ -457,6 +447,7 @@ int module_start(SceSize argc, const void *args)
             ksceKernelDeleteThread(worker_uid);
         worker_uid = -1;
         release_hooks();
+        text_shutdown();
         delete_sync_objects();
         return SCE_KERNEL_START_FAILED;
     }
@@ -475,6 +466,7 @@ int module_stop(SceSize argc, const void *args)
         ksceKernelDeleteThread(worker_uid);
     }
     release_hooks();
+    text_shutdown();
     buffers_free();
     delete_sync_objects();
     return SCE_KERNEL_STOP_SUCCESS;

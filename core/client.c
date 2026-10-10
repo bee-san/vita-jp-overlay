@@ -285,6 +285,10 @@ const char *vjo_err_text(VjoArena *a, int stage, const VjoErr *err)
     case VJO_E_OOM:
         vjo_buf_printf(&b, "%s failed: not enough memory", what);
         break;
+    case VJO_E_SOURCE:
+        vjo_buf_puts(&b, "Cannot capture the game screen. Close the overlay and try again on a dialogue line.");
+        if (err->detail) vjo_buf_printf(&b, " %s", err->detail);
+        break;
     case VJO_E_LOCAL_IO:
         vjo_buf_puts(&b, "Cannot read local dictionaries. Check the .vjdict files and local_dictionaries in config.ini.");
         if (err->detail) vjo_buf_printf(&b, " %s", err->detail);

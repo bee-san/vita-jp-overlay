@@ -2,6 +2,7 @@
  * Only Vita I/O is stubbed. Config, error rendering and relay lookup are real. */
 #include "acutest.h"
 #include "client.h"
+#include "pb.h"
 #include "replay.h"
 #define VJO_TEST_MEMORY_STUBS 1
 #include <psp2/host_stubs.h>
@@ -11,21 +12,69 @@ static VjoState kernel_state;
 static uint64_t test_now;
 static unsigned int posted_events;
 static VjoConfig loaded_config;
+static int capture_reply, capture_waits, capture_pending;
+static unsigned discard_requests;
+static uint32_t capture_flags;
+static int state_read_result;
+static unsigned raw_calls, raw_rows_copied, raw_fault_row;
+static int raw_short_read;
+
+static void capture_pixels(uint32_t row, uint32_t n, uint8_t *dst)
+{
+    for (uint32_t y = 0; y < n; y++) {
+        memset(dst + y * kernel_state.raw_stride, 0xCD, kernel_state.raw_stride);
+        for (uint32_t x = 0; x < kernel_state.width; x++) {
+            uint8_t *p = dst + y * kernel_state.raw_stride + x * 4;
+            p[0] = (uint8_t)(x * 13 + (row+y) * 7);
+            p[1] = (uint8_t)(x / 4);
+            p[2] = (uint8_t)((row+y) * 5);
+            p[3] = 255;
+        }
+    }
+}
 
 uint64_t sceKernelGetProcessTimeWide(void) { return test_now; }
 int sceKernelSetEventFlag(SceUID uid, unsigned int bits) { posted_events |= bits; return 0; }
 int sceKernelGetProcessTitleId(SceUID pid, char *titleid, SceSize len) { return -1; }
 int vjoGetVersion(void) { return VJO_API_VERSION; }
 int vjoRegisterShell(void) { return 0; }
-int vjoWaitEvent(uint32_t mask, uint32_t *out, uint32_t timeout) { return -1; }
-int vjoGetState(VjoState *out) { *out = kernel_state; return 0; }
+int vjoWaitEvent(uint32_t mask, uint32_t *out, uint32_t timeout) {
+    test_now += timeout;
+    *out = 0;
+    if (capture_pending > 0 && capture_waits > 0 && --capture_waits == 0) {
+        kernel_state.done_seq = (uint32_t)capture_pending;
+        *out = VJO_EV_CAPTURE_DONE;
+        return 0;
+    }
+    return -1;
+}
+int vjoGetState(VjoState *out) {
+    /* Even populated output must not be trusted when the syscall failed. */
+    *out = kernel_state;
+    return state_read_result;
+}
 int vjoSetRegion(const VjoRect *r) { return 0; }
 int vjoSetTriggers(int toggle, int subtitle) { return 0; }
 int vjoSetGameActive(int pid, int active) { return 0; }
 int vjoSetInputBlock(int on) { return 0; }
 static int capture_calls;
-int vjoRequestCapture(uint32_t flags) { capture_calls++; return VJO_ERR_NO_GAME; }
-int vjoReadRaw(uint32_t row, uint32_t n, void *dst) { return -1; }
+int vjoRequestCapture(uint32_t flags) {
+    if (flags == VJO_CAPTURE_DISCARD) { discard_requests++; return 0; }
+    capture_calls++;
+    capture_flags = flags;
+    capture_pending = capture_reply;
+    if (capture_reply > 0 && !capture_waits) kernel_state.done_seq = (uint32_t)capture_reply;
+    return capture_reply;
+}
+int vjoReadRaw(uint32_t row, uint32_t n, void *dst) {
+    raw_calls++;
+    if (row >= raw_fault_row) return raw_short_read ? (int)n - 1 : -1;
+    TEST_CHECK(row == raw_rows_copied && n && n <= 16);
+    TEST_CHECK(row < kernel_state.height && n <= kernel_state.height-row);
+    capture_pixels(row, n, dst);
+    raw_rows_copied += n;
+    return (int)n;
+}
 static VjoTextSnapshot hook_snapshot;
 int vjoTextRead(VjoTextSnapshot *out) { *out = hook_snapshot; return 0; }
 static int last_hook_mode, discover_calls;
@@ -136,6 +185,14 @@ static void setup(const char *ini)
     allocation_bytes = heap_bytes = 0;
     mem_kind = MEM_RESULTS;
     capture_calls = 0;
+    discard_requests = 0;
+    capture_reply = VJO_ERR_NO_GAME;
+    capture_waits = capture_pending = 0;
+    capture_flags = 0;
+    state_read_result = 0;
+    raw_calls = raw_rows_copied = 0;
+    raw_fault_row = 0;
+    raw_short_read = 0;
     allocation_calls = allocation_frees = 0;
     allocation_failure = 1;
     heap_calls = heap_frees = 0;
@@ -431,6 +488,210 @@ static void native_setup(const char *mode)
     c->id = 10; c->kind = VJO_TEXT_CALL; c->encoding = VJO_TEXT_UTF8;
     c->japanese = c->length = 6; c->updates = 1;
     strcpy(c->text, "猫を見ました");
+}
+
+/* A synthetic response with invented text. The real JPEG encoder, streamed
+ * Lens request, HTTP receiver and protobuf parser run; no socket is opened. */
+static VjoMemConn capture_conn;
+static char capture_http[1024], capture_upload[128 * 1024];
+static unsigned capture_connections;
+
+static void capture_random(void *ud, void *dst, size_t n) { memset(dst, 0x5A, n); }
+static int connect_capture(void *ud, const char *host, int port, int timeout, int io_timeout, VjoConn *out)
+{
+    static uint8_t response_mem[2048];
+    static const unsigned wrapper_fields[] = {1, 2, 1, 1, 3, 2};
+    VjoArena a;
+    VjoBuf message;
+    TEST_CHECK(!strcmp(host, VJO_LENS_HOST) && port == 443);
+    vjo_arena_init(&a, response_mem, sizeof(response_mem));
+    vjo_buf_init(&message, &a);
+    pb_put_string(&message, 2, "猫を見ました");
+    for (unsigned i = 0; i < sizeof(wrapper_fields)/sizeof(*wrapper_fields); i++) {
+        VjoBuf outer;
+        vjo_buf_init(&outer, &a);
+        pb_put_bytes(&outer, wrapper_fields[i], message.data, message.len);
+        TEST_CHECK(!outer.oom);
+        message = outer;
+    }
+    int header = snprintf(capture_http, sizeof(capture_http),
+        "HTTP/1.1 200 OK\r\nContent-Length: %lu\r\n\r\n", (unsigned long)message.len);
+    TEST_CHECK((size_t)header + message.len <= sizeof(capture_http));
+    memcpy(capture_http + header, message.data, message.len);
+    memset(&capture_conn, 0, sizeof(capture_conn));
+    capture_conn.in = capture_http;
+    capture_conn.len = (size_t)header + message.len;
+    capture_conn.step = 11; /* exercise fragmented HTTP/protobuf receipt */
+    capture_conn.out = capture_upload;
+    capture_conn.out_cap = sizeof(capture_upload);
+    vjo_memconn_init(&capture_conn, out);
+    capture_connections++;
+    return VJO_OK;
+}
+static void disconnect_capture(void *ud, VjoConn *c) {}
+
+static void capture_anchor_setup(void)
+{
+    native_setup(RELAY_CONFIG "text_source = auto\n");
+    allocation_failure = 0;
+    capture_reply = 71;
+    capture_waits = 2;
+    raw_fault_row = UINT32_MAX;
+    kernel_state.width = 755;
+    kernel_state.height = 146; /* final JPEG band is only two rows */
+    kernel_state.raw_stride = kernel_state.width * 4;
+    kernel_state.capture_checksum = 0x12345678;
+    hook_snapshot.candidates[0].score = 95;
+    capture_connections = 0;
+    plat.connect = connect_capture;
+    plat.disconnect = disconnect_capture;
+    plat.random = capture_random;
+    plat.plain_http = 1;
+    open_overlay();
+    TEST_ASSERT(job_running && job_anchor && !job_lookup && job_idx == 0);
+}
+
+static int capture_field(const void *data, size_t size, unsigned field, PbField *out)
+{
+    PbReader r;
+    PbField f;
+    pb_reader_init(&r, data, size);
+    while (pb_next(&r, &f) > 0)
+        if (f.field == field) { *out = f; return 1; }
+    return 0;
+}
+
+static void test_capture_rows_jpeg_lens_anchor(void)
+{
+    capture_anchor_setup();
+    uint32_t checksum = 0;
+    TEST_ASSERT(run_job(&results[0], &cache_data[0], &checksum) == VJO_OK);
+    TEST_CHECK(capture_calls == 1 && raw_calls == 10 && raw_rows_copied == 146);
+    TEST_CHECK(!discard_requests);
+    TEST_CHECK(capture_flags == VJO_CAPTURE_ONCE);
+    TEST_CHECK(capture_waits == 0 && checksum == kernel_state.capture_checksum);
+    TEST_CHECK(capture_connections == 1 && !relay_connections);
+    TEST_CHECK(job_text_ready && !strcmp(cache_data[0].sentence, "猫を見ました"));
+    TEST_CHECK(results[0].peak < RESULT_ARENA_SIZE && !results[1].base);
+
+    /* Inspect the uploaded protobuf, including bytes streamed through the
+     * shell's MemJpeg callback after capture has released its mutex. */
+    size_t header = 0;
+    for (size_t i = 0; i + 4 <= capture_conn.out_len; i++)
+        if (!memcmp(capture_upload + i, "\r\n\r\n", 4)) { header = i + 4; break; }
+    TEST_ASSERT(header && capture_conn.out_len < sizeof(capture_upload));
+    PbField object = {0}, image = {0}, payload = {0}, jpeg = {0}, metadata = {0}, f = {0};
+    TEST_ASSERT(capture_field(capture_upload + header, capture_conn.out_len-header, 1, &object));
+    TEST_ASSERT(capture_field(object.data, object.len, 3, &image));
+    TEST_ASSERT(capture_field(image.data, image.len, 1, &payload));
+    TEST_ASSERT(capture_field(payload.data, payload.len, 1, &jpeg));
+    TEST_ASSERT(jpeg.len > 4096); /* multiple upload callback reads */
+    TEST_CHECK(jpeg.data[0] == 0xFF && jpeg.data[1] == 0xD8);
+    TEST_CHECK(jpeg.data[jpeg.len-2] == 0xFF && jpeg.data[jpeg.len-1] == 0xD9);
+    TEST_ASSERT(capture_field(image.data, image.len, 3, &metadata));
+    TEST_CHECK(capture_field(metadata.data, metadata.len, 1, &f) && f.varint == 755);
+    TEST_CHECK(capture_field(metadata.data, metadata.len, 2, &f) && f.varint == 146);
+    unsigned jpeg_width = 0, jpeg_height = 0;
+    for (size_t i = 2; i + 9 < jpeg.len && jpeg.data[i] == 0xFF;) {
+        size_t length = (size_t)jpeg.data[i+2] * 256 + jpeg.data[i+3];
+        if (jpeg.data[i+1] == 0xC0) {
+            jpeg_height = (unsigned)jpeg.data[i+5] * 256 + jpeg.data[i+6];
+            jpeg_width = (unsigned)jpeg.data[i+7] * 256 + jpeg.data[i+8];
+            break;
+        }
+        if (length < 2 || length > jpeg.len-i-2) break;
+        i += length + 2;
+    }
+    TEST_CHECK(jpeg_width == 755 && jpeg_height == 146);
+
+    on_job_text();
+    TEST_CHECK(!anchor_calls && job_running && mem_uid >= 0);
+    job_done = 1; on_job_done();
+    TEST_CHECK(anchor_calls == 1 && !strcmp(last_reference, "猫を見ました"));
+    TEST_CHECK(g_view.hook_match_state == VJO_HOOK_MATCH_READY && g_view.hook_count == 1);
+    TEST_CHECK(!strcmp(g_view.hook_reference, "猫を見ました"));
+    TEST_CHECK(!job_running && !g_view.list && mem_uid < 0 && !results[0].base);
+}
+
+static void test_local_capture_keeps_multiple_passes(void)
+{
+    setup("ocr_backend = ncnn\n");
+    capture_reply = 71;
+    capture_waits = 2;
+    VjoState st;
+    /* run_local_ocr uses wait_capture(0), without the JPEG wrapper. Verify
+     * the shared capture call preserves its multi-pass request even when
+     * this host build omits the ncnn model runner. */
+    TEST_CHECK(wait_capture(0, &st) == VJO_OK);
+    TEST_CHECK(capture_calls == 1 && capture_flags == 0);
+}
+
+static void test_capture_failures_do_not_upload(void)
+{
+    static const struct {
+        const char *name;
+        int request, result, waits, short_read, expected;
+        unsigned fault_row, expected_rows;
+    } cases[] = {
+        {"request memory", VJO_ERR_NO_MEMORY, 0, 0, 0, VJO_E_OOM, 0, 0},
+        {"request no game", VJO_ERR_NO_GAME, 0, 0, 0, VJO_E_SOURCE, 0, 0},
+        {"completed memory", 71, VJO_ERR_NO_MEMORY, 2, 0, VJO_E_OOM, 0, 0},
+        {"completed copy", 71, VJO_ERR_COPY, 2, 0, VJO_E_SOURCE, 0, 0},
+        {"no completed capture", 71, 0, -1, 0, VJO_E_SOURCE, 0, 0},
+        {"failed first row", 71, 0, 2, 0, VJO_E_SOURCE, 0, 0},
+        {"short later row", 71, 0, 2, 1, VJO_E_SOURCE, 32, 32},
+    };
+    for (unsigned i = 0; i < sizeof(cases)/sizeof(*cases); i++) {
+        capture_anchor_setup();
+        capture_reply = cases[i].request;
+        kernel_state.capture_result = cases[i].result;
+        capture_waits = cases[i].waits;
+        raw_short_read = cases[i].short_read;
+        raw_fault_row = cases[i].fault_row;
+        uint32_t checksum = 0;
+        int rc = run_job(&results[0], &cache_data[0], &checksum);
+        TEST_CHECK_(rc == cases[i].expected, "%s: rc=%d", cases[i].name, rc);
+        TEST_CHECK(cache_data[0].failed_stage == VJO_STAGE_OCR && !job_text_ready);
+        TEST_CHECK(!capture_connections && !relay_connections && !anchor_calls);
+        TEST_CHECK(raw_rows_copied == cases[i].expected_rows);
+        TEST_CHECK(capture_calls == 1);
+        TEST_CHECK(discard_requests == (raw_calls ? 1u : 0u));
+        job_done = 1; on_job_done();
+        TEST_CHECK(g_view.hook_match_state == VJO_HOOK_MATCH_FAILED && g_view.status_is_error);
+        if (cases[i].expected == VJO_E_OOM)
+            TEST_CHECK(strstr(g_view.status, "not enough memory") != NULL);
+        else
+            TEST_CHECK(strstr(g_view.status, "Cannot capture the game screen") != NULL);
+        TEST_CHECK(!strstr(g_view.status, "unexpected response"));
+        TEST_CHECK(!g_view.hook_count && !g_view.hook_reference[0]);
+        TEST_CHECK(!job_running && mem_uid < 0 && !results[0].base);
+    }
+}
+
+static void test_capture_allocation_status_identifies_physical_error(void)
+{
+    static const struct { int alloc_status, state_rc, expected; } cases[] = {
+        {VJO_ALLOC_FAIL, 0, VJO_E_OOM},
+        {VJO_ALLOC_OK, 0, VJO_E_SOURCE},
+        {VJO_ALLOC_FAIL, VJO_ERR_PERM, VJO_E_SOURCE},
+    };
+    for (unsigned i = 0; i < sizeof(cases)/sizeof(*cases); i++) {
+        capture_anchor_setup();
+        capture_reply = (int32_t)0xC0000002u; /* exact physical request result */
+        kernel_state.alloc_status = cases[i].alloc_status;
+        state_read_result = cases[i].state_rc;
+        uint32_t checksum = 0;
+        TEST_CHECK(run_job(&results[0], &cache_data[0], &checksum) == cases[i].expected);
+        TEST_CHECK(!raw_calls && !capture_connections && !relay_connections);
+        TEST_CHECK(capture_calls == 1 && !discard_requests);
+        TEST_CHECK(!job_text_ready && !anchor_calls && !results[0].used);
+        state_read_result = 0;
+        job_done = 1; on_job_done();
+        TEST_CHECK(g_view.hook_match_state == VJO_HOOK_MATCH_FAILED && g_view.status_is_error);
+        TEST_CHECK(!strstr(g_view.status, "unexpected response"));
+        TEST_CHECK((strstr(g_view.status, "not enough memory") != NULL) == (cases[i].expected == VJO_E_OOM));
+        TEST_CHECK(!job_running && mem_uid < 0 && !results[0].base);
+    }
 }
 
 static void test_manual_hook_bypasses_capture_and_ocr(void)
@@ -894,6 +1155,10 @@ static void test_native_heap_retires_for_ocr(void)
 }
 
 TEST_LIST = {
+    {"capture_allocation_status_identifies_physical_error", test_capture_allocation_status_identifies_physical_error},
+    {"local_capture_keeps_multiple_passes", test_local_capture_keeps_multiple_passes},
+    {"capture_rows_jpeg_lens_anchor", test_capture_rows_jpeg_lens_anchor},
+    {"capture_failures_do_not_upload", test_capture_failures_do_not_upload},
     {"closed_anchor_clears_subtitle_busy", test_closed_anchor_clears_subtitle_busy},
     {"changed_picker_choice_is_not_silently_selected", test_changed_picker_choice_is_not_silently_selected},
     {"reopen_during_anchor_discards_old_screenshot", test_reopen_during_anchor_discards_old_screenshot},

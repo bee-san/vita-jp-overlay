@@ -397,8 +397,11 @@ static int mem_jpeg_read(void *ud, uint32_t off, void *dst, uint32_t len)
 
 static int raw_rows(void *ud, uint32_t row, uint32_t n, uint8_t *dst)
 {
+    int rc;
     (void)ud;
-    return vjoReadRaw(row, n, dst);
+    rc = vjoReadRaw(row, n, dst);
+    if (rc != (int)n) vjo_log("capture rows %u+%u failed: %d (0x%08X)", row, n, rc, (unsigned)rc);
+    return rc;
 }
 
 /* Caller holds capture_lock until it finishes reading the captured rows. */
@@ -408,8 +411,16 @@ static int wait_capture(uint32_t flags, VjoState *st)
     int64_t deadline;
     seq = vjoRequestCapture(flags);
     if (seq < 0) {
-        vjo_log("capture request failed %d", seq);
-        rc = seq == VJO_ERR_NO_MEMORY ? VJO_E_OOM : VJO_E_SOURCE;
+        /* Hardware returned C0000002 for an allocation failure, rather than
+         * the kernel's -2. Read the public status instead of guessing at a
+         * syscall error transformation; preserve both values in the log. */
+        sceClibMemset(st, 0, sizeof(*st));
+        st->size = sizeof(*st);
+        int state_rc = vjoGetState(st);
+        vjo_log("capture request failed %d (0x%08X), state rc=%d alloc=%u", seq,
+                (unsigned)seq, state_rc, st->alloc_status);
+        rc = seq == VJO_ERR_NO_MEMORY ||
+             (!state_rc && st->alloc_status == VJO_ALLOC_FAIL) ? VJO_E_OOM : VJO_E_SOURCE;
         goto out;
     }
     /* CAPTURE_DONE may be left over from an earlier capture: the sequence
@@ -442,11 +453,13 @@ int vjo_capture_jpeg(VjoArena *a, uint32_t flags, int quality, VjoBuf *out, VjoS
     int rc;
     int64_t t0;
     sceKernelLockMutex(capture_lock, 1, NULL);
-    rc = wait_capture(flags, st);
+    rc = wait_capture(flags | VJO_CAPTURE_ONCE, st);
     if (rc) goto out;
     t0 = now_us();
     if (vjo_jpeg_encode(a, st->width, st->height, st->raw_stride, raw_rows, NULL, quality, out) < 0) {
         rc = out->oom ? VJO_E_OOM : VJO_E_SOURCE;
+        int release_rc = vjoRequestCapture(VJO_CAPTURE_DISCARD);
+        if (release_rc < 0) vjo_log("discard failed JPEG capture: %d (0x%08X)", release_rc, (unsigned)release_rc);
         goto out;
     }
     vjo_log("JPEG %ux%u -> %u bytes in %d ms", st->width, st->height, (unsigned)out->len,

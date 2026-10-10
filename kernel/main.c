@@ -365,6 +365,7 @@ int vjoRequestCapture(uint32_t flags)
         return VJO_ERR_PERM;
     ENTER_SYSCALL(state);
     ret = capture_request(flags);
+    if (ret < 0) klog("capture request result %d (0x%08X), alloc=%d", ret, (unsigned)ret, g.alloc_status);
     EXIT_SYSCALL(state);
     return ret;
 }

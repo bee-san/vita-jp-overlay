@@ -28,6 +28,9 @@
 #include <psp2/kernel/processmgr.h>
 
 #include "paf_ui.h"
+extern "C" {
+#include "../core/utf.h"
+}
 
 using namespace paf;
 
@@ -84,6 +87,7 @@ static int s_anki_enabled, s_anki_syncing;
 static int s_selected;
 static uint32_t s_hook_session, s_hook_ids[VJO_TEXT_CHOICES];
 static int s_hook_count, s_hook_selected, s_hook_picker;
+static int s_hook_can_ocr, s_hook_matching;
 /* Copied from the view under its lock, so nothing outside render() reads
  * the result memory (the control thread frees it when a game exits) and no
  * paf call runs while the lock is held. */
@@ -214,49 +218,141 @@ static int header_follow(void)
 /* new_content: a new result (header text rebuilt and scrolled to the top);
  * otherwise only the selection moved. The text is built from the view under
  * its lock; the paf calls happen after it is released. */
+/* Keep previews readable without changing the captured source. Collapse
+ * line/control whitespace and omit invisible formatting; bound by complete
+ * codepoints, rather than cutting a Japanese sentence after 80 bytes. */
+static void hook_preview(char *out, size_t cap, const char *text, size_t bytes, unsigned limit)
+{
+    size_t len = sceClibStrnlen(text, bytes), i = 0, w = 0;
+    unsigned points = 0;
+    int space = 0, truncated = 0;
+    if (!cap) return;
+    while (i < len) {
+        uint32_t cp = vjo_utf8_next(text, len, &i);
+        if (cp == '\\' && i < len && (text[i] == 'n' || text[i] == 'r' || text[i] == 't')) {
+            i++;
+            cp = ' ';
+        }
+        if (cp <= 0x20 || cp == 0x7F || cp == 0x2028 || cp == 0x2029 || cp == 0x3000) {
+            space = w != 0;
+            continue;
+        }
+        if (cp == 0xFFFD || cp == 0xFEFF || (cp >= 0x200B && cp <= 0x200F) ||
+            (cp >= 0x202A && cp <= 0x202E) || (cp >= 0x2060 && cp <= 0x2069)) continue;
+        char encoded[4];
+        int n = vjo_utf8_encode(cp, encoded);
+        if (points == limit || w + (size_t)space + (size_t)n + 4 > cap) {
+            truncated = 1;
+            break;
+        }
+        if (space) out[w++] = ' ';
+        sceClibMemcpy(out + w, encoded, (size_t)n);
+        w += (size_t)n;
+        points++;
+        space = 0;
+    }
+    if (truncated && w + 4 <= cap) {
+        sceClibMemcpy(out + w, "…", 3);
+        w += 3;
+    }
+    out[w] = 0;
+}
+
 static void render_hooks(void)
 {
     VjoStyled hdr, body;
-    int ja, en;
+    int ja, en, match_ready;
+    char label[96], preview[4 * 160 + 4];
     uint32_t selected = s_hook_count ? s_hook_ids[s_hook_selected] : 0;
     font_px(&ja, &en);
     vjo_arena_reset(&s_ui);
-    if (vjo_styled_init(&hdr, &s_ui, HEADER_UNITS, 1) < 0 ||
+    if (vjo_styled_init(&hdr, &s_ui, HEADER_UNITS, 3) < 0 ||
         vjo_styled_init(&body, &s_ui, BODY_UNITS, MAX_SPANS) < 0) return;
-    vjo_styled_puts(&hdr, "Choose a text hook", VJO_RGB_TEXT, ja);
     vjo_view_lock();
+    if (s_hook_session != g_view.hook_session) selected = 0;
     s_hook_session = g_view.hook_session;
-    s_hook_count = (int)g_view.hook_count;
-    if (s_hook_count > VJO_TEXT_CHOICES) s_hook_count = VJO_TEXT_CHOICES;
+    if (s_hook_matching && g_view.hook_match_state != VJO_HOOK_MATCH_MATCHING) selected = 0;
+    s_hook_matching = g_view.hook_match_state == VJO_HOOK_MATCH_MATCHING;
+    s_hook_can_ocr = g_view.hook_ocr_available && !s_hook_matching;
+    match_ready = g_view.hook_match_state == VJO_HOOK_MATCH_READY && g_view.hook_reference[0];
+    if (match_ready) {
+        vjo_styled_puts(&hdr, "Read from screenshot\n", VJO_RGB_READING, en);
+        hook_preview(preview, sizeof(preview), g_view.hook_reference, sizeof(g_view.hook_reference), 160);
+        vjo_styled_puts(&hdr, preview, VJO_RGB_TEXT, ja);
+    } else {
+        vjo_styled_puts(&hdr, s_hook_matching ? "Reading screenshot…" :
+            g_view.hook_match_state == VJO_HOOK_MATCH_FAILED ? "Screenshot could not be read" :
+            "Choose game text", VJO_RGB_TEXT, ja);
+    }
+    s_hook_count = (int)(g_view.hook_count > VJO_TEXT_CHOICES ? VJO_TEXT_CHOICES : g_view.hook_count);
     s_hook_selected = 0;
     for (int i = 0; i < s_hook_count; i++) {
         s_hook_ids[i] = g_view.hooks[i].id;
         if (s_hook_ids[i] == selected) s_hook_selected = i;
     }
-    if (!s_hook_count)
-        vjo_styled_puts(&body, "Finding Japanese text in the game…\nAdvance a dialogue page, then reopen the overlay.", VJO_RGB_DIM, en);
-    for (int i = 0; i < s_hook_count; i++) {
-        char label[80], preview[84];
-        const VjoTextCandidate *c = &g_view.hooks[i];
-        size_t n = sceClibStrnlen(c->text, sizeof(preview)-4);
-        while (n && ((uint8_t)c->text[n] & 0xC0) == 0x80) n--;
-        sceClibMemcpy(preview, c->text, n);
-        if (c->text[n]) { sceClibMemcpy(preview+n, "…", 3); n += 3; }
-        preview[n] = 0;
-        sceClibSnprintf(label, sizeof(label), "%s%d · %u%% match · %s\n",
-                        i == s_hook_selected ? "▶ " : "", i+1, c->score,
-                        c->kind == VJO_TEXT_MEMORY ? "buffer" : c->kind == VJO_TEXT_POINTER ? "pointer" : "hook");
-        uint32_t color = i == s_hook_selected ? VJO_RGB_HIGHLIGHT : VJO_RGB_TEXT;
-        vjo_styled_puts(&body, label, color, en);
-        vjo_styled_puts(&body, preview, color, ja);
+    if (g_view.status[0]) {
+        vjo_styled_puts(&body, g_view.status,
+            g_view.status_is_error ? VJO_RGB_ERROR : VJO_RGB_DIM, en);
         vjo_styled_puts(&body, "\n\n", VJO_RGB_DIM, en);
+    }
+    if (s_hook_matching) {
+        vjo_styled_puts(&body, "The screenshot text and its closest matches will appear here.", VJO_RGB_DIM, en);
+    } else if (!s_hook_count) {
+        if (match_ready)
+            vjo_styled_puts(&body, s_hook_can_ocr ?
+                "No matching game text found.\nAdvance the dialogue and press □ to refresh, or △ to read the screenshot again." :
+                "No matching game text found.\nAdvance the dialogue, then press □ to refresh.", VJO_RGB_DIM, en);
+        else
+            vjo_styled_puts(&body, "No game text found yet.\nAdvance the dialogue, then press □ to refresh.", VJO_RGB_DIM, en);
+    } else {
+        const VjoTextCandidate *c = &g_view.hooks[s_hook_selected];
+        if (match_ready && c->score) {
+            if (!s_hook_selected)
+                sceClibSnprintf(label, sizeof(label), "Best match · %u%%\n", c->score);
+            else
+                sceClibSnprintf(label, sizeof(label), "Choice %d of %d · %u%% match\n",
+                    s_hook_selected + 1, s_hook_count, c->score);
+        } else {
+            sceClibSnprintf(label, sizeof(label), "Choice %d of %d%s\n",
+                s_hook_selected + 1, s_hook_count, match_ready ? " · no text match" : "");
+        }
+        vjo_styled_puts(&body, label, VJO_RGB_HIGHLIGHT, en);
+        hook_preview(preview, sizeof(preview), c->text, sizeof(c->text), 160);
+        vjo_styled_puts(&body, preview[0] ? preview : "No readable text", VJO_RGB_HIGHLIGHT, ja);
+        if (s_hook_count > 1) {
+            vjo_styled_puts(&body, "\n\nOther choices\n", VJO_RGB_DIM, en);
+            for (int i = 0; i < s_hook_count; i++) {
+                if (i == s_hook_selected) continue;
+                c = &g_view.hooks[i];
+                if (match_ready && c->score)
+                    sceClibSnprintf(label, sizeof(label), "%d · %u%% match\n", i + 1, c->score);
+                else
+                    sceClibSnprintf(label, sizeof(label), "%d%s\n", i + 1,
+                        match_ready ? " · no text match" : "");
+                vjo_styled_puts(&body, label, VJO_RGB_DIM, en);
+                hook_preview(preview, sizeof(preview), c->text, sizeof(c->text), 48);
+                vjo_styled_puts(&body, preview[0] ? preview : "No readable text", VJO_RGB_TEXT, ja);
+                vjo_styled_puts(&body, "\n\n", VJO_RGB_DIM, en);
+            }
+        }
     }
     vjo_view_unlock();
     text_set(s_header.text, &hdr);
     text_set(s_body.text, &body);
     s_n_entries = 0; s_hl_len = 0;
     pane_reset(&s_header); pane_reset(&s_body);
-    set_rich(s_hint, "<font color=\"#8a94a6\">▲ ▼ hook · × choose · □ rescan · △ OCR match · Select+□ region · ○ close</font>");
+    const char *hint;
+    if (s_hook_matching)
+        hint = "<font color=\"#8a94a6\">Reading screenshot… · Select+□ region · ○ close</font>";
+    else if (!s_hook_count)
+        hint = s_hook_can_ocr ?
+            "<font color=\"#8a94a6\">△ read again · □ refresh · Select+□ region · ○ close</font>" :
+            "<font color=\"#8a94a6\">□ refresh · Select+□ region · ○ close</font>";
+    else
+        hint = s_hook_can_ocr ?
+            "<font color=\"#8a94a6\">▲ ▼ choose · × use text · △ read again · □ refresh · Select+□ region · stick scroll · ○ close</font>" :
+            "<font color=\"#8a94a6\">▲ ▼ choose · × use text · □ refresh · Select+□ region · stick scroll · ○ close</font>";
+    set_rich(s_hint, hint);
 }
 
 static void render(int new_content)
@@ -267,7 +363,7 @@ static void render(int new_content)
 
     vjo_view_lock(); s_hook_picker = g_view.hook_picker; vjo_view_unlock();
     if (s_hook_picker) { render_hooks(); return; }
-    set_rich(s_hint, "<font color=\"#8a94a6\">◀ ▶ ▲ ▼ word · × queue · △ send · stick scroll · □ region · Select+□ hooks · ○ close</font>");
+    set_rich(s_hint, "<font color=\"#8a94a6\">◀ ▶ ▲ ▼ word · × queue · △ send · stick scroll · □ region · Select+□ text · ○ close</font>");
 
     font_px(&ja, &en);
     vjo_view_lock();
@@ -561,16 +657,16 @@ static int entry_vertical(int up)
 static void input_overlay(const VjoInput *in, uint32_t pressed)
 {
     if (s_hook_picker) {
-        if ((pressed & SCE_CTRL_UP) && s_hook_selected > 0) s_hook_selected--;
-        if ((pressed & SCE_CTRL_DOWN) && s_hook_selected + 1 < s_hook_count) s_hook_selected++;
-        if (pressed & (SCE_CTRL_UP | SCE_CTRL_DOWN)) render_hooks();
-        if ((pressed & SCE_CTRL_CROSS) && s_hook_count)
+        if (!s_hook_matching && (pressed & SCE_CTRL_UP) && s_hook_selected > 0) s_hook_selected--;
+        if (!s_hook_matching && (pressed & SCE_CTRL_DOWN) && s_hook_selected + 1 < s_hook_count) s_hook_selected++;
+        if (!s_hook_matching && (pressed & (SCE_CTRL_UP | SCE_CTRL_DOWN))) render_hooks();
+        if (!s_hook_matching && (pressed & SCE_CTRL_CROSS) && s_hook_count)
             vjo_post_hook(s_hook_session, s_hook_ids[s_hook_selected]);
         if (pressed & SCE_CTRL_SQUARE) {
             if (in->buttons & SCE_CTRL_SELECT) enter_region_mode();
-            else vjo_post_command(VJO_CMD_HOOK_DISCOVER, NULL);
+            else if (!s_hook_matching) vjo_post_command(VJO_CMD_HOOK_DISCOVER, NULL);
         }
-        if (pressed & SCE_CTRL_TRIANGLE) vjo_post_command(VJO_CMD_HOOK_OCR, NULL);
+        if (s_hook_can_ocr && (pressed & SCE_CTRL_TRIANGLE)) vjo_post_command(VJO_CMD_HOOK_OCR, NULL);
         if (pressed & SCE_CTRL_CIRCLE) vjo_post_command(VJO_CMD_CLOSED, NULL);
         int dy = (int)in->ly - 128;
         if (dy <= -STICK_DEADZONE || dy >= STICK_DEADZONE)

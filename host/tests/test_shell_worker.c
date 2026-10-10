@@ -28,7 +28,10 @@ int vjoRequestCapture(uint32_t flags) { capture_calls++; return VJO_ERR_NO_GAME;
 int vjoReadRaw(uint32_t row, uint32_t n, void *dst) { return -1; }
 static VjoTextSnapshot hook_snapshot;
 int vjoTextRead(VjoTextSnapshot *out) { *out = hook_snapshot; return 0; }
+static int last_hook_mode, discover_calls;
 int vjoTextControl(uint32_t session, int mode, uint32_t selected) {
+    last_hook_mode = mode;
+    if (mode == VJO_TEXT_DISCOVER) discover_calls++;
     if (session != hook_snapshot.session) return -1;
     hook_snapshot.selected = selected;
     memset(&hook_snapshot.current, 0, sizeof(hook_snapshot.current));
@@ -38,7 +41,12 @@ int vjoTextControl(uint32_t session, int mode, uint32_t selected) {
     return 0;
 }
 static int anchor_calls;
-int vjoTextReference(uint32_t session, const char *text) { anchor_calls++; return 0; }
+static char last_reference[VJO_TEXT_BYTES];
+int vjoTextReference(uint32_t session, const char *text) {
+    anchor_calls++;
+    snprintf(last_reference, sizeof(last_reference), "%s", text);
+    return session == hook_snapshot.session ? 0 : -1;
+}
 
 #include "../../shell/worker.c"
 
@@ -56,13 +64,15 @@ void vjo_platform_vita(VjoPlatform *p) {}
 static uint8_t result_mem[2][RESULT_ARENA_SIZE];
 static unsigned allocation_calls, allocation_frees;
 static int allocation_failure;
-static uint8_t heap_mem[2 * NATIVE_ARENA_SIZE];
+static uint8_t heap_mem[RESULT_ARENA_SIZE];
+static unsigned allocation_bytes, heap_bytes;
 static unsigned heap_calls, heap_frees;
 static int heap_available;
 void *vjo_shell_heap_alloc(size_t bytes)
 {
     heap_calls++;
-    TEST_CHECK(bytes == sizeof(heap_mem));
+    heap_bytes = bytes;
+    TEST_CHECK(bytes == RESULT_ARENA_SIZE || bytes == 2 * NATIVE_ARENA_SIZE);
     return heap_available && bytes <= sizeof(heap_mem) ? heap_mem : NULL;
 }
 void vjo_shell_heap_free(void *ptr)
@@ -73,6 +83,7 @@ void vjo_shell_heap_free(void *ptr)
 SceUID sceKernelAllocMemBlock(const char *name, int type, unsigned int size, void *opt)
 {
     allocation_calls++;
+    allocation_bytes = size;
     if (allocation_failure || size > sizeof(result_mem)) return (int)0x80024302u;
     return 1;
 }
@@ -119,7 +130,11 @@ static void setup(const char *ini)
     seen_hook_id = 0; seen_hook_text[0] = 0;
     hook_log_after = 0;
     hook_log_pending = 0;
-    anchor_calls = 0;
+    anchor_calls = discover_calls = 0;
+    last_hook_mode = VJO_TEXT_OFF;
+    last_reference[0] = 0;
+    allocation_bytes = heap_bytes = 0;
+    mem_kind = MEM_RESULTS;
     capture_calls = 0;
     allocation_calls = allocation_frees = 0;
     allocation_failure = 1;
@@ -437,23 +452,151 @@ static void test_manual_hook_bypasses_capture_and_ocr(void)
 static void test_automatic_hooks_match_once_and_handle_ocr_failure(void)
 {
     native_setup(RELAY_CONFIG "text_source = auto\n");
+    allocation_failure = 0;
     stable_pending = 1; auto_prefetch();
     TEST_CHECK(!job_running); /* never continuous OCR while finding a hook */
     open_overlay();
-    TEST_ASSERT(job_running && job_anchor && !job_native);
+    TEST_ASSERT(job_running && job_anchor && !job_native && !job_lookup);
+    TEST_CHECK(g_view.hook_match_state == VJO_HOOK_MATCH_MATCHING && !g_view.hook_count);
+    TEST_CHECK(allocation_bytes == RESULT_ARENA_SIZE && !results[1].base);
     uint32_t checksum = 0;
     TEST_CHECK(run_job(&results[job_idx], &cache_data[job_idx], &checksum) != VJO_OK);
     on_job_done();
     TEST_CHECK(g_view.hook_picker && text_calibrated && capture_calls == 1);
+    TEST_CHECK(g_view.hook_match_state == VJO_HOOK_MATCH_FAILED && g_view.status_is_error);
+    TEST_CHECK(!g_view.hook_count && !g_view.hook_reference[0] && !mem_heap && mem_uid < 0);
+    hook_snapshot.candidates[0].score = 80; /* stale score cannot validate failed OCR */
+    for (int i = 0; i < 20; i++) { hook_snapshot.sequence++; poll_hooks(); }
+    TEST_CHECK(!job_running && !hook_snapshot.selected && !g_view.hook_count);
+    close_overlay(); open_overlay(); /* explicit reopen is a fresh screenshot */
+    TEST_CHECK(job_running && job_anchor && !job_lookup && capture_calls == 1);
+    TEST_CHECK(!discover_calls && last_hook_mode == VJO_TEXT_LISTEN);
+}
+
+/* Complete OCR with invented text; Lens transport is covered separately. */
+static void complete_anchor(const char *sentence)
+{
+    TEST_ASSERT(job_running && job_anchor && !job_lookup && job_idx == 0);
+    TEST_ASSERT(vjo_overlay_ocr_text(&results[0], &job_cfg, sentence, &cache_data[0]) == VJO_OK);
+    job_text_ready = 1;
+    on_job_text();
+    TEST_CHECK(job_running && !anchor_calls && (mem_uid >= 0 || mem_heap));
+    job_done = 1;
+    on_job_done();
+}
+
+static void test_anchor_heap_lifecycle_and_stable_matches(void)
+{
+    native_setup(RELAY_CONFIG "text_source = auto\n");
+    mem_free(); allocation_frees = 0;
+    heap_available = 1;
+    hook_snapshot.count = 2;
+    hook_snapshot.candidates[0].score = 95;
+    hook_snapshot.candidates[1] = hook_snapshot.candidates[0];
+    hook_snapshot.candidates[1].id = 11;
+    hook_snapshot.candidates[1].score = 0;
     open_overlay();
-    TEST_CHECK(!job_running && capture_calls == 1);
-    hook_snapshot.candidates[0].score = 80;
+    TEST_ASSERT(job_running && mem_heap == heap_mem && mem_kind == MEM_ANCHOR);
+    TEST_CHECK(allocation_bytes == RESULT_ARENA_SIZE && heap_bytes == RESULT_ARENA_SIZE);
+    TEST_CHECK(!results[1].base && results[0].size == RESULT_ARENA_SIZE && !heap_frees);
+    complete_anchor("猫を見ました");
+    TEST_CHECK(!job_running && !mem_heap && heap_frees == 1 && !g_view.list);
+    TEST_CHECK(!results[0].base && !results[1].base && !relay_connections);
+    TEST_CHECK(g_view.hook_match_state == VJO_HOOK_MATCH_READY && g_view.hook_count == 1);
+    TEST_CHECK(!strcmp(g_view.hook_reference, "猫を見ました") && !strcmp(last_reference, "猫を見ました"));
+    TEST_CHECK(!hook_snapshot.selected && !discover_calls && last_hook_mode == VJO_TEXT_LISTEN);
+    unsigned version = g_view.version;
+    for (int i = 0; i < 50; i++) {
+        hook_snapshot.sequence++;
+        strcpy(hook_snapshot.candidates[0].text, "別の文章");
+        poll_hooks();
+    }
+    TEST_CHECK(g_view.version == version && !strcmp(g_view.hooks[0].text, "猫を見ました"));
+    TEST_CHECK(!job_running && !hook_snapshot.selected);
+    pending_cmd = VJO_CMD_HOOK_DISCOVER; on_command();
+    TEST_CHECK(!strcmp(g_view.hooks[0].text, "別の文章") && !job_running && !discover_calls);
+    vjo_post_hook(hook_snapshot.session, 10); on_command();
+    TEST_ASSERT(job_running && job_native && !job_anchor && mem_kind == MEM_NATIVE);
+    TEST_CHECK(heap_bytes == 2 * NATIVE_ARENA_SIZE && results[1].base);
+}
+
+static void test_anchor_oom_is_explicit_and_retryable(void)
+{
+    native_setup(RELAY_CONFIG "text_source = auto\n");
+    mem_free();
+    open_overlay();
+    TEST_CHECK(!job_running && g_view.hook_match_state == VJO_HOOK_MATCH_FAILED);
+    TEST_CHECK(g_view.status_is_error && strstr(g_view.status, "Not enough memory"));
+    TEST_CHECK(!g_view.hook_count && allocation_bytes == RESULT_ARENA_SIZE && heap_bytes == RESULT_ARENA_SIZE);
+    for (int i = 0; i < 30; i++) { test_now += 100000; poll_hooks(); }
+    TEST_CHECK(allocation_calls == 1 && !discover_calls);
+    heap_available = 1;
+    pending_cmd = VJO_CMD_HOOK_OCR; on_command();
+    TEST_CHECK(job_running && g_view.hook_match_state == VJO_HOOK_MATCH_MATCHING);
+    complete_anchor("犬を見ました");
+    TEST_CHECK(g_view.hook_match_state == VJO_HOOK_MATCH_READY && !g_view.hook_count);
+}
+
+static void test_anchor_cancel_frees_only_after_done(void)
+{
+    native_setup(RELAY_CONFIG "text_source = auto\n");
+    mem_free(); allocation_frees = 0;
+    heap_available = 1;
+    open_overlay();
+    TEST_ASSERT(job_running && mem_heap && !heap_frees);
+    on_game_exit();
+    TEST_CHECK(job_cancelled(NULL) && mem_heap && !heap_frees);
+    cache_data[0].sentence = "old screen";
+    on_job_text(); on_job_done();
+    TEST_CHECK(!job_running && !mem_heap && heap_frees == 1 && !anchor_calls);
+    TEST_CHECK(!g_view.open && !g_view.hook_reference[0] && !g_view.list);
+}
+
+static void test_reopen_during_anchor_discards_old_screenshot(void)
+{
+    native_setup(RELAY_CONFIG "text_source = auto\n");
+    allocation_failure = 0;
+    open_overlay();
+    TEST_ASSERT(job_running && job_anchor);
+    unsigned generation = job_generation;
+    close_overlay(); open_overlay();
+    TEST_CHECK(job_cancelled(NULL));
+    cache_data[0].sentence = "old screenshot";
+    on_job_text(); on_job_done();
+    TEST_CHECK(job_running && job_anchor && job_generation != generation);
+    TEST_CHECK(!anchor_calls && !g_view.hook_reference[0]);
+    complete_anchor("今の画面です");
+    TEST_CHECK(g_view.hook_match_state == VJO_HOOK_MATCH_READY);
+    TEST_CHECK(!strcmp(g_view.hook_reference, "今の画面です"));
+}
+
+static void test_dictionary_to_picker_reads_new_screenshot(void)
+{
+    native_setup("text_source = auto\n");
+    allocation_failure = 0;
+    vjoTextControl(hook_snapshot.session, VJO_TEXT_FOLLOW, 10);
+    open_overlay(); poll_hooks();
+    TEST_ASSERT(seen_hook_id == 10 && !g_view.hook_picker && !job_running);
+    pending_cmd = VJO_CMD_HOOK_DISCOVER; on_command(); poll_hooks();
+    TEST_CHECK(job_running && job_anchor && g_view.hook_picker);
+    TEST_CHECK(g_view.hook_match_state == VJO_HOOK_MATCH_MATCHING && !seen_hook_id);
+    TEST_CHECK(!anchor_calls && !discover_calls);
+    complete_anchor("今の画面です");
+    TEST_CHECK(g_view.hook_match_state == VJO_HOOK_MATCH_READY && anchor_calls == 1);
+}
+
+static void test_changed_picker_choice_is_not_silently_selected(void)
+{
+    native_setup(RELAY_CONFIG "text_source = hooks\n");
+    open_overlay();
+    strcpy(hook_snapshot.candidates[0].text, "別の文章");
+    hook_snapshot.sequence++;
     poll_hooks();
-    TEST_CHECK(hook_snapshot.selected == 10 && !g_view.hook_picker && capture_calls == 1);
-    test_now += 300001; poll_hooks();
-    TEST_ASSERT(job_running && job_native && !job_anchor);
-    TEST_CHECK(run_job(&results[job_idx], &cache_data[job_idx], &checksum) == VJO_OK);
-    TEST_CHECK(capture_calls == 1);
+    TEST_CHECK(!strcmp(g_view.hooks[0].text, "猫を見ました"));
+    vjo_post_hook(hook_snapshot.session, 10); on_command();
+    TEST_CHECK(!job_running && !hook_snapshot.selected && g_view.hook_picker);
+    TEST_CHECK(g_view.status_is_error && strstr(g_view.status, "changed"));
+    TEST_CHECK(!strcmp(g_view.hooks[0].text, "別の文章"));
 }
 
 static void test_ambiguous_and_stale_hook_choices(void)
@@ -740,6 +883,12 @@ static void test_native_heap_retires_for_ocr(void)
 }
 
 TEST_LIST = {
+    {"changed_picker_choice_is_not_silently_selected", test_changed_picker_choice_is_not_silently_selected},
+    {"reopen_during_anchor_discards_old_screenshot", test_reopen_during_anchor_discards_old_screenshot},
+    {"dictionary_to_picker_reads_new_screenshot", test_dictionary_to_picker_reads_new_screenshot},
+    {"anchor_heap_lifecycle_and_stable_matches", test_anchor_heap_lifecycle_and_stable_matches},
+    {"anchor_oom_is_explicit_and_retryable", test_anchor_oom_is_explicit_and_retryable},
+    {"anchor_cancel_frees_only_after_done", test_anchor_cancel_frees_only_after_done},
     {"native_heap_lookup_and_cleanup", test_native_heap_lookup_and_cleanup},
     {"native_heap_retires_for_ocr", test_native_heap_retires_for_ocr},
     {"low_memory_picker_and_raw_updates", test_low_memory_picker_and_raw_updates},

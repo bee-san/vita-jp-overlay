@@ -20,6 +20,10 @@ Both paths bind existing author-trained Meiki models.
 
 The Meiki source and MNN pins, model hashes, conversion instructions and local
 accuracy results are in [vita-vn-ocr](https://github.com/bee-san/vita-vn-ocr/tree/2eaa0592a96583cd73fac7e21374cfc63dc4009e/ports/meiki).
+That source repository is private, so building this optional backend requires
+access. Hosted CI exercises the default backend; the optional Meiki module
+and portable adapter are checked locally.
+
 Use its patched MNN 3.2.0 static build with `MNN_ENABLE_EXCEPTIONS=ON` and
 `MNN_LOW_MEMORY=ON`. Build in private directories; models and screenshots do
 not belong in Git. The build checks the imported source files against their

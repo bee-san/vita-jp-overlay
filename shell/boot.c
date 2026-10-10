@@ -17,10 +17,14 @@ static SceInt32 sceAVConfigRegisterCallback_patched(SceUID cbid, SceInt32 a2)
 {
     SceInt32 ret;
     int rc;
+    vjo_log("bootstrap: Paf callback entered");
     vjo_plugin_load();
+    vjo_log("bootstrap: Paf plugin loaded");
     rc = vjo_worker_start();
     if (rc < 0)
         vjo_log("worker start failed %d", rc);
+    else
+        vjo_log("bootstrap: worker started");
     ret = TAI_CONTINUE(SceInt32, s_hook_ref, cbid, a2);
     taiHookRelease(s_hook_id, s_hook_ref); /* one-shot */
     s_hook_id = -1;
@@ -37,6 +41,7 @@ int module_start(SceSize args, const void *argp)
     (void)argp;
 
     vjo_status_reset();
+    vjo_log("bootstrap: shell API %d entered", VJO_API_VERSION);
     fd = sceIoOpen(VJO_RCO_PATH, SCE_O_RDONLY, 0);
     if (fd < 0) {
         vjo_log("RCO missing at " VJO_RCO_PATH " (0x%08X): not starting", fd);
@@ -51,6 +56,7 @@ int module_start(SceSize args, const void *argp)
         vjo_status_close();
         return SCE_KERNEL_START_NO_RESIDENT;
     }
+    vjo_log("bootstrap: kernel resident, installing Paf callback");
 
     /* SceShell import of SceAVConfig: sceAVConfigRegisterCallback */
     s_hook_id = taiHookFunctionImport(&s_hook_ref, "SceShell", 0x79E0F03F, 0xFB5E3E74,
@@ -60,6 +66,7 @@ int module_start(SceSize args, const void *argp)
         vjo_status_close();
         return SCE_KERNEL_START_NO_RESIDENT;
     }
+    vjo_log("bootstrap: waiting for Paf");
     return SCE_KERNEL_START_SUCCESS;
 }
 

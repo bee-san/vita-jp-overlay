@@ -130,3 +130,17 @@ allocation replacement, safe buffer release and OCR bypass.
 This does not validate SceShell/Paf rendering, firmware kernel mappings, commercial
 engines or real-screenshot CER. Recorded measurements are in
 [the validation record](benchmarks/native-text.json); unmeasured fields are null.
+
+## Boot recovery and kernel build checks
+
+If the Vita shuts down during boot after an update, hold L throughout power-on
+to bypass taiHEN plugins, then open VitaShell FTP for recovery. The existing
+plugins and tai configuration should be backed up before any update.
+
+Kernel code must not use FPU/NEON registers. Starting with `0.6-hooks.2`, the
+kernel is compiled with `-mgeneral-regs-only`, and the build checks its complete
+disassembly before packaging. The early shell bootstrap and status logger also
+use general registers only. Startup stages are recorded in `status.txt` so a
+failure can be located before the shell worker starts. The original build had
+85 FPU/NEON instructions; the corrected build has zero. See the
+[boot investigation record](benchmarks/kernel-startup-20261010.json).

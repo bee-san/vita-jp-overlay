@@ -1,0 +1,44 @@
+{
+  "date": "2026-10-10",
+  "problem": "User reported shutdown during normal boot after installing 0.6-hooks.1; the console was subsequently reachable through VitaShell FTP.",
+  "compiler": "arm-vita-eabi-gcc 15.2.0",
+  "before": {
+    "source_commit": "894cbb80b52c50f07b07adcb4a2ef4eec6704909",
+    "kernel_sha256": "c10f3bd3063f98c80cd84505f552855506acf7b70b53e66899ba249f74b701b9",
+    "fpu_neon_instructions": 85,
+    "verification_exit_code": 1,
+    "note": "Checker ran against the installed build ELF before rebuilding that directory; startup input_hooks_install contains vmov/vstr instructions."
+  },
+  "after": {
+    "fpu_neon_instructions": 0,
+    "decoded_arm_instructions": 5917,
+    "verification_exit_code": 0,
+    "native_hook_checks": 244,
+    "hook_check_failures": 0,
+    "full_local_ocr_build": "passed",
+    "device_build_local_ocr": false,
+    "normal_physical_boot_verified": null,
+    "game_text_capture_verified": null
+  },
+  "commands": [
+    "python3 tools/check_kernel_instructions.py --objdump \"$VITASDK/bin/arm-vita-eabi-objdump\" build/vita-full/VitaJPOverlay_Kernel (before rebuilding)",
+    "cmake -S vita -B build/vita-hooks-device -G Ninja -DCMAKE_BUILD_TYPE=Release -DVJO_WITH_NCNN=OFF -DVJO_TEXT_TEST_APP=ON",
+    "cmake --build build/vita-hooks-device -j4",
+    "python3 tools/check_kernel_instructions.py --objdump \"$VITASDK/bin/arm-vita-eabi-objdump\" build/vita-hooks-device/VitaJPOverlay_Kernel",
+    "python3 tools/test_vita3k_hooks.py --vpk build/vita-hooks-device/vjo-hook-test.vpk"
+  ],
+  "device_plugin_files": {
+    "VitaJPOverlay_Kernel.skprx": {
+      "bytes": 38640,
+      "sha256": "baeddeac0569535949939b979837bf92b8e96641cd6cf60698ea0c09132e461f"
+    },
+    "VitaJPOverlay_Shell.suprx": {
+      "bytes": 153964,
+      "sha256": "738cb6b65fd3c191ea932bcbcbe13579d2e3dee95437ede8ef83c27427794339"
+    },
+    "VitaJPOverlay_Text.suprx": {
+      "bytes": 7504,
+      "sha256": "d66125a6f45683fd6c94837d9493f488dd16464017d64f44494171be97764b16"
+    }
+  }
+}

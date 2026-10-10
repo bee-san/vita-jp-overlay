@@ -23,7 +23,7 @@ set(ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
 set(VJO_ROOT ${ROOT})
 set(VJO_BUILD_VITA ON)
 option(VJO_WITH_NCNN "Build the CPU-only local mobile OCR recognizer" ON)
-set(VJO_VERSION "0.6-hooks.1")
+set(VJO_VERSION "0.6-hooks.2")
 
 # ---------------- kernel ----------------
 add_executable(VitaJPOverlay_Kernel
@@ -41,7 +41,8 @@ add_executable(VitaJPOverlay_Kernel
   ${ROOT}/core/text_source.c
   ${ROOT}/core/text_scan.c
   ${ROOT}/core/utf.c)
-target_compile_options(VitaJPOverlay_Kernel PRIVATE -Wall -Wextra -Wno-unused-parameter -O2 -std=gnu99 -fno-builtin)
+target_compile_options(VitaJPOverlay_Kernel PRIVATE -Wall -Wextra -Wno-unused-parameter -O2 -std=gnu99 -fno-builtin
+  -mgeneral-regs-only)
 target_link_options(VitaJPOverlay_Kernel PRIVATE -nostdlib -Wl,-q)
 target_link_libraries(VitaJPOverlay_Kernel
   gcc
@@ -55,6 +56,11 @@ target_link_libraries(VitaJPOverlay_Kernel
   SceCtrlForDriver_stub
   SceTouchForDriver_stub
   SceIofilemgrForDriver_stub)
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_custom_command(TARGET VitaJPOverlay_Kernel POST_BUILD
+  COMMAND ${Python3_EXECUTABLE} ${ROOT}/tools/check_kernel_instructions.py
+    --objdump ${CMAKE_OBJDUMP} $<TARGET_FILE:VitaJPOverlay_Kernel>
+  COMMENT "Checking kernel code contains no FPU or NEON instructions")
 set(VITA_ELF_CREATE_FLAGS "${VJO_ELF_FLAGS}")
 set(VITA_MAKE_FSELF_FLAGS "${VJO_SELF_FLAGS}")
 vita_create_self(VitaJPOverlay_Kernel.skprx VitaJPOverlay_Kernel
@@ -102,6 +108,10 @@ add_executable(VitaJPOverlay_Shell
   ${ROOT}/shell/files.c
   ${ROOT}/shell/libc_shim.c)
 add_dependencies(VitaJPOverlay_Shell vjo_kernel_stubs)
+# Startup runs before Paf is ready; it only needs integer operations. Avoid
+# compiler-generated VFP/NEON copies in the early bootstrap and status logger.
+set_source_files_properties(${ROOT}/shell/boot.c ${ROOT}/shell/log_vita.c
+  PROPERTIES COMPILE_OPTIONS "-mgeneral-regs-only")
 if(VJO_WITH_NCNN)
   target_link_libraries(VitaJPOverlay_Shell vjo_ocr ncnn)
 endif()
@@ -140,7 +150,8 @@ add_executable(VitaJPOverlay_Text ${ROOT}/text/main.c ${ROOT}/text/observer.S
   ${ROOT}/core/hook_profile.c ${ROOT}/shell/libc_shim.c)
 add_dependencies(VitaJPOverlay_Text vjo_kernel_stubs)
 target_compile_options(VitaJPOverlay_Text PRIVATE -O2 -Wall -Wextra -Wno-unused-parameter
-  -fno-builtin -fshort-wchar -ffunction-sections -fdata-sections)
+  -fno-builtin -fshort-wchar -ffunction-sections -fdata-sections
+  "$<$<COMPILE_LANGUAGE:C>:-mgeneral-regs-only>")
 target_link_options(VitaJPOverlay_Text PRIVATE -nostdlib -nostartfiles -Wl,-q -Wl,--gc-sections -Wl,--undefined=module_stop)
 target_link_directories(VitaJPOverlay_Text PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/vjo_kernel_stubs)
 target_link_libraries(VitaJPOverlay_Text VitaJPOverlay_Kernel_stub_weak taihen_stub
@@ -194,7 +205,7 @@ add_custom_target(release
   COMMAND ${CMAKE_COMMAND} -E make_directory ${STAGE}/tools ${STAGE}/docs/benchmarks ${STAGE}/third_party
   COMMAND ${CMAKE_COMMAND} -E copy ${ROOT}/tools/convert_dictionary.py ${ROOT}/tools/install_dictionary.py ${ROOT}/tools/prepare_ocr.py ${ROOT}/tools/test_vita3k_hooks.py ${STAGE}/tools/
   COMMAND ${CMAKE_COMMAND} -E copy ${ROOT}/docs/local-dictionaries.md ${ROOT}/docs/local-ocr.md ${ROOT}/docs/lookup-performance.md ${ROOT}/docs/native-text.md ${STAGE}/docs/
-  COMMAND ${CMAKE_COMMAND} -E copy ${ROOT}/docs/benchmarks/local-lookup-jitendex.json ${ROOT}/docs/benchmarks/native-text.json ${STAGE}/docs/benchmarks/
+  COMMAND ${CMAKE_COMMAND} -E copy ${ROOT}/docs/benchmarks/local-lookup-jitendex.json ${ROOT}/docs/benchmarks/native-text.json ${ROOT}/docs/benchmarks/kernel-startup-20261010.json ${STAGE}/docs/benchmarks/
   COMMAND ${CMAKE_COMMAND} -E copy ${ROOT}/third_party/README.md ${STAGE}/third_party/
   COMMAND ${CMAKE_COMMAND} -E copy_directory ${ROOT}/third_party/licenses ${STAGE}/third_party/licenses
   COMMAND ${CMAKE_COMMAND} -E chdir ${STAGE} ${CMAKE_COMMAND} -E tar cf ${CMAKE_CURRENT_BINARY_DIR}/VitaJPOverlay-${VJO_VERSION}.zip --format=zip ur0 config.ini README.md LICENSE tools docs third_party

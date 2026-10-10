@@ -22,6 +22,9 @@ static FILE *model_file;
 static void *allocated[3];
 static char events[64];
 static unsigned n_events;
+static unsigned paf_allocations, paf_frees, custom_allocations, custom_frees, custom_reports;
+static int custom_free_fail_slot;
+static int custom_context;
 
 static void event(char value)
 {
@@ -32,7 +35,7 @@ static void event(char value)
 
 void vjo_log(const char *fmt, ...) { (void)fmt; }
 void vjo_paf_memory_report(void) {}
-void *vjo_paf_alloc(size_t bytes)
+static void *test_allocate(size_t bytes)
 {
     const size_t expected[] = {
         MEIKI_MODULE_METADATA_BYTES, MEIKI_WORKSPACE_BYTES,
@@ -48,7 +51,7 @@ void *vjo_paf_alloc(size_t bytes)
     TEST_ASSERT(posix_memalign(&allocated[slot], 64, bytes) == 0);
     return allocated[slot];
 }
-void vjo_paf_free(void *pointer)
+static void test_release(void *pointer)
 {
     if (!pointer) return;
     for (unsigned i = 0; i < 3; ++i) {
@@ -62,6 +65,22 @@ void vjo_paf_free(void *pointer)
     }
     TEST_CHECK(0); /* unknown pointer or repeated free */
 }
+void *vjo_paf_alloc(size_t bytes) { paf_allocations++; return test_allocate(bytes); }
+void vjo_paf_free(void *pointer) { if (pointer) paf_frees++; test_release(pointer); }
+static void *custom_alloc(void *ud, size_t bytes)
+{
+    TEST_CHECK(ud == &custom_context); custom_allocations++;
+    return test_allocate(bytes);
+}
+static int custom_free(void *ud, void *pointer)
+{
+    TEST_CHECK(ud == &custom_context); custom_frees++;
+    if (custom_free_fail_slot >= 0 && pointer == allocated[custom_free_fail_slot]) return -1;
+    test_release(pointer);
+    return 0;
+}
+static void custom_report(void *ud) { TEST_CHECK(ud == &custom_context); custom_reports++; }
+static VjoMeikiAllocator custom_allocator = {&custom_context, custom_alloc, custom_free, custom_report};
 
 static int file_read(void *ctx, uint64_t offset, void *out, size_t size)
 {
@@ -194,6 +213,8 @@ static void setup(int valid_model)
     advertised_detector_size = DETECT_MODEL_BYTES;
     memset(allocated, 0, sizeof(allocated));
     events[0] = 0; n_events = 0;
+    paf_allocations = paf_frees = custom_allocations = custom_frees = custom_reports = 0;
+    custom_free_fail_slot = -1;
 }
 static int start(void)
 {
@@ -435,6 +456,61 @@ static void test_dialogue_missing_detect_api_and_wrong_path_refuse_calls(void)
     TEST_CHECK(vjo_meiki_bridge_finish(&bridge) == VJO_OK);
 }
 
+static void test_custom_allocator_provenance_and_setter_guard(void)
+{
+    if (!have_model()) return;
+    setup(1);
+    VjoMeikiAllocator invalid = custom_allocator; invalid.free = NULL;
+    TEST_CHECK(vjo_meiki_bridge_set_allocator(&bridge, &invalid) == VJO_E_OCR_UNAVAILABLE);
+    TEST_ASSERT(vjo_meiki_bridge_set_allocator(&bridge, &custom_allocator) == VJO_OK);
+    TEST_ASSERT(start() == VJO_OK);
+    TEST_CHECK(custom_allocations == 3 && custom_reports == 1 && !paf_allocations);
+    TEST_CHECK(vjo_meiki_bridge_set_allocator(&bridge, NULL) == VJO_E_OCR_UNAVAILABLE);
+    TEST_CHECK(vjo_meiki_bridge_finish(&bridge) == VJO_OK);
+    TEST_CHECK(custom_frees == 3 && !paf_frees);
+    check_empty();
+    TEST_CHECK(vjo_meiki_bridge_set_allocator(&bridge, NULL) == VJO_OK);
+}
+
+static void test_custom_free_refusal_keeps_exact_buffer_and_allocator(void)
+{
+    if (!have_model()) return;
+    for (int slot = 0; slot < 3; slot++) {
+        setup(1);
+        TEST_ASSERT(vjo_meiki_bridge_set_allocator(&bridge, &custom_allocator) == VJO_OK);
+        TEST_ASSERT(start() == VJO_OK);
+        void *held = allocated[slot]; custom_free_fail_slot = slot;
+        TEST_CHECK(vjo_meiki_bridge_finish(&bridge) == VJO_E_OCR_UNAVAILABLE);
+        TEST_CHECK(bridge.module < 0 && stops == 1 && unloads == 1 && frees == 2);
+        TEST_CHECK(allocated[slot] == held && bridge.allocator.ud == &custom_context);
+        TEST_CHECK(start() == VJO_E_OCR_UNAVAILABLE && loads == 1);
+        TEST_CHECK(vjo_meiki_bridge_set_allocator(&bridge, NULL) == VJO_E_OCR_UNAVAILABLE);
+        if (slot == 2) TEST_CHECK(bridge.input == held && bridge.scratch);
+        else TEST_CHECK(!bridge.input && !bridge.scratch);
+        custom_free_fail_slot = -1;
+        TEST_CHECK(vjo_meiki_bridge_finish(&bridge) == VJO_OK);
+        TEST_CHECK(frees == 3 && custom_frees == 4 && !paf_frees);
+        TEST_CHECK(stops == 1 && unloads == 1);
+        check_empty();
+    }
+}
+
+static void test_partial_custom_failure_retains_failed_release(void)
+{
+    if (!have_model()) return;
+    setup(1); allocation_fail_at = 3;
+    TEST_ASSERT(vjo_meiki_bridge_set_allocator(&bridge, &custom_allocator) == VJO_OK);
+    custom_free_fail_slot = 1;
+    TEST_CHECK(start() == VJO_E_OCR_UNAVAILABLE);
+    TEST_CHECK(bridge.workspace && !bridge.metadata && !bridge.preprocessing && !loads && frees == 1);
+    TEST_CHECK(start() == VJO_E_OCR_UNAVAILABLE);
+    TEST_CHECK(vjo_meiki_bridge_set_allocator(&bridge, NULL) == VJO_E_OCR_UNAVAILABLE);
+    custom_free_fail_slot = -1;
+    TEST_CHECK(vjo_meiki_bridge_finish(&bridge) == VJO_OK);
+    TEST_CHECK(frees == 2 && !paf_frees);
+    check_empty();
+}
+
 TEST_LIST = {
     {"bad_size_hash_and_io_allocate_nothing", test_bad_size_hash_and_io_allocate_nothing},
     {"cancelled_validation_allocates_nothing", test_cancelled_validation_allocates_nothing},
@@ -449,5 +525,8 @@ TEST_LIST = {
     {"dialogue_partial_allocation_failure_releases_every_buffer", test_dialogue_partial_allocation_failure_releases_every_buffer},
     {"dialogue_detect_run_and_cleanup_share_workspace", test_dialogue_detect_run_and_cleanup_share_workspace},
     {"dialogue_missing_detect_api_and_wrong_path_refuse_calls", test_dialogue_missing_detect_api_and_wrong_path_refuse_calls},
+    {"custom_allocator_provenance_and_setter_guard", test_custom_allocator_provenance_and_setter_guard},
+    {"custom_free_refusal_keeps_exact_buffer_and_allocator", test_custom_free_refusal_keeps_exact_buffer_and_allocator},
+    {"partial_custom_failure_retains_failed_release", test_partial_custom_failure_retains_failed_release},
     {NULL, NULL}
 };

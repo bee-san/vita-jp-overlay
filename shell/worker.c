@@ -18,7 +18,11 @@ extern void vjo_paf_probe_once(void);
 #include "shell.h"
 #ifdef VJO_WITH_MEIKI
 #include "meiki_bridge.h"
+#ifdef VJO_MEIKI_GAME_WORKER
+#include "game_ocr_client.h"
+#else
 static VjoMeikiBridge meiki_bridge = {.module = -1};
+#endif
 #endif
 #ifdef VJO_PAF_ALLOC
 extern void *vjo_paf_alloc(size_t bytes);
@@ -30,7 +34,11 @@ static void *result_memory;
 /* Memory: two result arenas (the overlay shows one while the network thread
  * fills the other) in one memblock allocated only when a job needs it, plus a small
  * static scratch arena (control thread only) for config/region/messages. */
+#ifdef VJO_MEIKI_GAME_WORKER
+#define RESULT_ARENA_SIZE (160 * 1024)
+#else
 #define RESULT_ARENA_SIZE (384 * 1024)
+#endif
 #define NATIVE_ARENA_SIZE (128 * 1024)
 #define SCRATCH_SIZE      (24 * 1024)
 #define MEM_SIZE          (2 * RESULT_ARENA_SIZE)
@@ -602,18 +610,57 @@ static int run_local_ocr(VjoArena *a, VjoOverlayData *out, uint32_t *checksum)
     return rc;
 }
 
+#ifdef VJO_MEIKI_GAME_WORKER
+static int game_ocr_submit(void *ud, const VjoGameOcrRequest *req)
+{ (void)ud; return vjoOcrSubmit(req); }
+static int game_ocr_read(void *ud, uint32_t seq, VjoGameOcrResult *out)
+{ (void)ud; return vjoOcrRead(seq, out); }
+static int game_ocr_cancel(void *ud, uint32_t seq)
+{ (void)ud; return vjoOcrCancel(seq); }
+static int64_t game_ocr_now(void *ud)
+{ (void)ud; return now_us(); }
+static void game_ocr_delay(void *ud, uint32_t us)
+{ (void)ud; sceKernelDelayThread(us); }
+#endif
+
 static int run_meiki_ocr(VjoArena *a, VjoOverlayData *out, uint32_t *checksum)
 {
 #ifdef VJO_WITH_MEIKI
     VjoState st;
+#ifndef VJO_MEIKI_GAME_WORKER
     VjoMeikiStats stats = {0};
+#endif
     if (!job_region_selected) return VJO_E_OCR_REGION;
     if (job_cancelled(NULL)) return VJO_E_CANCELLED;
+#ifdef VJO_MEIKI_GAME_WORKER
+    VjoGameOcrResult *result = vjo_arena_alloc(a, sizeof(*result));
+    if (!result) return VJO_E_OOM;
+#else
     char *text = vjo_arena_alloc(a, VJO_OCR_TEXT_CAP);
     if (!text) return VJO_E_OOM;
+#endif
     sceKernelLockMutex(capture_lock, 1, NULL);
     int rc = wait_capture(0, &st);
     if (!rc && st.raw_stride != st.width * 4) rc = VJO_E_SOURCE;
+#ifdef VJO_MEIKI_GAME_WORKER
+    if (!rc) {
+        VjoGameOcrRequest req = {.size = sizeof(req), .done_seq = st.done_seq,
+            .width = st.width, .height = st.height, .stride = st.raw_stride,
+            .layout = job_cfg.meiki_layout == VJO_MEIKI_DIALOGUE_BOX
+                ? VJO_GAME_OCR_DIALOGUE_BOX : VJO_GAME_OCR_SINGLE_LINE};
+        sceClibSnprintf(req.model_dir, sizeof(req.model_dir), "%s", job_cfg.ocr_model_dir);
+        const VjoGameOcrClient client = {NULL, game_ocr_submit, game_ocr_read,
+                                       game_ocr_cancel, game_ocr_now, game_ocr_delay};
+        rc = vjo_game_ocr_exchange(&client, &req, result, job_cancelled, NULL, 60000000);
+        *checksum = st.capture_checksum;
+        vjo_log("game Meiki rc=%d pool peak=%u KiB metadata peak=%u KiB cleanup=%d",
+                rc, result->neural_peak >> 10, result->metadata_peak >> 10,
+                result->cleanup_status);
+    }
+    sceKernelUnlockMutex(capture_lock, 1);
+    if (!rc && job_cancelled(NULL)) rc = VJO_E_CANCELLED;
+    if (!rc) rc = vjo_overlay_ocr_text(a, &job_cfg, result->text, out);
+#else
     if (!rc) rc = vjo_meiki_bridge_start_mode(&meiki_bridge, &plat, job_cfg.ocr_model_dir,
                       job_cfg.meiki_layout == VJO_MEIKI_DIALOGUE_BOX, job_cancelled, NULL);
     if (!rc) {
@@ -637,6 +684,7 @@ static int run_meiki_ocr(VjoArena *a, VjoOverlayData *out, uint32_t *checksum)
             meiki_bridge.module_stats.tainted);
     if (!rc && job_cancelled(NULL)) rc = VJO_E_CANCELLED;
     if (!rc) rc = vjo_overlay_ocr_text(a, &job_cfg, text, out);
+#endif
     return rc;
 #else
     (void)a; (void)out; (void)checksum;
@@ -671,6 +719,10 @@ static int run_job(VjoArena *a, VjoOverlayData *out, uint32_t *checksum)
                     : "Select a horizontal dialogue area with Square, then save with Cross.";
             if (job_cfg.ocr_backend == VJO_OCR_MEIKI && rc == VJO_E_OCR_MODEL)
                 out->err.detail = "Install the pinned Meiki model files for the selected layout.";
+#ifdef VJO_MEIKI_GAME_WORKER
+            if (job_cfg.ocr_backend == VJO_OCR_MEIKI && rc == VJO_E_OCR_UNAVAILABLE)
+                out->err.detail = "Install the Meiki OCR worker for this game, then restart it.";
+#endif
             return out->err.rc = rc;
         }
         goto recognized;
@@ -1548,6 +1600,11 @@ int vjo_worker_start(void)
     REQUIRE_KERNEL_IMPORT(vjoTextControl);
     REQUIRE_KERNEL_IMPORT(vjoTextReference);
     REQUIRE_KERNEL_IMPORT(vjoTextRead);
+#ifdef VJO_MEIKI_GAME_WORKER
+    REQUIRE_KERNEL_IMPORT(vjoOcrSubmit);
+    REQUIRE_KERNEL_IMPORT(vjoOcrRead);
+    REQUIRE_KERNEL_IMPORT(vjoOcrCancel);
+#endif
 #undef REQUIRE_KERNEL_IMPORT
 #endif
     vjo_log("worker startup: checking kernel API");
@@ -1619,7 +1676,7 @@ int vjo_worker_stop(void)
         }
         threads_started = 0;
     }
-#ifdef VJO_WITH_MEIKI
+#if defined(VJO_WITH_MEIKI) && !defined(VJO_MEIKI_GAME_WORKER)
     if (vjo_meiki_bridge_finish(&meiki_bridge)) {
         vjo_log("Meiki cleanup pending; refusing Shell unload");
         return -1;

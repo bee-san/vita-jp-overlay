@@ -12,6 +12,7 @@
 #include "../include/vjo_api.h"
 #include "foreground.h" /* IEV_* */
 #include "triggers.h"   /* TRIG_* */
+#include "game_ocr.h"
 
 #define CAPTURE_IDLE    0
 #define CAPTURE_PENDING 1     /* the next game frame is copied in game context (display.c) */
@@ -58,6 +59,8 @@ typedef struct {
     volatile int raw_valid;
     volatile int capture_release; /* release an idle buffer after switching to native text */
     uint32_t capture_seq;      /* bumped per request */
+    SceUID capture_game_pid;   /* owner when requested, separate from the current foreground */
+    uint32_t capture_epoch;    /* suspend/resume invalidates a finished image too */
     uint32_t done_seq;         /* seq of the last finished capture */
     int capture_full;          /* the pending capture is the whole frame (VJO_CAPTURE_FULL) */
     int capture_once;          /* protect then release a single-pass JPEG capture */

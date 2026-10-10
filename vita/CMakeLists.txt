@@ -25,6 +25,10 @@ set(VJO_BUILD_VITA ON)
 option(VJO_WITH_NCNN "Build the CPU-only local mobile OCR recognizer" ON)
 option(VJO_WITH_MEIKI "Build the isolated, bounded Meiki OCR engine" OFF)
 option(VJO_MEMORY_DIAGNOSTICS "Enable bounded, idle-only physical memory probes" OFF)
+option(VJO_MEIKI_GAME_WORKER "Run Meiki in an optional OCR-only game-process plugin" OFF)
+if(VJO_MEIKI_GAME_WORKER AND NOT VJO_WITH_MEIKI)
+  message(FATAL_ERROR "VJO_MEIKI_GAME_WORKER requires VJO_WITH_MEIKI")
+endif()
 set(VJO_VERSION "0.6-hooks.5")
 
 # ---------------- kernel ----------------
@@ -40,6 +44,7 @@ add_executable(VitaJPOverlay_Kernel
   ${ROOT}/kernel/foreground.c
   ${ROOT}/kernel/triggers.c
   ${ROOT}/kernel/text.c
+  ${ROOT}/kernel/game_ocr.c
   ${ROOT}/core/text_source.c
   ${ROOT}/core/text_scan.c
   ${ROOT}/core/utf.c)
@@ -129,9 +134,36 @@ endif()
 if(VJO_WITH_MEIKI)
   include(${ROOT}/cmake/MeikiOCR.cmake)
   add_subdirectory(${VJO_MEIKI_SOURCE_DIR}/module ${CMAKE_CURRENT_BINARY_DIR}/meiki-module)
-  target_sources(VitaJPOverlay_Shell PRIVATE ${ROOT}/shell/meiki_bridge.c)
+  if(VJO_MEIKI_GAME_WORKER)
+    target_sources(VitaJPOverlay_Shell PRIVATE ${ROOT}/shell/game_ocr_client.c)
+    target_compile_definitions(VitaJPOverlay_Shell PRIVATE VJO_MEIKI_GAME_WORKER=1)
+  else()
+    target_sources(VitaJPOverlay_Shell PRIVATE ${ROOT}/shell/meiki_bridge.c)
+  endif()
   target_compile_definitions(VitaJPOverlay_Shell PRIVATE VJO_WITH_MEIKI=1)
   target_link_libraries(VitaJPOverlay_Shell vjo_meiki SceKernelModulemgr_stub)
+endif()
+
+# A lazy OCR worker: SDK-owned USER blocks, no newlib allocator, Paf or text
+# hooks. The frozen engine is loaded only for an explicitly submitted job.
+if(VJO_MEIKI_GAME_WORKER)
+  add_executable(VitaJPOverlay_OCR ${ROOT}/game_ocr/main.c
+    ${ROOT}/game_ocr/libc_math.c ${ROOT}/shell/meiki_bridge.c ${ROOT}/shell/libc_shim.c)
+  add_dependencies(VitaJPOverlay_OCR vjo_kernel_stubs)
+  target_compile_definitions(VitaJPOverlay_OCR PRIVATE VJO_GAME_OCR_WORKER=1)
+  target_compile_options(VitaJPOverlay_OCR PRIVATE -O2 -Wall -Wextra -Wno-unused-parameter
+    -fno-builtin -fshort-wchar -ffunction-sections -fdata-sections)
+  target_link_options(VitaJPOverlay_OCR PRIVATE -nostdlib -nostartfiles -Wl,-q
+    -Wl,--gc-sections -Wl,--undefined=module_start -Wl,--undefined=module_stop -Wl,--no-wchar-size-warning)
+  target_link_directories(VitaJPOverlay_OCR PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/vjo_kernel_stubs)
+  target_link_libraries(VitaJPOverlay_OCR vjo_meiki vjo_core_vita
+    VitaJPOverlay_Kernel_stub_weak SceKernelModulemgr_stub SceLibKernel_stub
+    SceKernelThreadMgr_stub SceSysmem_stub_weak SceProcessmgr_stub SceIofilemgr_stub
+    vjo_bearssl gcc)
+  set(VITA_ELF_CREATE_FLAGS "${VJO_ELF_FLAGS}")
+  set(VITA_MAKE_FSELF_FLAGS "${VJO_SELF_FLAGS}")
+  vita_create_self(VitaJPOverlay_OCR.suprx VitaJPOverlay_OCR UNSAFE
+    CONFIG ${ROOT}/game_ocr/exports.yml)
 endif()
 if(VJO_WITH_NCNN)
   target_link_libraries(VitaJPOverlay_Shell vjo_ocr ncnn)
@@ -165,12 +197,19 @@ set(VITA_MAKE_FSELF_FLAGS "${VJO_SELF_FLAGS}")
 vita_create_self(VitaJPOverlay_Shell.suprx VitaJPOverlay_Shell
   UNSAFE
   CONFIG ${ROOT}/shell/exports.yml)
+set(VJO_GAME_ABI_ARGS)
+set(VJO_GAME_ABI_DEPENDENCIES)
+if(VJO_MEIKI_GAME_WORKER)
+  set(VJO_GAME_ABI_ARGS --game ${CMAKE_CURRENT_BINARY_DIR}/VitaJPOverlay_OCR.suprx)
+  set(VJO_GAME_ABI_DEPENDENCIES VitaJPOverlay_OCR.suprx-self)
+endif()
 add_custom_target(vjo_syscall_abi ALL
   COMMAND ${Python3_EXECUTABLE} ${ROOT}/tools/check_vita_syscall_abi.py
     --kernel ${CMAKE_CURRENT_BINARY_DIR}/VitaJPOverlay_Kernel.skprx
     --shell ${CMAKE_CURRENT_BINARY_DIR}/VitaJPOverlay_Shell.suprx
     --require-hooks
-  DEPENDS VitaJPOverlay_Kernel.skprx-self VitaJPOverlay_Shell.suprx-self
+    ${VJO_GAME_ABI_ARGS}
+  DEPENDS VitaJPOverlay_Kernel.skprx-self VitaJPOverlay_Shell.suprx-self ${VJO_GAME_ABI_DEPENDENCIES}
   COMMENT "Checking packaged syscall ABI and firmware-independent kernel imports")
 
 # ---------------- native game text hooks ----------------
@@ -231,6 +270,11 @@ add_custom_target(vjo_rco ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/vitajpoverlay.
 # the user's API key.
 set(STAGE ${CMAKE_CURRENT_BINARY_DIR}/release)
 set(MEIKI_RELEASE_COMMAND)
+set(GAME_OCR_RELEASE_COMMAND)
+if(VJO_MEIKI_GAME_WORKER)
+  set(GAME_OCR_RELEASE_COMMAND COMMAND ${CMAKE_COMMAND} -E copy
+    ${CMAKE_CURRENT_BINARY_DIR}/VitaJPOverlay_OCR.suprx ${STAGE}/ur0/tai/)
+endif()
 if(VJO_WITH_MEIKI)
   set(MEIKI_RELEASE_COMMAND COMMAND ${CMAKE_COMMAND} -E copy
     ${CMAKE_CURRENT_BINARY_DIR}/meiki-module/meiki-engine.suprx ${STAGE}/ur0/data/VitaJPOverlay/
@@ -250,6 +294,7 @@ add_custom_target(release
   COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_BINARY_DIR}/VitaJPOverlay_Text.suprx ${STAGE}/ur0/tai/
   COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_BINARY_DIR}/vitajpoverlay.rco ${STAGE}/ur0/data/VitaJPOverlay/
   ${MEIKI_RELEASE_COMMAND}
+  ${GAME_OCR_RELEASE_COMMAND}
   COMMAND ${CMAKE_COMMAND} -E copy ${ROOT}/README.md ${ROOT}/LICENSE ${STAGE}/
   COMMAND ${CMAKE_COMMAND} -E copy ${ROOT}/docs/config.example.ini ${STAGE}/config.ini
   COMMAND ${CMAKE_COMMAND} -E make_directory ${STAGE}/tools ${STAGE}/docs/benchmarks ${STAGE}/third_party
@@ -265,4 +310,7 @@ add_custom_target(release
   COMMENT "Packaging VitaJPOverlay-${VJO_VERSION}.zip")
 if(VJO_WITH_MEIKI)
   add_dependencies(release meiki-engine.suprx-self)
+endif()
+if(VJO_MEIKI_GAME_WORKER)
+  add_dependencies(release VitaJPOverlay_OCR.suprx-self)
 endif()

@@ -6,6 +6,7 @@ int capture_request(uint32_t flags)
     int ret;
     uint32_t fw, fh, x, y, w, h;
     VJO_LOCK();
+    if (game_ocr_capture_busy_locked()) { ret = VJO_ERR_BUSY; goto out; }
     if (flags == VJO_CAPTURE_DISCARD) {
         /* A copying display hook still owns its buffer. JPEG discard is used
          * only after completion; never free a pending or multi-pass image. */
@@ -42,6 +43,8 @@ int capture_request(uint32_t flags)
         g.crop_w = w;
         g.crop_h = h;
         g.capture_release = 0;
+        g.capture_game_pid = g.game_pid;
+        g.capture_epoch = __atomic_load_n(&g.text_epoch, __ATOMIC_ACQUIRE);
         g.capture_seq = (g.capture_seq + 1) & 0x7FFFFFFF;
         if (!g.capture_seq) g.capture_seq = 1;
         ret = (int)g.capture_seq;

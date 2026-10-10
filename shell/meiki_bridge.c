@@ -1,12 +1,53 @@
 #include "meiki_bridge.h"
-#include "shell.h"
 #include <bearssl.h>
 #include <psp2/kernel/clib.h>
 #include <psp2/kernel/modulemgr.h>
 
+extern void vjo_log(const char *fmt, ...);
+#ifndef VJO_GAME_OCR_WORKER
 extern void *vjo_paf_alloc(size_t bytes);
 extern void vjo_paf_free(void *pointer);
 extern void vjo_paf_memory_report(void);
+#endif
+
+int vjo_meiki_bridge_set_allocator(VjoMeikiBridge *b,
+                                   const VjoMeikiAllocator *allocator)
+{
+    if (!b || b->module >= 0 || b->metadata || b->workspace || b->preprocessing ||
+        (allocator && (!allocator->alloc || !allocator->free)))
+        return VJO_E_OCR_UNAVAILABLE;
+    if (allocator) b->allocator = *allocator;
+    else sceClibMemset(&b->allocator, 0, sizeof(b->allocator));
+    return VJO_OK;
+}
+
+static void *allocate_buffer(VjoMeikiBridge *b, size_t bytes)
+{
+    if (b->allocator.alloc) return b->allocator.alloc(b->allocator.ud, bytes);
+#ifndef VJO_GAME_OCR_WORKER
+    return vjo_paf_alloc(bytes);
+#else
+    (void)bytes;
+    return NULL;
+#endif
+}
+
+static int release_buffer(VjoMeikiBridge *b, void **pointer)
+{
+    if (!*pointer) return VJO_OK;
+    if (b->allocator.free) {
+        if (b->allocator.free(b->allocator.ud, *pointer))
+            return VJO_E_OCR_UNAVAILABLE;
+    } else {
+#ifndef VJO_GAME_OCR_WORKER
+        vjo_paf_free(*pointer);
+#else
+        return VJO_E_OCR_UNAVAILABLE;
+#endif
+    }
+    *pointer = NULL;
+    return VJO_OK;
+}
 
 /* This is the evaluated, pinned conversion. Validate before MNN parses it. */
 #define MODEL_BYTES 5392856u
@@ -45,15 +86,18 @@ done:
     return rc;
 }
 
-static void free_buffers(VjoMeikiBridge *b)
+static int free_buffers(VjoMeikiBridge *b)
 {
-    vjo_paf_free(b->preprocessing);
-    vjo_paf_free(b->workspace);
-    vjo_paf_free(b->metadata);
-    b->preprocessing = b->workspace = b->metadata = NULL;
-    b->input = NULL;
-    b->scratch = NULL;
-    b->input_elements = 0;
+    int rc = release_buffer(b, &b->preprocessing);
+    if (!b->preprocessing) {
+        b->input = NULL;
+        b->scratch = NULL;
+        b->input_elements = 0;
+    }
+    if (release_buffer(b, &b->workspace)) rc = VJO_E_OCR_UNAVAILABLE;
+    if (release_buffer(b, &b->metadata)) rc = VJO_E_OCR_UNAVAILABLE;
+    if (rc) vjo_log("Meiki buffer release failed; retaining allocation provenance");
+    return rc;
 }
 
 int vjo_meiki_bridge_finish(VjoMeikiBridge *b)
@@ -77,8 +121,7 @@ int vjo_meiki_bridge_finish(VjoMeikiBridge *b)
         b->module = -1;
         sceClibMemset(&b->api, 0, sizeof(b->api));
     }
-    free_buffers(b);
-    return VJO_OK;
+    return free_buffers(b);
 }
 
 int vjo_meiki_bridge_start(VjoMeikiBridge *b, const VjoPlatform *p,
@@ -91,7 +134,11 @@ int vjo_meiki_bridge_start_mode(VjoMeikiBridge *b, const VjoPlatform *p,
                                 const char *model_dir, int dialogue_box,
                                 int (*cancelled)(void *), void *ud)
 {
-    if (!b || b->metadata || b->module >= 0) return VJO_E_OCR_UNAVAILABLE;
+    if (!b || b->metadata || b->workspace || b->preprocessing || b->module >= 0)
+        return VJO_E_OCR_UNAVAILABLE;
+#ifdef VJO_GAME_OCR_WORKER
+    if (!b->allocator.alloc || !b->allocator.free) return VJO_E_OCR_UNAVAILABLE;
+#endif
     int n = sceClibSnprintf(b->model_path, sizeof(b->model_path), "%s/%s",
                            model_dir ? model_dir : "", VJO_MEIKI_MODEL_FILENAME);
     if (!model_dir || !model_dir[0] || n < 0 || (size_t)n >= sizeof(b->model_path))
@@ -108,14 +155,16 @@ int vjo_meiki_bridge_start_mode(VjoMeikiBridge *b, const VjoPlatform *p,
         if (rc) return rc;
     }
     if (cancelled && cancelled(ud)) return VJO_E_CANCELLED;
-    vjo_paf_memory_report();
-    b->metadata = vjo_paf_alloc(MEIKI_MODULE_METADATA_BYTES);
-    if (b->metadata) b->workspace = vjo_paf_alloc(MEIKI_WORKSPACE_BYTES);
+    if (b->allocator.report) b->allocator.report(b->allocator.ud);
+#ifndef VJO_GAME_OCR_WORKER
+    else if (!b->allocator.alloc) vjo_paf_memory_report();
+#endif
+    b->metadata = allocate_buffer(b, MEIKI_MODULE_METADATA_BYTES);
+    if (b->metadata) b->workspace = allocate_buffer(b, MEIKI_WORKSPACE_BYTES);
     b->input_elements = dialogue_box ? MEIKI_DETECT_ELEMENTS : MEIKI_PREPROCESS_ELEMENTS;
-    if (b->workspace) b->preprocessing = vjo_paf_alloc(b->input_elements * sizeof(float) + MEIKI_PREPROCESS_SCRATCH_BYTES);
+    if (b->workspace) b->preprocessing = allocate_buffer(b, b->input_elements * sizeof(float) + MEIKI_PREPROCESS_SCRATCH_BYTES);
     if (!b->metadata || !b->workspace || !b->preprocessing) {
-        free_buffers(b);
-        return VJO_E_OOM;
+        return free_buffers(b) ? VJO_E_OCR_UNAVAILABLE : VJO_E_OOM;
     }
     b->input = b->preprocessing;
     b->scratch = (unsigned char *)b->preprocessing + b->input_elements * sizeof(float);

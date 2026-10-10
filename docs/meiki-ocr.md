@@ -45,7 +45,7 @@ cmake --build build/vita-meiki --target release
 The optional release contains `ur0:data/VitaJPOverlay/meiki-engine.suprx`.
 The models are separate: convert them with the pinned instructions and copy the
 5,392,856-byte `meiki-stream-int8.mnn` to
-`ux0:data/VitaJPOverlay/meiki/`. Shell checks its size and SHA-256 before MNN
+`ux0:data/VitaJPOverlay/meiki/`. The selected worker checks its size and SHA-256 before MNN
 parses it. Dialogue-box mode also requires the 4,119,220-byte
 `meiki-detect-int8.mnn` in that directory, checked against its own SHA-256.
 Other model files are rejected before the inference buffers are allocated.
@@ -68,7 +68,7 @@ Anki retain their own network requirements.
 
 ## Memory and validation boundary
 
-Shell borrows a 16 MiB neural workspace, a 4 MiB private newlib/C++ heap,
+The original Shell execution path borrows a 16 MiB neural workspace, a 4 MiB private newlib/C++ heap,
 and 382,080 bytes for single-line preprocessing (750,720 bytes for dialogue-box
 mode) from its existing Paf heap, retaining a
 2 MiB Paf reserve. A dedicated module thread performs all SDK C++ operations
@@ -82,7 +82,7 @@ succeed, retaining the remaining resources so stopping can be retried.
 
 Those reservations are not total RAM usage. Module code, thread stacks,
 the kernel capture buffer (approximately 2 MiB), result arenas and heap
-fragmentation are additional. The API 8 raw capture uses multiple passes and
+fragmentation are additional. The raw capture uses multiple passes and
 retains its selected-region buffer until the next capture or game exit; JPEG
 capture retains its separate single-pass release policy. Allocation failure
 returns an OCR error.
@@ -119,8 +119,8 @@ module separately reproduces 16 baseline raw outputs and completes detector
 and recognizer jobs within the same bounds. An oversized detector's allocation
 failure also stops/unloads cleanly before its caller-owned heaps are released.
 Host crop accuracy and ARM emulator results do not establish available Paf
-memory, latency or stability beside a game on a physical Vita. Test the
-standalone manual app first, then this optional overlay build manually.
+memory, latency or stability beside a game on a physical Vita. Test this optional overlay build manually; emulator free-memory counters do
+not establish the physical game budget.
 
 A physical in-game test on 2026-10-10 reported 2,498 KiB free from Paf and
 refused the 768 KiB result allocation before capture or Meiki started. The
@@ -129,6 +129,82 @@ single-line path currently requires 24,237,184 bytes (23.114 MiB) of free Paf
 space, plus module code, stacks and capture allocations outside that total.
 Reducing only the result buffers cannot close that gap. The USER counter
 reported a negative value; that value is not a usable free-memory budget.
+
+The subsequent physical diagnostic established that Paf's whole mapped heap
+is 5,242,880 bytes (5 MiB), with roughly 2.4 MiB free. The recognizer model file
+alone exceeds that entire heap by 149,976 bytes. Virtual/direct free readings
+and `QueryInfo` agreed; a guarded 128 KiB allocation was mapped inside the
+heap and released. A 4 KiB owned USER allocation succeeded despite the negative
+USER counter. The PHYCONT probe returned `0x80024A00` (address-space error),
+and CDRAM returned `0x80024309` (no free CDRAM physical page). Neither alternate
+pool passed its small probe, so no full workspace was allocated there.
+
+## Optional game-process OCR worker
+
+Build with `-DVJO_MEIKI_GAME_WORKER=ON` in addition to `VJO_WITH_MEIKI=ON` to
+move preprocessing and the isolated engine into `VitaJPOverlay_OCR.suprx`.
+Keep `VJO_MEMORY_DIAGNOSTICS=OFF` for this build. Install the matching API 9
+Kernel and Shell plugins, the frozen engine, and the OCR worker. Enable the
+OCR worker only under each game title you intend to test, for example:
+
+```ini
+*PCSG00415
+ur0:tai/VitaJPOverlay_OCR.suprx
+```
+
+Leave Text plugin registrations disabled. This worker installs no import hooks,
+reads no game text or executable addresses, and receives only the selected raw
+capture through bounded kernel copies. Do not register it under `*ALL`, `*main`
+or a system application. Kernel, Shell and worker must have matching API versions;
+unresolved weak imports refuse startup before executing them.
+
+The game worker creates one 64 KiB SDK thread and allocates its three owned,
+page-aligned USER blocks only on request. Single-line preprocessing requires
+385,024 bytes after page rounding; dialogue-box mode requires 753,664 bytes.
+Alongside the 16 MiB neural and 4 MiB metadata blocks, preflight requires an
+additional 2 MiB allowance for the engine module and 4 MiB reserve for the game.
+It requires a successful, positive USER free-memory report and refuses negative,
+implausible or insufficient budgets. Every block is checked for its exact mapping,
+normal cached USER type, read/write access and 64-byte alignment. It neither
+borrows game allocations nor changes memory quotas.
+
+Shell retains the UI and local dictionary lookup, using two 160 KiB result arenas
+instead of two 384 KiB arenas for this optional build. Model/session shutdown,
+engine unload and successful owned-block release precede result publication.
+Failed cleanup keeps allocation identity and refuses further work or unload.
+Allocation failure publishes no partial OCR text and uses no Lens or Text fallback.
+
+The kernel ties each request to its game PID, foreground epoch and exact capture
+sequence. It pins the raw buffer while queued or claimed, including after a Shell
+timeout, game suspension or Shell restart. A successful drained completion or
+actual game process exit releases the claim. Closing the overlay or a 60-second
+Shell timeout signals cancellation; it cannot free a buffer still read by the
+worker. Request sequences are not reused during the kernel module's lifetime.
+The copied UTF-8 result is capped at 4,096 bytes including its terminator.
+
+This architecture still requires physical validation beside the selected game.
+Host and ARM emulator tests exercise ownership, transport, preprocessing and the
+frozen engine; they cannot prove physical allocation success or game stability.
+The installed 81,117,034-byte JMdict passes 12 invented-text cases three times
+through the production filter and dictionary pipeline in a 160 KiB host arena,
+with the 4,120-byte OCR result retained. Peak host arena use is 126,312 bytes,
+leaving 37,528 bytes, including a maximum-size successful OCR payload, the
+64-token boundary and recovery after a bounded overflow. This is a host ABI
+measurement, not a physical Paf allocation result.
+
+The actual ARM worker completes two start/stop cycles and twelve requests in
+isolated Vita3K: eight matching UTF-8 results, three budget refusals with zero
+allocations, and one cancellation. Twenty prepared inference tensors match
+their pinned references; ten cold-load raw detector/recognizer outputs repeat.
+Nine engine loads/unloads, 27 released owned blocks, completion retry and both
+worker thread deletions are verified. This harness uses a fake API 9 transport
+and private compatibility adapters for Vita3K's missing byte-search, formatting
+and mapping-query behavior. It does not exercise the physical kernel transport,
+prove physical USER budgets, or bypass any production allocation guard.
+
+`ux0:data/VitaJPOverlay/ocr-worker.log` records raw budgets, allocation identities,
+peaks and cleanup status without dialogue text. Return to VitaShell FTP after a
+manual trigger to retrieve that log and the Shell log.
 
 For physical diagnosis, optionally build with `-DVJO_MEMORY_DIAGNOSTICS=ON`.
 The first explicit pure-Meiki request compares virtual and direct Paf free
@@ -160,3 +236,9 @@ cmake -S . -B build/host-meiki -DVJO_WITH_NCNN=OFF -DVJO_WITH_MEIKI=ON \
 cmake --build build/host-meiki
 ctest --test-dir build/host-meiki --output-on-failure
 ```
+
+Set `-DVJO_MEIKI_GAME_WORKER=ON` in the host build to also test Shell dispatch
+and its reduced arenas. Set `VJO_MEIKI_TEST_MODEL`,
+`VJO_MEIKI_TEST_DETECT_MODEL` and `VJO_JMDICT_FILE` to the corresponding private
+fixtures for full model-validation and dictionary checks. The optional dictionary
+integration test explicitly skips when its fixture is absent.

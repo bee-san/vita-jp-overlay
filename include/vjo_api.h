@@ -5,7 +5,7 @@
 
 #include <stdint.h>
 
-#define VJO_API_VERSION 8
+#define VJO_API_VERSION 9
 
 /* Normalized rectangle, 0..65535 on both axes. w == 0 means full screen. */
 typedef struct {
@@ -69,6 +69,7 @@ typedef struct {
 #define VJO_ERR_ARG          (-6) /* bad argument */
 #define VJO_ERR_COPY         (-7)
 #define VJO_ERR_PERM         (-8) /* caller is not (or may not be) the registered shell */
+#define VJO_ERR_CANCELLED    (-9) /* OCR job invalidated; a claimed reader must still drain */
 
 /* vjoSetGameActive's mode for the foreground process. */
 enum VjoGameMode {
@@ -94,5 +95,7 @@ int vjoPollInput(VjoInput *out);         /* raw pad, unfiltered */
 int vjoRequestCapture(uint32_t flags);   /* VJO_CAPTURE_*; returns seq > 0; raw rows, the shell encodes the JPEG */
 int vjoReadRaw(uint32_t row, uint32_t n, void *dst);      /* returns rows copied */
 #endif
+
+#include "vjo_game_ocr.h"
 
 #endif

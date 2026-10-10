@@ -55,6 +55,9 @@ static void capture_pixels(uint32_t row, uint32_t n, uint8_t *dst)
 static unsigned control_polls_before_stop;
 static unsigned power_ticks;
 static void control_poll_hook(void);
+#ifdef VJO_MEIKI_GAME_WORKER
+int sceKernelDelayThread(unsigned int us) { test_now += us; return 0; }
+#endif
 
 uint64_t sceKernelGetProcessTimeWide(void) { return test_now; }
 int sceKernelPowerTick(int type) { TEST_CHECK(type == SCE_KERNEL_POWER_TICK_DEFAULT); power_ticks++; return 0; }
@@ -221,7 +224,7 @@ int sceKernelDeleteMutex(SceUID uid)
     return 0;
 }
 
-#ifdef VJO_WITH_MEIKI
+#if defined(VJO_WITH_MEIKI) && !defined(VJO_MEIKI_GAME_WORKER)
 static unsigned bridge_finishes, bridge_starts;
 static unsigned bridge_recognitions, bridge_detections;
 static int bridge_start_error, bridge_inference_error, bridge_finish_error;
@@ -291,6 +294,28 @@ int vjo_meiki_bridge_finish(VjoMeikiBridge *bridge)
 }
 #endif
 
+#ifdef VJO_MEIKI_GAME_WORKER
+static int game_submit_reply, game_engine_reply;
+static unsigned game_submits, game_reads, game_cancels;
+static VjoGameOcrRequest game_request;
+int vjoOcrSubmit(const VjoGameOcrRequest *request)
+{
+    TEST_CHECK(request->size == sizeof(*request));
+    TEST_CHECK(request->done_seq == kernel_state.done_seq);
+    TEST_CHECK(request->width == kernel_state.width && request->height == kernel_state.height);
+    TEST_CHECK(request->stride == kernel_state.raw_stride);
+    game_submits++; game_request = *request; return game_submit_reply;
+}
+int vjoOcrRead(uint32_t seq, VjoGameOcrResult *result)
+{
+    TEST_CHECK(seq == (uint32_t)game_submit_reply);
+    game_reads++; memset(result, 0, sizeof(*result));
+    result->size = sizeof(*result); result->seq = seq; result->rc = game_engine_reply;
+    strcpy(result->text, "猫"); return 0;
+}
+int vjoOcrCancel(uint32_t seq) { (void)seq; game_cancels++; return 0; }
+#endif
+
 void vjo_config_load(VjoConfig *out, VjoArena *a) { *out = loaded_config; }
 void vjo_log_configure(const VjoConfig *c) {}
 void vjo_log(const char *fmt, ...) {}
@@ -305,7 +330,8 @@ void vjo_platform_vita(VjoPlatform *p) {}
 static uint8_t result_mem[2][RESULT_ARENA_SIZE] __attribute__((aligned(64)));
 static unsigned allocation_calls, allocation_frees;
 static int allocation_failure;
-static uint8_t heap_mem[RESULT_ARENA_SIZE];
+static uint8_t heap_mem[RESULT_ARENA_SIZE > 2 * NATIVE_ARENA_SIZE
+                        ? RESULT_ARENA_SIZE : 2 * NATIVE_ARENA_SIZE];
 static unsigned allocation_bytes, heap_bytes;
 static unsigned heap_calls, heap_frees;
 static int heap_available;
@@ -452,6 +478,10 @@ static void setup(const char *ini)
     last_reference[0] = 0;
     allocation_bytes = heap_bytes = 0;
     mem_kind = MEM_RESULTS;
+#ifdef VJO_MEIKI_GAME_WORKER
+    game_submit_reply = 19; game_engine_reply = VJO_OK;
+    game_submits = game_reads = game_cancels = 0;
+#endif
     capture_calls = 0;
     discard_requests = 0;
     capture_reply = VJO_ERR_NO_GAME;
@@ -485,7 +515,7 @@ static void setup(const char *ini)
     startup_succeeds = 0;
     startup_threads = startup_mutexes = startup_events = startup_starts = 0;
 #endif
-#ifdef VJO_WITH_MEIKI
+#if defined(VJO_WITH_MEIKI) && !defined(VJO_MEIKI_GAME_WORKER)
     memset(&meiki_bridge, 0, sizeof(meiki_bridge));
     meiki_bridge.module = -1;
     bridge_finishes = bridge_starts = 0;
@@ -1594,7 +1624,7 @@ static void test_worker_stop_success_and_idempotence(void)
     TEST_CHECK(!running && (posted_events & NET_EV_QUIT));
     TEST_CHECK(thread_joins == 2 && anki_stops == 1);
     check_shell_resources_released();
-#ifdef VJO_WITH_MEIKI
+#if defined(VJO_WITH_MEIKI) && !defined(VJO_MEIKI_GAME_WORKER)
     TEST_CHECK(bridge_finishes == 1);
     TEST_CHECK(!strcmp(lifecycle_events, "ncbaNCrempv"));
 #elif defined(VJO_PAF_ALLOC)
@@ -1618,7 +1648,7 @@ static void test_worker_stop_join_failure_then_retry(void)
         TEST_CHECK(threads_started && thread_joins == i + 1);
         TEST_CHECK(anki_stops == 0);
         check_shell_resources_retained();
-#ifdef VJO_WITH_MEIKI
+#if defined(VJO_WITH_MEIKI) && !defined(VJO_MEIKI_GAME_WORKER)
         TEST_CHECK(bridge_finishes == 0); /* engine cleanup waits for worker ownership */
 #endif
         join_failure_uid = -1;
@@ -1639,7 +1669,7 @@ static void test_worker_stop_anki_failure_then_retry(void)
     TEST_CHECK(!running && !threads_started && thread_joins == 2);
     TEST_CHECK(anki_stops == 1);
     check_shell_resources_retained();
-#ifdef VJO_WITH_MEIKI
+#if defined(VJO_WITH_MEIKI) && !defined(VJO_MEIKI_GAME_WORKER)
     TEST_CHECK(bridge_finishes == 1);
 #endif
     TEST_CHECK(vjo_worker_stop() < 0);
@@ -1654,7 +1684,7 @@ static void test_worker_stop_anki_failure_then_retry(void)
     check_shell_resources_released();
 }
 
-#ifdef VJO_WITH_MEIKI
+#if defined(VJO_WITH_MEIKI) && !defined(VJO_MEIKI_GAME_WORKER)
 static void test_worker_stop_bridge_failure_then_retry(void)
 {
     setup_live_worker();
@@ -1693,7 +1723,7 @@ static void test_worker_stop_bridge_failure_then_retry(void)
 }
 #endif
 
-#ifdef VJO_WITH_MEIKI
+#if defined(VJO_WITH_MEIKI) && !defined(VJO_MEIKI_GAME_WORKER)
 static void meiki_capture_setup(void)
 {
     native_setup(RELAY_CONFIG "text_source = ocr\nocr_backend = meiki\n"
@@ -1722,7 +1752,7 @@ static void meiki_capture_setup(void)
 static void test_meiki_ocr_source_blocks_native_and_lens(void)
 {
     meiki_capture_setup();
-    TEST_CHECK(VJO_API_VERSION == 8 && cfg.text_source == VJO_SOURCE_OCR);
+    TEST_CHECK(VJO_API_VERSION == 9 && cfg.text_source == VJO_SOURCE_OCR);
     TEST_CHECK(!native_enabled() && !auto_mode() && !background_wanted());
     poll_hooks();
     pending_cmd = VJO_CMD_HOOK_DISCOVER;
@@ -1798,6 +1828,42 @@ static void test_meiki_capture_errors_cleanup_without_fallback(void)
 }
 #endif
 
+#ifdef VJO_MEIKI_GAME_WORKER
+static void test_game_meiki_dispatch_and_failure(void)
+{
+    const int expected[] = {VJO_OK, VJO_E_OOM, VJO_E_OCR_UNAVAILABLE};
+    for (unsigned i = 0; i < sizeof(expected)/sizeof(expected[0]); i++) {
+        native_setup(RELAY_CONFIG "text_source = ocr\nocr_backend = meiki\n"
+                     "meiki_layout = dialogue_box\nocr_mode = on_press\n");
+        activate_game(7, "PCSG00001", VJO_GAME);
+        region_selected = 1; capture_reply = 71; capture_waits = 2;
+        kernel_state.width = 96; kernel_state.height = 32;
+        kernel_state.raw_stride = kernel_state.width * 4;
+        kernel_state.capture_checksum = 0x12345678;
+        if (i == 1) game_engine_reply = VJO_E_OOM;
+        if (i == 2) game_submit_reply = -1;
+        open_overlay();
+        TEST_ASSERT(job_running && !job_native && !job_anchor);
+        TEST_CHECK(RESULT_ARENA_SIZE == 160 * 1024);
+        job_lookup = 0;
+        uint32_t checksum = 0;
+        TEST_CHECK(run_job(&results[job_idx], &cache_data[job_idx], &checksum) == expected[i]);
+        TEST_CHECK(game_submits == 1 && game_reads == (i == 2 ? 0u : 1u));
+        TEST_CHECK(game_request.layout == VJO_GAME_OCR_DIALOGUE_BOX && !game_cancels);
+        TEST_CHECK(capture_flags == 0 && capture_calls == 1 && !raw_calls);
+        TEST_CHECK(!text_reads && !text_controls && !anchor_calls && !discover_calls && !relay_connections);
+        if (!i) {
+            TEST_CHECK(!strcmp(cache_data[job_idx].sentence, "猫"));
+            TEST_CHECK(checksum == kernel_state.capture_checksum && job_text_ready);
+        } else {
+            TEST_CHECK(!job_text_ready && cache_data[job_idx].failed_stage == VJO_STAGE_OCR);
+        }
+        job_done = 1; on_job_done(); on_game_exit();
+        TEST_CHECK(!has_result_memory());
+    }
+}
+#endif
+
 static void test_meiki_manual_and_no_fallback(void)
 {
     setup("ocr_backend = meiki\nocr_mode = auto\n" RELAY_CONFIG);
@@ -1809,7 +1875,9 @@ static void test_meiki_manual_and_no_fallback(void)
     uint32_t checksum = 0;
 #ifdef VJO_WITH_MEIKI
     TEST_CHECK(run_job(&results[job_idx], &out, &checksum) == VJO_E_OCR_REGION);
+#ifndef VJO_MEIKI_GAME_WORKER
     TEST_CHECK(!bridge_starts && !bridge_finishes); /* selection is checked before capture/load */
+#endif
 #else
     TEST_CHECK(run_job(&results[job_idx], &out, &checksum) == VJO_E_OCR_UNAVAILABLE);
 #endif
@@ -2020,7 +2088,7 @@ TEST_LIST = {
     {"worker_stop_success_and_idempotence", test_worker_stop_success_and_idempotence},
     {"worker_stop_join_failure_then_retry", test_worker_stop_join_failure_then_retry},
     {"worker_stop_anki_failure_then_retry", test_worker_stop_anki_failure_then_retry},
-#ifdef VJO_WITH_MEIKI
+#if defined(VJO_WITH_MEIKI) && !defined(VJO_MEIKI_GAME_WORKER)
     {"worker_stop_bridge_failure_then_retry", test_worker_stop_bridge_failure_then_retry},
     {"meiki_ocr_source_blocks_native_and_lens", test_meiki_ocr_source_blocks_native_and_lens},
     {"meiki_capture_errors_cleanup_without_fallback", test_meiki_capture_errors_cleanup_without_fallback},
@@ -2030,6 +2098,9 @@ TEST_LIST = {
 #endif
     {"ncnn_manual_and_no_fallback", test_ncnn_manual_and_no_fallback},
     {"meiki_manual_and_no_fallback", test_meiki_manual_and_no_fallback},
+#ifdef VJO_MEIKI_GAME_WORKER
+    {"game_meiki_dispatch_and_failure", test_game_meiki_dispatch_and_failure},
+#endif
     {"meiki_layout_invalidates_cache", test_meiki_layout_invalidates_cache},
     {"ocr_context_changes", test_ocr_context_changes},
     {"region_change_redoes_subtitle_job", test_region_change_redoes_subtitle_job},

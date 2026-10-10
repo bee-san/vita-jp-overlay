@@ -23,7 +23,7 @@ set(ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
 set(VJO_ROOT ${ROOT})
 set(VJO_BUILD_VITA ON)
 option(VJO_WITH_NCNN "Build the CPU-only local mobile OCR recognizer" ON)
-set(VJO_VERSION "0.6-hooks.2")
+set(VJO_VERSION "0.6-hooks.3")
 
 # ---------------- kernel ----------------
 add_executable(VitaJPOverlay_Kernel
@@ -50,7 +50,6 @@ target_link_libraries(VitaJPOverlay_Kernel
   SceThreadmgrForDriver_stub
   SceSysclibForDriver_stub
   SceSysmemForDriver_stub
-  SceSysmemForKernel_stub
   SceCpuForDriver_stub
   SceDisplayForDriver_stub
   SceCtrlForDriver_stub
@@ -132,7 +131,7 @@ target_link_libraries(VitaJPOverlay_Shell
   SceIofilemgr_stub
   SceVshBridge_stub
   # Weak: SceShell loads these after *main plugins start; the imports are
-  # bound once the libraries load (as with ScePaf). Unbound calls return < 0.
+  # bound once the libraries load (as with ScePaf).
   SceNet_stub_weak
   SceNetCtl_stub_weak
   SceRtc_stub_weak
@@ -144,6 +143,13 @@ set(VITA_MAKE_FSELF_FLAGS "${VJO_SELF_FLAGS}")
 vita_create_self(VitaJPOverlay_Shell.suprx VitaJPOverlay_Shell
   UNSAFE
   CONFIG ${ROOT}/shell/exports.yml)
+add_custom_target(vjo_syscall_abi ALL
+  COMMAND ${Python3_EXECUTABLE} ${ROOT}/tools/check_vita_syscall_abi.py
+    --kernel ${CMAKE_CURRENT_BINARY_DIR}/VitaJPOverlay_Kernel.skprx
+    --shell ${CMAKE_CURRENT_BINARY_DIR}/VitaJPOverlay_Shell.suprx
+    --require-hooks
+  DEPENDS VitaJPOverlay_Kernel.skprx-self VitaJPOverlay_Shell.suprx-self
+  COMMENT "Checking packaged syscall ABI and firmware-independent kernel imports")
 
 # ---------------- native game text hooks ----------------
 add_executable(VitaJPOverlay_Text ${ROOT}/text/main.c ${ROOT}/text/observer.S
@@ -209,5 +215,5 @@ add_custom_target(release
   COMMAND ${CMAKE_COMMAND} -E copy ${ROOT}/third_party/README.md ${STAGE}/third_party/
   COMMAND ${CMAKE_COMMAND} -E copy_directory ${ROOT}/third_party/licenses ${STAGE}/third_party/licenses
   COMMAND ${CMAKE_COMMAND} -E chdir ${STAGE} ${CMAKE_COMMAND} -E tar cf ${CMAKE_CURRENT_BINARY_DIR}/VitaJPOverlay-${VJO_VERSION}.zip --format=zip ur0 config.ini README.md LICENSE tools docs third_party
-  DEPENDS VitaJPOverlay_Kernel.skprx-self VitaJPOverlay_Shell.suprx-self VitaJPOverlay_Text.suprx-self vjo_rco
+  DEPENDS VitaJPOverlay_Kernel.skprx-self VitaJPOverlay_Shell.suprx-self VitaJPOverlay_Text.suprx-self vjo_rco vjo_syscall_abi
   COMMENT "Packaging VitaJPOverlay-${VJO_VERSION}.zip")

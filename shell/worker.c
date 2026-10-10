@@ -10,6 +10,7 @@
 #include "../core/regions.h"
 #include "../core/local_ocr.h"
 #include "../core/text_source.h"
+#include "../include/vjo_import.h"
 #include "shell.h"
 
 /* Memory: two result arenas (the overlay shows one while the network thread
@@ -1118,16 +1119,45 @@ static int ctl_main(SceSize args, void *argp)
 
 int vjo_worker_start(void)
 {
-    int ver = vjoGetVersion(), rc;
+    int ver, rc;
+#if defined(__arm__)
+    /* Presence in the module list does not mean its imports resolved or its
+     * start entry succeeded. Check every bridge stub before the first call. */
+#define REQUIRE_KERNEL_IMPORT(fn) do { if (!VJO_IMPORT_READY(fn)) { \
+        vjo_log("kernel import unavailable: " #fn "; overlay not started"); \
+        return -1; \
+    } } while (0)
+    REQUIRE_KERNEL_IMPORT(vjoGetVersion);
+    REQUIRE_KERNEL_IMPORT(vjoRegisterShell);
+    REQUIRE_KERNEL_IMPORT(vjoWaitEvent);
+    REQUIRE_KERNEL_IMPORT(vjoGetState);
+    REQUIRE_KERNEL_IMPORT(vjoSetRegion);
+    REQUIRE_KERNEL_IMPORT(vjoSetTriggers);
+    REQUIRE_KERNEL_IMPORT(vjoSetGameActive);
+    REQUIRE_KERNEL_IMPORT(vjoSetInputBlock);
+    REQUIRE_KERNEL_IMPORT(vjoPollInput);
+    REQUIRE_KERNEL_IMPORT(vjoRequestCapture);
+    REQUIRE_KERNEL_IMPORT(vjoReadRaw);
+    REQUIRE_KERNEL_IMPORT(vjoTextControl);
+    REQUIRE_KERNEL_IMPORT(vjoTextReference);
+    REQUIRE_KERNEL_IMPORT(vjoTextRead);
+#undef REQUIRE_KERNEL_IMPORT
+#endif
+    vjo_log("worker startup: checking kernel API");
+    ver = vjoGetVersion();
+    vjo_log("worker startup: kernel API %d", ver);
     if (ver != VJO_API_VERSION) {
         vjo_log("kernel API version %d, expected %d: not starting", ver, VJO_API_VERSION);
         return -1;
     }
+    vjo_log("worker startup: registering shell");
     rc = vjoRegisterShell();
+    vjo_log("worker startup: shell registration %d", rc);
     if (rc < 0) {
         vjo_log("kernel refused the shell registration %d: not starting", rc);
         return -1;
     }
+    vjo_log("worker startup: creating synchronization objects");
     view_lock = sceKernelCreateMutex("VjoView", 0, 0, NULL);
     cmd_lock = sceKernelCreateMutex("VjoCmd", 0, 0, NULL);
     capture_lock = sceKernelCreateMutex("VjoCapture", 0, 0, NULL);
@@ -1136,22 +1166,27 @@ int vjo_worker_start(void)
         vjo_worker_stop();
         return -1;
     }
+    vjo_log("worker startup: starting Anki worker");
     anki_started = vjo_anki_start() == 0;
     if (!anki_started)
         vjo_log("anki: thread failed to start: Anki is off");
+    vjo_log("worker startup: initializing arenas");
     vjo_platform_vita(&plat);
     vjo_arena_init(&scratch, scratch_mem, sizeof(scratch_mem));
     vjo_arena_init(&results[0], NULL, 0);
     vjo_arena_init(&results[1], NULL, 0);
+    vjo_log("worker startup: applying config");
     apply_config(); /* logging, the trigger and Anki are set up before the first game */
     vjo_log("Vita JP Overlay shell started (kernel API %d)", ver);
 
+    vjo_log("worker startup: creating control and network threads");
     net_thread = sceKernelCreateThread("VjoNet", net_main, 0x10000100, JOB_STACK_BYTES, 0, 0, NULL);
     ctl_thread = sceKernelCreateThread("VjoControl", ctl_main, 0x10000100, 0x4000, 0, 0, NULL);
     if (net_thread < 0 || ctl_thread < 0) {
         vjo_worker_stop();
         return -1;
     }
+    vjo_log("worker startup: starting control and network threads");
     sceKernelStartThread(net_thread, 0, NULL);
     sceKernelStartThread(ctl_thread, 0, NULL);
     threads_started = 1;

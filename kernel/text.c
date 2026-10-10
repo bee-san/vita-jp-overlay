@@ -23,6 +23,7 @@ static volatile int mode;
 static int scanning;
 static uint32_t last_poll_us;
 static uint8_t scan_bytes[SCAN_CHUNK + VJO_TEXT_BYTES + 2];
+_Static_assert(sizeof(scan_bytes) >= 2 * VJO_TEXT_BYTES, "text submit scratch must fit");
 
 static int shell_caller(void)
 {
@@ -129,7 +130,8 @@ static void scan_step(void)
         SceUID uid;
         void *base = NULL;
         SceSize size = 0;
-        unsigned type = 0;
+        SceKernelMemBlockInfoEx info;
+        unsigned type;
         uint32_t left, starts, bytes, prefix;
         if (scan_address >= SCAN_END) { scanning = 0; return; }
         uid = ksceKernelFindProcMemBlockByAddr(process, (void *)(uintptr_t)scan_address, 0);
@@ -142,7 +144,15 @@ static void scan_step(void)
         left = size - (scan_address - (uint32_t)(uintptr_t)base);
         prefix = scan_address - (uint32_t)(uintptr_t)base;
         if (prefix > 2) prefix = 2;
-        ksceKernelGetMemBlockType(uid, &type);
+        /* The ForDriver export is stable across 3.60/3.65. GetMemBlockType
+         * belongs to ForKernel, whose library and function NIDs changed in
+         * 3.63; a strong import prevents this entire plugin from starting. */
+        memset(&info, 0, sizeof(info));
+        info.size = sizeof(info);
+        if (ksceKernelMemBlockGetInfoEx(uid, &info) < 0) {
+            scan_address += left; continue;
+        }
+        type = info.core_info.type;
         /* CDRAM, device mappings and uncached textures are not text heaps. */
         if (type != SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_RW &&
             type != SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_R &&
@@ -248,8 +258,11 @@ int vjoTextSubmit(const VjoTextEvent *user_event)
 {
     uint32_t state;
     VjoTextEvent event;
-    char text[VJO_TEXT_BYTES];
-    uint8_t raw[VJO_TEXT_BYTES];
+    /* Scanning and submission share lock. Reuse its scratch in two disjoint
+     * regions: stack buffers here would overflow the 4 KiB syscall stack
+     * when vjo_text_offer calls the reference scorer. */
+    uint8_t *raw = scan_bytes;
+    char *text = (char *)scan_bytes + VJO_TEXT_BYTES;
     int rc = VJO_ERR_PERM;
     SceUID pid = ksceKernelGetProcessId();
     if (pid <= 0 || pid != g.game_pid || !g.game_active || g.game_active == VJO_GAME_STATIC_FB)
@@ -257,7 +270,7 @@ int vjoTextSubmit(const VjoTextEvent *user_event)
     ENTER_SYSCALL(state);
     if (ksceKernelMemcpyUserToKernel(&event, user_event, sizeof(event)) < 0 ||
         event.size != sizeof(event) || (event.kind != VJO_TEXT_CALL && event.kind != VJO_TEXT_REGISTER) ||
-        event.encoding > VJO_TEXT_CP932 || event.bytes > sizeof(raw) ||
+        event.encoding > VJO_TEXT_CP932 || event.bytes > VJO_TEXT_BYTES ||
         (event.encoding == VJO_TEXT_AUTO && (event.kind != VJO_TEXT_CALL || !event.bytes)) ||
         event.indirections > 4 || event.padding < -0x100000 || event.padding > 0x100000) {
         rc = VJO_ERR_ARG; goto out;
@@ -275,7 +288,7 @@ int vjoTextSubmit(const VjoTextEvent *user_event)
         if (rc == 0) {
             if (!event.bytes) rc = read_string(event.address, 0, (int)event.encoding, text);
             else if (mapped_copy(pid, event.address, raw, event.bytes) < 0) rc = VJO_ERR_COPY;
-            else rc = vjo_text_decode((int)event.encoding, raw, event.bytes, text, sizeof(text));
+            else rc = vjo_text_decode((int)event.encoding, raw, event.bytes, text, VJO_TEXT_BYTES);
         }
     }
     if (rc > 0) {

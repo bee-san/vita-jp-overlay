@@ -9,6 +9,7 @@
 #include <taihen.h>
 #include "../include/vjo_api.h"
 #include "../include/vjo_text.h"
+#include "../include/vjo_import.h"
 #include "../core/hook_profile.h"
 
 static tai_hook_ref_t refs[4], native_refs[VJO_NATIVE_HOOKS];
@@ -138,7 +139,8 @@ int module_start(SceSize argc, const void *args)
     SceKernelModuleInfo module;
     (void)argc; (void)args;
     for (unsigned i = 0; i < VJO_NATIVE_HOOKS; i++) native_uids[i] = -1;
-    if (vjoGetVersion() != VJO_API_VERSION || find_game_module(&module) < 0)
+    if (!VJO_IMPORT_READY(vjoGetVersion) || !VJO_IMPORT_READY(vjoTextSubmit) ||
+        vjoGetVersion() != VJO_API_VERSION || find_game_module(&module) < 0)
         return SCE_KERNEL_START_SUCCESS;
     enabled = 1;
     /* NIDs from the pinned VitaSDK SceLibKernel database. Import hooks affect

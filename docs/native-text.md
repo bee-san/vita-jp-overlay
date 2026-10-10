@@ -186,4 +186,7 @@ update normally, and OCR evidence keeps priority. The real-game experiment used
 an emulator-only user-space transport with the production decoder; it does not
 validate kernel page mapping or the physical overlay. See the
 [retail-hook measurements](benchmarks/native-libc-hooks-20261010.json).
-Physical CLANNAD capture and hardware performance remain unverified.
+With every positive decode fed into the production collector, all three matching
+sources remained in the five visible choices on both tested pages (ranks 2/3/4,
+then 3/4/5). No game-specific profile was loaded. Physical CLANNAD capture and
+hardware performance remain unverified.

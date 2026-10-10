@@ -68,6 +68,11 @@ Google Lens matching uses one temporary **384 KiB** shell arena, allocated from
 USER_RW or the existing Paf heap, with no dictionary lookup during that job.
 The full bounded OCR text is copied to the kernel matcher and a 256-byte excerpt
 is retained in the view; the arena is released after the network job completes.
+The kernel captures only the selected region into a page-aligned raw buffer:
+a 755×146 dialogue region needs **432 KiB**, versus **2040 KiB** for 960×544.
+The JPEG capture buffer is released after its final row is read, before the Lens request.
+Local ncnn OCR retains its raw rows for its multiple image passes.
+Framebuffer geometry changes fail safely instead of overrunning the allocation.
 The kernel's separate raw capture buffer remains necessary. Live memory
 availability, Lens service availability and OCR quality still depend on the game,
 region and network; failures are shown and never converted into fake matches.

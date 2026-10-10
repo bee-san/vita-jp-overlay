@@ -57,6 +57,8 @@ typedef struct {
 
 /* vjoRequestCapture flags */
 #define VJO_CAPTURE_FULL 0x1u /* the whole frame instead of the region (Anki screenshot) */
+#define VJO_CAPTURE_ONCE 0x2u /* single-pass JPEG reader: free after copying the final row */
+#define VJO_CAPTURE_DISCARD 0x4u /* release an idle single-pass capture after an encoder error */
 
 /* Kernel capture error codes (VjoState.capture_result) */
 #define VJO_ERR_NO_GAME      (-1)

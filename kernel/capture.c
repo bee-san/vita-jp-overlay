@@ -107,15 +107,16 @@ int capture_copy(uintptr_t base, uint32_t pitch, uint32_t fmt, uint32_t w, uint3
     if (fmt != FMT_A8B8G8R8 && fmt != FMT_A2B10G10R10 && fmt != FMT_BGRA5551)
         return VJO_ERR_FORMAT;
     bpp = fmt_bpp(fmt);
-    if (g.capture_full) {
-        x = y = 0;
-        cw = w > VJO_MAX_W ? VJO_MAX_W : w;
-        ch = h > VJO_MAX_H ? VJO_MAX_H : h;
-    } else {
-        capture_compute_crop(w, h, &x, &y, &cw, &ch);
-    }
-    g.crop_w = cw;
-    g.crop_h = ch;
+    w = w > VJO_MAX_W ? VJO_MAX_W : w;
+    h = h > VJO_MAX_H ? VJO_MAX_H : h;
+    x = g.capture_x;
+    y = g.capture_y;
+    cw = g.crop_w;
+    ch = g.crop_h;
+    if (w != g.capture_fb_w || h != g.capture_fb_h || !cw || !ch ||
+        pitch < w || x > w || cw > w - x || y > h || ch > h - y ||
+        cw * ch * 4 > g.raw_capacity)
+        return VJO_ERR_ARG;
     stride = g.raw_stride = cw * 4;
 
     for (uint32_t row = 0; row < ch; row++) {

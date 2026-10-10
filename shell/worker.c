@@ -9,6 +9,7 @@
 #include "../core/jpegsw.h"
 #include "../core/regions.h"
 #include "../core/local_ocr.h"
+#include "../core/text_source.h"
 #include "shell.h"
 
 /* Memory: two result arenas (the overlay shows one while the network thread
@@ -56,6 +57,13 @@ static VjoPlatform plat;
 static char title_id[12];   /* set while a game is active ("" otherwise) */
 static int region_selected, job_region_selected;
 static unsigned capture_generation, job_generation;
+static VjoTextSnapshot text_state;
+static int native_game, text_calibrated, text_started;
+static int job_native, job_anchor;
+static char job_hook_text[VJO_TEXT_BYTES], seen_hook_text[VJO_TEXT_BYTES];
+static uint32_t seen_hook_id;
+static int64_t hook_changed_us;
+static uint32_t pending_hook_session, pending_hook_id;
 
 /* Control-thread state. The overlay and the network job are independent: an
  * auto job runs while the overlay is closed, the overlay can open while a
@@ -114,6 +122,39 @@ void vjo_post_command(int cmd, const VjoRect *rect)
     if (rect)
         pending_rect = *rect;
     sceKernelUnlockMutex(cmd_lock, 1);
+}
+
+void vjo_post_hook(uint32_t session, uint32_t id)
+{
+    sceKernelLockMutex(cmd_lock, 1, NULL);
+    pending_hook_session = session;
+    pending_hook_id = id;
+    pending_cmd = VJO_CMD_HOOK_SELECT;
+    sceKernelUnlockMutex(cmd_lock, 1);
+}
+
+static int native_enabled(void)
+{
+    return native_game && cfg.text_source != VJO_SOURCE_OCR;
+}
+
+static void picker_publish(void)
+{
+    vjo_view_lock();
+    g_view.hook_picker = 1;
+    g_view.hook_session = text_state.session;
+    g_view.hook_count = text_state.count;
+    sceClibMemcpy(g_view.hooks, text_state.candidates, sizeof(g_view.hooks));
+    g_view.version++;
+    vjo_view_unlock();
+}
+
+static void picker_close(void)
+{
+    vjo_view_lock();
+    g_view.hook_picker = 0;
+    g_view.version++;
+    vjo_view_unlock();
 }
 
 static int64_t now_us(void)
@@ -351,6 +392,13 @@ static int run_job(VjoArena *a, VjoOverlayData *out, uint32_t *checksum)
 
     sceClibMemset(out, 0, sizeof(*out));
     out->list.header = "";
+    if (job_native) {
+        if (vjo_overlay_ocr_text(a, &job_cfg, job_hook_text, out)) return out->err.rc;
+        /* A text source is the pipeline input. No capture, coordinates, OCR
+         * allocation, model load or Lens connection is needed. */
+        *checksum = 0;
+        goto recognized;
+    }
     if (job_cfg.ocr_backend == VJO_OCR_NCNN) {
         int rc = run_local_ocr(a, out, checksum);
         if (rc) {
@@ -416,6 +464,18 @@ static void start_job(const char *why, int lookup)
 {
     if (job_running || mem_uid < 0)
         return;
+    if (native_enabled() && !text_state.current.id &&
+        (cfg.text_source == VJO_SOURCE_HOOKS || text_calibrated)) {
+        if (ov != OV_CLOSED) picker_publish();
+        return;
+    }
+    job_native = native_enabled() && text_state.current.id;
+    if (job_native) {
+        if (!text_state.current.text[0]) return;
+        copy_utf8(job_hook_text, sizeof(job_hook_text), text_state.current.text);
+    }
+    job_anchor = native_enabled() && !job_native && !text_calibrated;
+    if (job_anchor) text_calibrated = 1; /* one attempt, even when OCR fails */
     vjo_log("job start (%s)%s", why, lookup ? "" : ", OCR only");
     job_lookup = lookup;
     job_idx = active == 0 ? 1 : 0;
@@ -447,14 +507,14 @@ static int same_dictionary(const VjoConfig *a, const VjoConfig *b)
 
 static int same_pipeline(const VjoConfig *a, const VjoConfig *b)
 {
-    return same_dictionary(a, b) && a->ocr_backend == b->ocr_backend &&
+    return same_dictionary(a, b) && a->text_source == b->text_source && a->ocr_backend == b->ocr_backend &&
            a->non_japanese_filter == b->non_japanese_filter &&
            !sceClibStrcmp(a->ocr_model_dir, b->ocr_model_dir);
 }
 
 static int auto_mode(void)
 {
-    return cfg.ocr_backend == VJO_OCR_LENS && cfg.ocr_mode == VJO_OCR_AUTO;
+    return !native_enabled() && cfg.ocr_backend == VJO_OCR_LENS && cfg.ocr_mode == VJO_OCR_AUTO;
 }
 
 static void apply_config(void)
@@ -462,6 +522,11 @@ static void apply_config(void)
     VjoConfig previous = cfg;
     vjo_config_load(&cfg, &scratch);
     if (!same_pipeline(&previous, &cfg)) cache_ok = 0;
+    if (native_game && previous.text_source != cfg.text_source) {
+        text_started = text_calibrated = 0;
+        if (vjoTextRead(&text_state) == 0)
+            vjoTextControl(text_state.session, VJO_TEXT_OFF, 0);
+    }
     vjo_log_configure(&cfg);
     vjo_anki_configure(&cfg);
     if (vjoSetTriggers(cfg.toggle_button, cfg.subtitle_button) < 0)
@@ -495,6 +560,31 @@ static void open_overlay(void)
         return;
     }
     apply_config(); /* settings are re-read on every open */
+    if (cfg.text_source == VJO_SOURCE_HOOKS && !native_game) {
+        view_publish(1, NULL, "Native text hooks are available for Vita games", 1);
+        return;
+    }
+    if (native_enabled()) {
+        if (vjoTextRead(&text_state) < 0) {
+            view_publish(1, NULL, "Cannot read native text sources", 1);
+            return;
+        }
+        if (!text_started) {
+            vjoTextControl(text_state.session, text_state.selected ? VJO_TEXT_FOLLOW : VJO_TEXT_DISCOVER,
+                           text_state.selected);
+            text_started = 1;
+        }
+        if (!text_state.current.id) {
+            view_publish(1, NULL, cfg.text_source == VJO_SOURCE_HOOKS ? "Choose a text hook" : "Matching OCR to game text…", 0);
+            picker_publish();
+            start_job("one-time hook calibration", vjo_config_dict_ready(&cfg));
+        } else {
+            picker_close();
+            view_publish(1, NULL, text_state.current.text[0] ? "Reading game text…" : "Waiting for the selected hook…", 0);
+            start_job("native text", vjo_config_dict_ready(&cfg));
+        }
+        return;
+    }
     if (!vjo_config_dict_ready(&cfg)) {
         VjoErr e = {cfg.dictionary == VJO_DICT_HACHIDORI ? VJO_E_NO_HOST : VJO_E_NO_KEY,
                     0, 0, NULL, cfg.dictionary};
@@ -577,6 +667,12 @@ static void on_job_done(void)
     job_running = 0;
     job_done = 0;
     job_text_ready = 0;
+    if (job_native && sceClibStrcmp(job_hook_text, text_state.current.text)) {
+        cache_ok = 0;
+        if (game_active() && (ov != OV_CLOSED || subtitles))
+            start_job("hook text changed during lookup", ov != OV_CLOSED && vjo_config_dict_ready(&cfg));
+        return;
+    }
     if (job_cancelled(NULL)) {
         /* The result is for an earlier region or game. Redo it for whoever
          * still waits: the overlay, or the subtitles (on_command's own job
@@ -594,7 +690,7 @@ static void on_job_done(void)
     backoff_note(&ocr_backoff, ocr_failed);
     if (!ocr_failed && job_lookup)
         backoff_note(&dict_backoff, d->err.rc != VJO_OK);
-    if (!job_lookup && ov == OV_OPEN) {
+    if (!job_lookup && ov == OV_OPEN && !job_native) {
         /* OCR only, while the overlay shows a result or an error: that stays
          * (and its arena stays active); the strip takes the sentence */
         if (subtitles)
@@ -604,7 +700,7 @@ static void on_job_done(void)
     /* Publish the new arena; the old one becomes the next job's target. */
     vjo_view_lock();
     active = idx;
-    cache_ok = d->err.rc == VJO_OK && job_lookup && same_pipeline(&job_cfg, &cfg); /* the overlay needs the lookup */
+    cache_ok = d->err.rc == VJO_OK && (job_lookup || job_native) && same_pipeline(&job_cfg, &cfg);
     cache_checksum = job_checksum;
     vjo_view_unlock();
     if (subtitles)
@@ -621,6 +717,8 @@ static void on_job_done(void)
     }
     if (ov != OV_CLOSED)
         view_show_cache();
+    if (native_enabled() && !text_state.current.id && ov != OV_CLOSED)
+        picker_publish();
 }
 
 /* Does a job started now look the words up? Yes when the overlay can show
@@ -639,6 +737,8 @@ static void on_job_text(void)
     sentence = cache_data[job_idx].sentence;
     job_text_ready = 0;
     if (job_cancelled(NULL) || !same_pipeline(&job_cfg, &cfg)) return;
+    if (job_anchor && sentence)
+        vjoTextReference(text_state.session, sentence);
     vjo_log("subtitle text ready in %d ms", (int)((now_us() - job_started_us) / 1000));
     if (subtitles && sentence)
         strip_publish(sentence, VJO_STRIP_SENTENCE, 1);
@@ -659,6 +759,21 @@ static void set_subtitles(int on)
         return;
     }
     apply_config(); /* settings are re-read, as when the overlay opens */
+    if (native_enabled()) {
+        if (!text_started && vjoTextRead(&text_state) == 0) {
+            vjoTextControl(text_state.session, text_state.selected ? VJO_TEXT_FOLLOW : VJO_TEXT_DISCOVER,
+                           text_state.selected);
+            text_started = 1;
+        }
+        strip_publish(text_state.current.id ? "Waiting for game text…" : "Open the overlay to choose a text hook",
+                      VJO_STRIP_STATUS, 0);
+        if (text_state.current.id) start_job("hook subtitles on", 0);
+        return;
+    }
+    if (cfg.text_source == VJO_SOURCE_HOOKS) {
+        strip_publish("Native text hooks require a Vita game", VJO_STRIP_ERROR, 0);
+        return;
+    }
     st.size = sizeof(st);
     vjoGetState(&st);
     if (st.alloc_status == VJO_ALLOC_FAIL) {
@@ -692,13 +807,43 @@ static void on_command(void)
 {
     int cmd;
     VjoRect r;
+    uint32_t hook_session, hook_id;
     sceKernelLockMutex(cmd_lock, 1, NULL);
     cmd = pending_cmd;
     r = pending_rect;
+    hook_session = pending_hook_session;
+    hook_id = pending_hook_id;
     pending_cmd = VJO_CMD_NONE;
     sceKernelUnlockMutex(cmd_lock, 1);
 
     switch (cmd) {
+    case VJO_CMD_HOOK_DISCOVER:
+        if (!native_enabled()) break;
+        __atomic_add_fetch(&capture_generation, 1, __ATOMIC_RELEASE);
+        cache_ok = 0;
+        text_calibrated = 1;
+        vjoTextReference(text_state.session, "");
+        vjoTextControl(text_state.session, VJO_TEXT_DISCOVER, 0);
+        vjoTextRead(&text_state);
+        picker_publish();
+        break;
+    case VJO_CMD_HOOK_SELECT:
+        if (!native_enabled() || hook_session != text_state.session ||
+            vjoTextControl(hook_session, VJO_TEXT_FOLLOW, hook_id) < 0) break;
+        __atomic_add_fetch(&capture_generation, 1, __ATOMIC_RELEASE);
+        cache_ok = 0;
+        vjoTextRead(&text_state);
+        picker_close();
+        view_publish(1, NULL, "Reading the selected hook…", 0);
+        start_job("manual hook selection", vjo_config_dict_ready(&cfg));
+        break;
+    case VJO_CMD_HOOK_OCR:
+        if (!native_enabled() || cfg.text_source == VJO_SOURCE_HOOKS || job_running) break;
+        vjoTextControl(text_state.session, VJO_TEXT_DISCOVER, 0);
+        vjoTextRead(&text_state);
+        text_calibrated = 0;
+        start_job("explicit OCR hook match", vjo_config_dict_ready(&cfg));
+        break;
     case VJO_CMD_CLOSED:
         close_overlay();
         break;
@@ -772,6 +917,14 @@ static void activate_game(SceUID pid, const char *tid, int mode)
     backoff_note(&ocr_backoff, 0);
     backoff_note(&dict_backoff, 0);
     vjoSetGameActive(pid, mode);
+    native_game = mode == VJO_GAME;
+    text_started = text_calibrated = 0;
+    seen_hook_id = 0; seen_hook_text[0] = 0;
+    sceClibMemset(&text_state, 0, sizeof(text_state));
+    picker_close();
+    if (native_enabled() && vjoTextRead(&text_state) == 0) {
+        vjoTextControl(text_state.session, VJO_TEXT_LISTEN, 0);
+    }
     vjo_log("game %s started: dictionary %s (key %s), trigger %s, subtitles %s, ocr %s, ocr_mode %s", title_id,
             vjo_dict_name(cfg.dictionary), vjo_config_api_key(&cfg)[0] ? "set" : "MISSING",
             vjo_trigger_name(cfg.toggle_button), vjo_trigger_name(cfg.subtitle_button),
@@ -811,6 +964,9 @@ static void on_game_exit(void)
     if (!job_running)
         mem_free();
     title_id[0] = '\0';
+    native_game = text_started = text_calibrated = 0;
+    sceClibMemset(&text_state, 0, sizeof(text_state));
+    picker_close();
 }
 
 /* A new foreground process: classified by classify_pending. */
@@ -841,7 +997,63 @@ static void on_trigger(void)
  * overlay) and the subtitles' refresh (whatever ocr_mode says). */
 static int background_wanted(void)
 {
-    return cfg.ocr_backend == VJO_OCR_LENS && (subtitles || (auto_mode() && want_lookup()));
+    return !native_enabled() && cfg.text_source != VJO_SOURCE_HOOKS &&
+           cfg.ocr_backend == VJO_OCR_LENS && (subtitles || (auto_mode() && want_lookup()));
+}
+
+static void poll_hooks(void)
+{
+    uint32_t previous = text_state.sequence;
+    int picker;
+    if (!game_active() || !native_enabled() || vjoTextRead(&text_state) < 0) return;
+    if (seen_hook_id && !text_state.selected) {
+        /* The old screen no longer validates another source. Keep OCR on
+         * demand, and clear its scores before showing fresh candidates. */
+        text_calibrated = 1;
+        vjoTextReference(text_state.session, "");
+        vjoTextRead(&text_state);
+    }
+    if (!text_started && (ov != OV_CLOSED || subtitles)) {
+        vjoTextControl(text_state.session, text_state.selected ? VJO_TEXT_FOLLOW : VJO_TEXT_DISCOVER,
+                       text_state.selected);
+        text_started = 1;
+    }
+    if (!text_state.selected && text_calibrated) {
+        uint32_t id = vjo_text_auto_select(text_state.candidates, text_state.count);
+        if (id && vjoTextControl(text_state.session, VJO_TEXT_FOLLOW, id) == 0) {
+            vjo_log("hook selected: source %u at %u%% Unicode similarity", id, text_state.candidates[0].score);
+            __atomic_add_fetch(&capture_generation, 1, __ATOMIC_RELEASE);
+            cache_ok = 0;
+            vjoTextRead(&text_state);
+            picker_close();
+        }
+    }
+    vjo_view_lock(); picker = g_view.hook_picker; vjo_view_unlock();
+    if (picker && previous != text_state.sequence) picker_publish();
+    if (text_state.current.id != seen_hook_id || sceClibStrcmp(seen_hook_text, text_state.current.text)) {
+        seen_hook_id = text_state.current.id;
+        copy_utf8(seen_hook_text, sizeof(seen_hook_text), text_state.current.text);
+        hook_changed_us = now_us(); cache_ok = 0;
+        if (!seen_hook_id || !seen_hook_text[0]) {
+            if (subtitles) strip_publish("Waiting for a valid text source…", VJO_STRIP_STATUS, 0);
+            if (ov != OV_CLOSED) {
+                view_publish(1, NULL, "Choose a text hook", 0);
+                picker_publish();
+            }
+            if (!text_state.selected) vjoTextControl(text_state.session, VJO_TEXT_DISCOVER, 0);
+        } else {
+            /* A new native sentence is independent of the failed OCR anchor
+             * or the previous sentence's text-filter error. */
+            backoff_note(&ocr_backoff, 0);
+            picker_close();
+        }
+    }
+    if (!picker && seen_hook_id && seen_hook_text[0] && !job_running &&
+        now_us() - hook_changed_us >= 300000 && (ov != OV_CLOSED || subtitles) &&
+        (!cache_ok || active < 0) && now_us() >= ocr_backoff.until &&
+        (ov == OV_CLOSED || !vjo_config_dict_ready(&cfg) || now_us() >= dict_backoff.until)) {
+        start_job("hook text settled", ov != OV_CLOSED && vjo_config_dict_ready(&cfg));
+    }
 }
 
 static int background_throttled(void)
@@ -894,6 +1106,7 @@ static int ctl_main(SceSize args, void *argp)
             on_job_done();
         if (pending_cmd != VJO_CMD_NONE)
             on_command();
+        poll_hooks();
         if (bits & VJO_EV_REGION_STABLE)
             stable_pending = 1;
         auto_prefetch();

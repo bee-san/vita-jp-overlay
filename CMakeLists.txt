@@ -20,7 +20,8 @@ set(CORE_SRC
   core/arena.c core/pb.c core/utf.c core/lens.c core/json.c core/jpdb.c
   core/textfilter.c core/entries.c core/jiten.c core/config.c core/regions.c
   core/http.c core/tls.c core/tls_roots.c core/client.c core/styled.c core/jpegsw.c
-  core/base64.c core/anki.c core/anki_queue.c core/net.c core/hachidori.c core/local_dict.c core/ocr_lines.c)
+  core/base64.c core/anki.c core/anki_queue.c core/net.c core/hachidori.c core/local_dict.c core/ocr_lines.c
+  core/text_source.c core/text_match.c core/text_scan.c core/hook_profile.c)
 add_library(vjo_core STATIC ${CORE_SRC})
 target_include_directories(vjo_core PUBLIC core include)
 target_link_libraries(vjo_core PUBLIC bearssl)
@@ -47,6 +48,15 @@ add_executable(vjo-jpegsw host/jpegsw_tool.c)
 target_link_libraries(vjo-jpegsw vjo_host)
 
 enable_testing()
+add_executable(vjo-text-tests host/tests/test_text_source.c text/tests/cases.c)
+target_link_libraries(vjo-text-tests vjo_core)
+target_compile_options(vjo-text-tests PRIVATE -Wall -Wextra)
+add_test(NAME text_sources COMMAND vjo-text-tests)
+add_executable(vjo-kernel-text-tests host/tests/test_kernel_text.c)
+target_include_directories(vjo-kernel-text-tests PRIVATE third_party/acutest/include host/tests/vita_stubs)
+target_compile_options(vjo-kernel-text-tests PRIVATE -Wall -Wextra -Wno-unused-parameter)
+target_link_libraries(vjo-kernel-text-tests vjo_core)
+add_test(NAME kernel_text COMMAND vjo-kernel-text-tests)
 # kernel/foreground.c, kernel/triggers.c: kernel state machines (no psp2kern).
 add_executable(vjo-tests host/tests/test_core.c kernel/foreground.c kernel/triggers.c)
 target_include_directories(vjo-tests PRIVATE third_party/acutest/include kernel)
@@ -78,6 +88,7 @@ add_test(NAME anki_queue COMMAND vjo-anki-queue-tests)
 
 # End-to-end ZIP conversion and disk lookup, using the actual CLI/runtime.
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME cp932_table COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/generate_cp932.py --check)
 if(VJO_WITH_NCNN)
   add_executable(vjo-ocr-tests host/tests/test_ocr.c)
   target_include_directories(vjo-ocr-tests PRIVATE third_party/acutest/include)

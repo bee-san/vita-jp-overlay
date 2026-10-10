@@ -80,6 +80,7 @@ void vjo_config_defaults(VjoConfig *c)
     c->subtitle_button = VJO_TRIGGER_SELECT_R;
     c->ocr_mode = VJO_OCR_AUTO;
     c->ocr_backend = VJO_OCR_LENS;
+    c->text_source = VJO_SOURCE_AUTO;
     vjo_snprintf(c->ocr_model_dir, sizeof(c->ocr_model_dir), "ux0:data/VitaJPOverlay/ocr");
     vjo_snprintf(c->anki_deck, sizeof(c->anki_deck), "Default");
     vjo_snprintf(c->anki_note_type, sizeof(c->anki_note_type), "Lapis");
@@ -128,6 +129,9 @@ const char *vjo_config_default_text(void)
            "; one. When one is part of the other (select and select+r), the shorter one\n"
            "; acts on release.\n"
            "subtitle_button = select+r\n"
+           "\n"
+           "; Text: auto (OCR once to choose a native hook) | hooks (manual, no OCR) | ocr\n"
+           "text_source = auto\n"
            "\n"
            "; OCR: lens (online) | ncnn (experimental CPU-only PP-OCRv5 mobile)\n"
            "; ncnn requires the model download and a selected dialogue region; see docs/local-ocr.md.\n"
@@ -448,6 +452,11 @@ static void set_kv(VjoConfig *c, const char *key, const char *val)
         set_trigger(c, key, val, &c->toggle_button);
     } else if (vjo_ieq(key, "subtitle_button")) {
         set_trigger(c, key, val, &c->subtitle_button);
+    } else if (vjo_ieq(key, "text_source")) {
+        if (vjo_ieq(val, "auto")) c->text_source = VJO_SOURCE_AUTO;
+        else if (vjo_ieq(val, "hooks")) c->text_source = VJO_SOURCE_HOOKS;
+        else if (vjo_ieq(val, "ocr")) c->text_source = VJO_SOURCE_OCR;
+        else warn(c, "%s: invalid value '%s'", key, val);
     } else if (vjo_ieq(key, "ocr_backend")) {
         if (vjo_ieq(val, "lens"))
             c->ocr_backend = VJO_OCR_LENS;

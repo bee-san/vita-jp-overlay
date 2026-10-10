@@ -144,3 +144,16 @@ use general registers only. Startup stages are recorded in `status.txt` so a
 failure can be located before the shell worker starts. The original build had
 85 FPU/NEON instructions; the corrected build has zero. See the
 [boot investigation record](benchmarks/kernel-startup-20261010.json).
+
+The FPU correction alone did not fix boot on firmware 3.65. `0.6-hooks.3`
+also replaces a firmware-specific `SceSysmemForKernel` import with the stable
+`SceSysmemForDriver` memory-info API. The build checks the packaged imports and
+relocations and rejects the incompatible library. Both user plugins inspect
+their kernel import stubs before making the first call: a failed kernel start
+now leaves the overlay unavailable instead of executing the loader's unresolved
+call trap. Native text submission reuses its locked scratch buffer to fit the
+kernel's 4 KiB syscall stack without increasing resident memory.
+Normal boot and all three plugin starts were verified on the physical 3.65 Vita;
+CLANNAD then exposed a separate overlay-allocation failure. See the
+[firmware fix measurements](benchmarks/native-hooks-fw365-20261010.json) for the
+installed hashes, validation commands, and remaining game-capture limitation.

@@ -25,7 +25,7 @@ void vjo_log(const char *fmt, ...)
     vsnprintf(last_log, sizeof(last_log), fmt, ap);
     va_end(ap);
 }
-void vjo_platform_vita(VjoPlatform *p) {}
+void vjo_platform_vita(VjoPlatform *p, VjoNetCancel *cancel) {}
 uint64_t sceKernelGetProcessTimeWide(void) { return 1000; }
 int sceKernelSetEventFlag(SceUID uid, unsigned bits) { return 0; }
 int sceRtcGetCurrentTick(SceRtcTick *tick) { tick->tick = 64000000000000000ull; return 0; }

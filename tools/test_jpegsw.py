@@ -5,7 +5,7 @@ import math, os, subprocess, sys, tempfile
 from PIL import Image
 
 root = os.path.join(os.path.dirname(__file__), "..")
-tool = os.path.join(root, "build", "host", "vjo-jpegsw")
+tool = os.environ.get("VJO_JPEGSW", os.path.join(root, "build", "host", "vjo-jpegsw"))
 worst = 99.0
 for name in sorted(os.listdir(os.path.join(root, "host", "samples"))):
     if not name.endswith(".jpg"):

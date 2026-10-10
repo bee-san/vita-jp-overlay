@@ -11,6 +11,7 @@
 
 #include "../include/vjo_api.h"
 #include "foreground.h" /* IEV_* */
+#include "scene.h"
 #include "triggers.h"   /* TRIG_* */
 
 #define CAPTURE_IDLE    0
@@ -20,8 +21,7 @@
 
 #define VJO_MAX_W 960
 #define VJO_MAX_H 544
-#define VJO_CHECK_ROW_STEP 16 /* change detection samples every 16th row */
-#define VJO_CHECK_EVERY_FRAMES 8
+#define VJO_CHECK_EVERY_FRAMES 8 /* a region signature every 8th game frame */
 
 typedef struct {
     SceUID evf;    /* public events (VJO_EV_*) */
@@ -32,7 +32,6 @@ typedef struct {
     /* foreground game (VjoForeground in foreground.h) */
     volatile SceUID game_pid;
     volatile int game_active;  /* the shell confirmed game_pid is a game: its VJO_GAME* mode */
-    volatile uint32_t text_epoch; /* invalidates sources even on a fast same-PID suspend/resume */
     SceUID prev_game_pid;      /* confirmed game behind game_pid, still running */
 
     /* last game frame seen (index 0, primary head; submitted or sampled) */
@@ -53,23 +52,24 @@ typedef struct {
     uint32_t crop_w, crop_h;   /* captured pixels */
     uint32_t capture_x, capture_y, capture_fb_w, capture_fb_h; /* request geometry */
     uint32_t raw_stride;       /* bytes per row in raw */
-    uint32_t capture_checksum;
+    SceneSig capture_sig;      /* of the captured region (not for capture_full) */
+    uint32_t capture_scene;    /* scene of the captured pixels, 0 = unknown */
+    int64_t capture_copy_us;   /* when the copy started (display.c) */
+    uint32_t region_seq;       /* capture_sig is this capture's (0 = none) */
+    int64_t region_us;         /* its copy_us */
     int64_t capture_requested_us;
     volatile int raw_valid;
-    volatile int capture_release; /* release an idle buffer after switching to native text */
     uint32_t capture_seq;      /* bumped per request */
     uint32_t done_seq;         /* seq of the last finished capture */
     int capture_full;          /* the pending capture is the whole frame (VJO_CAPTURE_FULL) */
     int capture_once;          /* protect then release a single-pass JPEG capture */
 
-    /* change detection */
-    uint32_t checksum;
-    volatile uint32_t hook_checksum;     /* latest, computed in the display hook */
-    volatile uint32_t hook_checksum_seq; /* bumped per new hook_checksum */
-    uint32_t seen_checksum_seq;
-    volatile int stable;
-    int stable_fired;
-    int64_t last_change_us;
+    /* change detection: the display hook writes hook_sig[(seq + 1) & 1],
+     * then bumps hook_sig_seq; the worker reads hook_sig[seq & 1] */
+    SceneSig hook_sig[2];
+    volatile uint32_t hook_sig_seq;
+    uint32_t seen_sig_seq;
+    SceneTracker tracker; /* under the lock */
 
     /* input */
     volatile int trigger[TRIG_COUNT]; /* enum VjoTrigger, by TRIG_* */
@@ -78,6 +78,9 @@ typedef struct {
     volatile SceUID shell_pid;
     volatile uint32_t suppress_mask; /* combo buttons hidden until released */
     volatile uint32_t raw_buttons;
+    volatile uint32_t input_us32;      /* last player input (pad, or a touch the game read), incl. held */
+    volatile uint32_t input_edge_us32; /* last press/release/touch edge; both: the system time's low
+                                          32 bits, one store from any thread */
     VjoInput last_input;
 } VjoKernelState;
 
@@ -95,7 +98,6 @@ int klog_read(char *dst, int len);
 /* buffers.c */
 int buffers_alloc(uint32_t bytes); /* capture lock held, idle; page-aligned internally */
 void buffers_free(void);
-void buffers_trim(void);
 void buffers_read_done(uint32_t row, uint32_t rows); /* lock held, successful user copy */
 int capture_request(uint32_t flags);
 
@@ -103,12 +105,13 @@ int capture_request(uint32_t flags);
 void capture_compute_crop(uint32_t fb_w, uint32_t fb_h, uint32_t *x, uint32_t *y, uint32_t *w,
                           uint32_t *h);
 int capture_copy(uintptr_t base, uint32_t pitch, uint32_t fmt, uint32_t w, uint32_t h);
-uint32_t region_checksum_hook(uintptr_t base, uint32_t pitch, uint32_t fmt, uint32_t w, uint32_t h);
+int region_sig_hook(uintptr_t base, uint32_t pitch, uint32_t fmt, uint32_t w, uint32_t h, SceneSig *out);
 
 /* input.c */
 int input_hooks_install(void);
 void input_hooks_release(void);
 void input_poll(void);
+void input_trace_reset(void);
 
 /* lifecycle.c */
 int lifecycle_hooks_install(void);

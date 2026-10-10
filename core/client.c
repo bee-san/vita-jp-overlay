@@ -69,6 +69,14 @@ int vjo_lens_ocr(VjoArena *a, const VjoPlatform *p, const VjoJpegSource *src,
     req.write_body = write_lens_body;
     req.ud = &body;
 
+    if (p->log) {
+        char line[128];
+        vjo_snprintf(line, sizeof(line), "Lens image=%lux%lu jpeg=%lu protobuf=%lu",
+                     (unsigned long)src->width, (unsigned long)src->height,
+                     (unsigned long)src->size, (unsigned long)lr.body_len);
+        p->log(p->ud, line);
+    }
+
     if (vjo_http_request(a, p, 443, 1, &req, VJO_LENS_MAX_RESPONSE, &resp, err))
         return err->rc;
     if (resp.gzip) {
@@ -250,6 +258,13 @@ int vjo_overlay_from_jpeg(VjoArena *a, const VjoPlatform *p, const VjoConfig *cf
     if (vjo_overlay_ocr(a, p, cfg, src, out))
         return out->err.rc;
     return vjo_overlay_lookup(a, p, cfg, out);
+}
+
+void vjo_overlay_warm(const VjoPlatform *p, int dictionary, int timeout_us)
+{
+    if (vjo_net_warm(p, VJO_LENS_HOST, 443, timeout_us) == VJO_OK &&
+        (dictionary == VJO_DICT_JPDB || dictionary == VJO_DICT_JITEN))
+        vjo_net_warm(p, vjo_dict_backend(dictionary)->host, 443, timeout_us);
 }
 
 const char *vjo_err_text(VjoArena *a, int stage, const VjoErr *err)

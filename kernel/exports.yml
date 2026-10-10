@@ -21,7 +21,3 @@ VitaJPOverlay_Kernel:
         - vjoPollInput
         - vjoRequestCapture
         - vjoReadRaw
-        - vjoTextSubmit
-        - vjoTextControl
-        - vjoTextReference
-        - vjoTextRead

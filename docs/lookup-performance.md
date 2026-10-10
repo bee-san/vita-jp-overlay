@@ -42,8 +42,8 @@ index records / 558,655 unique normalized keys. The converter reports the same
 Lookup arena peaks range from **110,192 to 110,288 bytes (107.6–107.7 KiB)**
 for these queries, versus 100,824–100,920 bytes before. The additional 9,368
 bytes fit inside the existing **112 KiB lookup cap**: 64 KiB result capacity
-plus at most 48 KiB scratch, checked at compile time. The worker still uses
-two 384 KiB arenas. These figures do not include all process memory or stacks.
+plus at most 48 KiB scratch, checked at compile time. The current Lens worker uses two 256 KiB result arenas plus a bounded
+connection pool from the guarded ScePaf heap. These figures do not include all process memory or stacks.
 
 The tradeoff is storage: **92,845,647 → 103,097,379 bytes** (88.5 → 98.3 MiB,
 about 11.0% larger) for this Jitendex conversion. The primary index has 4,096

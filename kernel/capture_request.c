@@ -13,7 +13,7 @@ int capture_request(uint32_t flags)
         else if (!g.capture_once) ret = VJO_ERR_ARG;
         else {
             g.raw_valid = 0;
-            g.capture_once = g.capture_full = g.capture_release = 0;
+            g.capture_once = g.capture_full = 0;
             buffers_free();
             ret = 0;
         }
@@ -41,12 +41,12 @@ int capture_request(uint32_t flags)
         g.capture_fb_h = fh;
         g.crop_w = w;
         g.crop_h = h;
-        g.capture_release = 0;
         g.capture_seq = (g.capture_seq + 1) & 0x7FFFFFFF;
         if (!g.capture_seq) g.capture_seq = 1;
         ret = (int)g.capture_seq;
         g.raw_valid = 0;
         g.capture_full = (flags & VJO_CAPTURE_FULL) != 0;
+        if (!g.capture_full) g.region_seq = 0; /* capture_sig gets rewritten */
         g.capture_once = (flags & (VJO_CAPTURE_ONCE | VJO_CAPTURE_FULL)) != 0;
         g.capture_requested_us = ksceKernelGetSystemTimeWide();
         __atomic_store_n(&g.capture_state, CAPTURE_PENDING, __ATOMIC_RELEASE);

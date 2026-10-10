@@ -8,8 +8,6 @@
 #
 #   tools/install_ftp.sh 192.168.1.50[:1337]
 #   tools/install_ftp.sh --set dictionary=jiten --set jiten_api_key=KEY 192.168.1.50
-#   tools/install_ftp.sh --text-title PCSG00001 192.168.1.50
-#     (load the native text plugin in this title; repeat for more games)
 #   tools/install_ftp.sh --add-kernel-plugin NoPowerLimits.skprx 192.168.1.50
 #     (also uploads another kernel plugin to ur0:tai/ and adds it under *KERNEL;
 #      --uninstall leaves such plugins in place)
@@ -28,7 +26,6 @@ STATUS=0
 DUMPS=0
 SETS=()
 EXTRA_K=()
-TEXT_TITLES=()
 while [ $# -gt 1 ]; do
   case $1 in
     --uninstall) UNINSTALL=1 ;;
@@ -37,7 +34,6 @@ while [ $# -gt 1 ]; do
     --status) STATUS=1 ;;
     --set) SETS+=("$2"); shift ;;
     --add-kernel-plugin) EXTRA_K+=("$2"); shift ;;
-    --text-title) TEXT_TITLES+=("$2"); shift ;;
     *) break ;;
   esac
   shift
@@ -47,10 +43,6 @@ HOST=${1:?usage: tools/install_ftp.sh [--set key=value]... [--uninstall|--status
 FTP=ftp://$HOST
 B=build/vita
 PATCH_ARGS=()
-for title in ${TEXT_TITLES[@]+"${TEXT_TITLES[@]}"}; do
-  [[ $title =~ ^[A-Z0-9]{9}$ ]] || { echo "invalid Vita title ID: $title"; exit 1; }
-  PATCH_ARGS+=(--text-title "$title")
-done
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -171,7 +163,7 @@ PY
   exit 0
 fi
 
-for f in "$B/VitaJPOverlay_Kernel.skprx" "$B/VitaJPOverlay_Shell.suprx" "$B/VitaJPOverlay_Text.suprx" "$B/vitajpoverlay.rco" \
+for f in "$B/VitaJPOverlay_Kernel.skprx" "$B/VitaJPOverlay_Shell.suprx" "$B/vitajpoverlay.rco" \
          ${EXTRA_K[@]+"${EXTRA_K[@]}"}; do
   [ -f "$f" ] || { echo "missing $f: run cmake --build build/vita first"; exit 1; }
 done
@@ -190,7 +182,6 @@ done
 
 put "$B/VitaJPOverlay_Kernel.skprx" "ur0:/tai/VitaJPOverlay_Kernel.skprx"
 put "$B/VitaJPOverlay_Shell.suprx" "ur0:/tai/VitaJPOverlay_Shell.suprx"
-put "$B/VitaJPOverlay_Text.suprx" "ur0:/tai/VitaJPOverlay_Text.suprx"
 put "$B/vitajpoverlay.rco" "ur0:/data/VitaJPOverlay/vitajpoverlay.rco"
 for f in ${EXTRA_K[@]+"${EXTRA_K[@]}"}; do
   put "$f" "ur0:/tai/$(basename "$f")"

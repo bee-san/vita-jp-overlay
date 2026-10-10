@@ -837,6 +837,8 @@ static void on_job_done(void)
             mem_free();
             text_calibrated = 0;
             picker_match(VJO_HOOK_MATCH_NONE, NULL);
+            if (subtitles && ov == OV_CLOSED)
+                strip_publish("Open the overlay to choose game text", VJO_STRIP_STATUS, 0);
         }
         if (game_active() && (ov != OV_CLOSED || (subtitles && !job_anchor))) {
             int lookup = ov != OV_CLOSED || want_lookup();

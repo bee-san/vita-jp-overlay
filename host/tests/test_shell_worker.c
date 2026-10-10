@@ -599,6 +599,17 @@ static void test_changed_picker_choice_is_not_silently_selected(void)
     TEST_CHECK(!strcmp(g_view.hooks[0].text, "別の文章"));
 }
 
+static void test_closed_anchor_clears_subtitle_busy(void)
+{
+    native_setup(RELAY_CONFIG "text_source = auto\n");
+    allocation_failure = 0;
+    set_subtitles(1); open_overlay();
+    TEST_ASSERT(job_running && job_anchor && g_view.strip_busy);
+    close_overlay(); on_job_done();
+    TEST_CHECK(!job_running && !g_view.strip_busy && !mem_heap && mem_uid < 0);
+    TEST_CHECK(g_view.strip_kind == VJO_STRIP_STATUS && !g_view.open);
+}
+
 static void test_ambiguous_and_stale_hook_choices(void)
 {
     native_setup(RELAY_CONFIG "text_source = hooks\n");
@@ -883,6 +894,7 @@ static void test_native_heap_retires_for_ocr(void)
 }
 
 TEST_LIST = {
+    {"closed_anchor_clears_subtitle_busy", test_closed_anchor_clears_subtitle_busy},
     {"changed_picker_choice_is_not_silently_selected", test_changed_picker_choice_is_not_silently_selected},
     {"reopen_during_anchor_discards_old_screenshot", test_reopen_during_anchor_discards_old_screenshot},
     {"dictionary_to_picker_reads_new_screenshot", test_dictionary_to_picker_reads_new_screenshot},

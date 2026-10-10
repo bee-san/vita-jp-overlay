@@ -12,6 +12,7 @@ typedef unsigned int SceSize;
 #define SCE_KERNEL_MEMBLOCK_TYPE_USER_RW 0
 #define SCE_EVENT_WAITOR 1
 #define SCE_EVENT_WAITCLEAR_PAT 2
+#define SCE_KERNEL_POWER_TICK_DEFAULT 0
 #define sceClibMemcpy memcpy
 #define sceClibMemset memset
 #define sceClibSnprintf snprintf
@@ -20,6 +21,7 @@ typedef unsigned int SceSize;
 #define sceClibStrncmp strncmp
 uint64_t sceKernelGetProcessTimeWide(void);
 int sceKernelSetEventFlag(SceUID uid, unsigned int bits);
+int sceKernelPowerTick(int type);
 static inline int sceKernelLockMutex(SceUID uid, int count, void *timeout) { return 0; }
 static inline int sceKernelUnlockMutex(SceUID uid, int count) { return 0; }
 static inline SceUID sceKernelAllocMemBlock(const char *name, int type, unsigned int size, void *opt) { return -1; }
@@ -32,9 +34,16 @@ static inline SceUID sceKernelCreateEventFlag(const char *name, unsigned int att
 static inline SceUID sceKernelCreateThread(const char *name, int (*entry)(SceSize, void *), int priority,
                                           unsigned int stack, unsigned int attr, int affinity, void *opt) { return -1; }
 static inline int sceKernelStartThread(SceUID uid, SceSize size, void *args) { return -1; }
+#ifdef VJO_TEST_WORKER_LIFECYCLE
+int sceKernelWaitThreadEnd(SceUID uid, int *status, void *timeout);
+int sceKernelDeleteThread(SceUID uid);
+int sceKernelDeleteEventFlag(SceUID uid);
+int sceKernelDeleteMutex(SceUID uid);
+#else
 static inline int sceKernelWaitThreadEnd(SceUID uid, int *status, void *timeout) { return -1; }
 static inline int sceKernelDeleteThread(SceUID uid) { return 0; }
 static inline int sceKernelDeleteEventFlag(SceUID uid) { return 0; }
 static inline int sceKernelDeleteMutex(SceUID uid) { return 0; }
+#endif
 static inline int sceAppMgrAppParamGetString(int pid, int param, char *out, SceSize cap) { return -1; }
 #endif

@@ -1,0 +1,416 @@
+{
+  "scope": "host actual overlay C adapter, C preprocessing, bounded MNN callback and C decoder; not console RAM or latency",
+  "input_mode": "single-line",
+  "crop_pad_factor": 1,
+  "environment": {
+    "platform": "Linux-7.2.6-1-cachyos-x86_64-with-glibc2.44",
+    "machine": "x86_64"
+  },
+  "repetitions": 2,
+  "cli_sha256": "4ffb7fa533258064fbfbc4382bea6196b27532709e2a75bcd60e5acba9f7515b",
+  "model_sha256": "b7ba3219cd1bfeef5cb6b42ef6686683b991c6561b7ad3b1c41d32817deba21e",
+  "manifest_sha256": {
+    "vita-test": "5fa68d04648c246c1a0fd2966c8c13a8a0a8d49521288d0663a8770518ae1122",
+    "psp-test": "2b8db0849a42673b72f86d5466439719b2a9f8012c68e3c560fce3374e4076bc"
+  },
+  "exclusions": {
+    "vita-test": {
+      "uncertain_regions": 2
+    },
+    "psp-test": {
+      "uncertain_regions": 0
+    }
+  },
+  "sets": {
+    "vita-test": {
+      "crops": {
+        "fixtures": 206,
+        "inference_requests": 412,
+        "statuses": {
+          "0": 206
+        },
+        "repeat_text_differences": 0,
+        "peak_model_tensor_bytes": 13235648,
+        "max_retained_pool_bytes": 0,
+        "allocation_failures": 0,
+        "score": {
+          "all": {
+            "lines": 206,
+            "chars": 2564,
+            "errors": 36,
+            "cer": 0.01404,
+            "exact": 0.86893
+          },
+          "styles": {
+            "bright-on-dark": {
+              "lines": 163,
+              "chars": 2016,
+              "errors": 28,
+              "cer": 0.01389,
+              "exact": 0.88344
+            },
+            "coloured": {
+              "lines": 19,
+              "chars": 195,
+              "errors": 13,
+              "cer": 0.06667,
+              "exact": 0.63158
+            },
+            "coloured-name": {
+              "lines": 8,
+              "chars": 21,
+              "errors": 1,
+              "cer": 0.04762,
+              "exact": 0.875
+            },
+            "dark-on-light": {
+              "lines": 43,
+              "chars": 548,
+              "errors": 8,
+              "cer": 0.0146,
+              "exact": 0.81395
+            },
+            "furigana": {
+              "lines": 3,
+              "chars": 64,
+              "errors": 2,
+              "cer": 0.03125,
+              "exact": 0.66667
+            },
+            "mincho": {
+              "lines": 47,
+              "chars": 676,
+              "errors": 5,
+              "cer": 0.0074,
+              "exact": 0.93617
+            },
+            "name": {
+              "lines": 53,
+              "chars": 172,
+              "errors": 4,
+              "cer": 0.02326,
+              "exact": 0.92453
+            },
+            "outlined": {
+              "lines": 74,
+              "chars": 989,
+              "errors": 17,
+              "cer": 0.01719,
+              "exact": 0.85135
+            }
+          },
+          "games": {
+            "v10856": {
+              "lines": 2,
+              "chars": 50,
+              "errors": 0,
+              "cer": 0.0,
+              "exact": 1.0
+            },
+            "v13072": {
+              "lines": 3,
+              "chars": 29,
+              "errors": 0,
+              "cer": 0.0,
+              "exact": 1.0
+            },
+            "v16460": {
+              "lines": 25,
+              "chars": 369,
+              "errors": 4,
+              "cer": 0.01084,
+              "exact": 0.92
+            },
+            "v16566": {
+              "lines": 20,
+              "chars": 230,
+              "errors": 0,
+              "cer": 0.0,
+              "exact": 1.0
+            },
+            "v17286": {
+              "lines": 16,
+              "chars": 190,
+              "errors": 0,
+              "cer": 0.0,
+              "exact": 1.0
+            },
+            "v17750": {
+              "lines": 16,
+              "chars": 163,
+              "errors": 3,
+              "cer": 0.0184,
+              "exact": 0.8125
+            },
+            "v17829": {
+              "lines": 12,
+              "chars": 127,
+              "errors": 13,
+              "cer": 0.10236,
+              "exact": 0.41667
+            },
+            "v18030": {
+              "lines": 16,
+              "chars": 121,
+              "errors": 2,
+              "cer": 0.01653,
+              "exact": 0.875
+            },
+            "v19339": {
+              "lines": 6,
+              "chars": 82,
+              "errors": 2,
+              "cer": 0.02439,
+              "exact": 0.66667
+            },
+            "v19850": {
+              "lines": 8,
+              "chars": 94,
+              "errors": 1,
+              "cer": 0.01064,
+              "exact": 0.875
+            },
+            "v20326": {
+              "lines": 14,
+              "chars": 179,
+              "errors": 1,
+              "cer": 0.00559,
+              "exact": 0.92857
+            },
+            "v21782": {
+              "lines": 12,
+              "chars": 142,
+              "errors": 2,
+              "cer": 0.01408,
+              "exact": 0.83333
+            },
+            "v21789": {
+              "lines": 25,
+              "chars": 373,
+              "errors": 3,
+              "cer": 0.00804,
+              "exact": 0.88
+            },
+            "v22122": {
+              "lines": 8,
+              "chars": 128,
+              "errors": 0,
+              "cer": 0.0,
+              "exact": 1.0
+            },
+            "v3820": {
+              "lines": 11,
+              "chars": 128,
+              "errors": 2,
+              "cer": 0.01562,
+              "exact": 0.90909
+            },
+            "v7721": {
+              "lines": 12,
+              "chars": 159,
+              "errors": 3,
+              "cer": 0.01887,
+              "exact": 0.75
+            }
+          },
+          "game_macro_cer": 0.01533
+        }
+      }
+    },
+    "psp-test": {
+      "crops": {
+        "fixtures": 245,
+        "inference_requests": 490,
+        "statuses": {
+          "0": 245
+        },
+        "repeat_text_differences": 0,
+        "peak_model_tensor_bytes": 13235648,
+        "max_retained_pool_bytes": 0,
+        "allocation_failures": 0,
+        "score": {
+          "all": {
+            "lines": 245,
+            "chars": 2510,
+            "errors": 89,
+            "cer": 0.03546,
+            "exact": 0.79592
+          },
+          "styles": {
+            "bright-on-dark": {
+              "lines": 135,
+              "chars": 1409,
+              "errors": 55,
+              "cer": 0.03903,
+              "exact": 0.8
+            },
+            "coloured": {
+              "lines": 20,
+              "chars": 214,
+              "errors": 9,
+              "cer": 0.04206,
+              "exact": 0.7
+            },
+            "coloured-name": {
+              "lines": 7,
+              "chars": 24,
+              "errors": 2,
+              "cer": 0.08333,
+              "exact": 0.71429
+            },
+            "dark-on-light": {
+              "lines": 110,
+              "chars": 1101,
+              "errors": 34,
+              "cer": 0.03088,
+              "exact": 0.79091
+            },
+            "furigana": {
+              "lines": 20,
+              "chars": 206,
+              "errors": 46,
+              "cer": 0.2233,
+              "exact": 0.05
+            },
+            "mincho": {
+              "lines": 90,
+              "chars": 984,
+              "errors": 16,
+              "cer": 0.01626,
+              "exact": 0.86667
+            },
+            "name": {
+              "lines": 62,
+              "chars": 209,
+              "errors": 39,
+              "cer": 0.1866,
+              "exact": 0.69355
+            },
+            "no-box": {
+              "lines": 4,
+              "chars": 59,
+              "errors": 7,
+              "cer": 0.11864,
+              "exact": 0.25
+            },
+            "outlined": {
+              "lines": 69,
+              "chars": 740,
+              "errors": 18,
+              "cer": 0.02432,
+              "exact": 0.84058
+            },
+            "small": {
+              "lines": 106,
+              "chars": 973,
+              "errors": 24,
+              "cer": 0.02467,
+              "exact": 0.83962
+            }
+          },
+          "games": {
+            "v10856": {
+              "lines": 13,
+              "chars": 181,
+              "errors": 23,
+              "cer": 0.12707,
+              "exact": 0.15385
+            },
+            "v11095": {
+              "lines": 20,
+              "chars": 207,
+              "errors": 0,
+              "cer": 0.0,
+              "exact": 1.0
+            },
+            "v11504": {
+              "lines": 24,
+              "chars": 251,
+              "errors": 7,
+              "cer": 0.02789,
+              "exact": 0.79167
+            },
+            "v11708": {
+              "lines": 11,
+              "chars": 105,
+              "errors": 3,
+              "cer": 0.02857,
+              "exact": 0.81818
+            },
+            "v12155": {
+              "lines": 21,
+              "chars": 160,
+              "errors": 5,
+              "cer": 0.03125,
+              "exact": 0.80952
+            },
+            "v12865": {
+              "lines": 22,
+              "chars": 171,
+              "errors": 23,
+              "cer": 0.1345,
+              "exact": 0.63636
+            },
+            "v12940": {
+              "lines": 16,
+              "chars": 181,
+              "errors": 2,
+              "cer": 0.01105,
+              "exact": 0.875
+            },
+            "v13072": {
+              "lines": 14,
+              "chars": 117,
+              "errors": 3,
+              "cer": 0.02564,
+              "exact": 0.78571
+            },
+            "v15910": {
+              "lines": 24,
+              "chars": 280,
+              "errors": 1,
+              "cer": 0.00357,
+              "exact": 0.95833
+            },
+            "v3396": {
+              "lines": 24,
+              "chars": 233,
+              "errors": 7,
+              "cer": 0.03004,
+              "exact": 0.79167
+            },
+            "v3542": {
+              "lines": 11,
+              "chars": 124,
+              "errors": 5,
+              "cer": 0.04032,
+              "exact": 0.72727
+            },
+            "v4147": {
+              "lines": 7,
+              "chars": 88,
+              "errors": 8,
+              "cer": 0.09091,
+              "exact": 0.42857
+            },
+            "v4671": {
+              "lines": 18,
+              "chars": 220,
+              "errors": 1,
+              "cer": 0.00455,
+              "exact": 0.94444
+            },
+            "v7634": {
+              "lines": 20,
+              "chars": 192,
+              "errors": 1,
+              "cer": 0.00521,
+              "exact": 0.95
+            }
+          },
+          "game_macro_cer": 0.04004
+        }
+      }
+    }
+  }
+}

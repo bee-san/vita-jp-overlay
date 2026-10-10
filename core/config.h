@@ -7,7 +7,8 @@
 #include "../include/vjo_api.h"
 
 enum { VJO_OCR_AUTO = 0, VJO_OCR_ON_PRESS = 1 };
-enum { VJO_OCR_LENS = 0, VJO_OCR_NCNN = 1 };
+enum { VJO_OCR_LENS = 0, VJO_OCR_NCNN = 1, VJO_OCR_MEIKI = 2 };
+enum { VJO_MEIKI_SINGLE_LINE = 0, VJO_MEIKI_DIALOGUE_BOX = 1 };
 enum { VJO_DICT_JPDB = 0, VJO_DICT_JITEN = 1, VJO_DICT_HACHIDORI = 2, VJO_DICT_LOCAL = 3, VJO_DICT_COUNT };
 
 /* Data put on an Anki note, each into the field named by its
@@ -38,7 +39,8 @@ typedef struct {
     int toggle_button;        /* enum VjoTrigger */
     int subtitle_button;      /* enum VjoTrigger, != toggle_button */
     int ocr_mode;             /* VJO_OCR_* */
-    int ocr_backend;          /* VJO_OCR_LENS | VJO_OCR_NCNN */
+    int ocr_backend;          /* VJO_OCR_LENS | VJO_OCR_NCNN | VJO_OCR_MEIKI */
+    int meiki_layout;         /* VJO_MEIKI_SINGLE_LINE | VJO_MEIKI_DIALOGUE_BOX */
     char ocr_model_dir[160];
     char log_host[64];        /* "" = UDP log off */
     int log_file;             /* 0/1 */

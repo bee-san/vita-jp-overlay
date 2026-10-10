@@ -234,7 +234,9 @@ int vjo_overlay_ocr(VjoArena *a, const VjoPlatform *p, const VjoConfig *cfg,
      * runner; never upload a JPEG when the caller selected local OCR. */
     if (cfg->ocr_backend != VJO_OCR_LENS) {
         out->failed_stage = VJO_STAGE_OCR;
-        out->err.detail = "Local OCR requires raw pixels. Use vjo-ocr for host tests.";
+        out->err.detail = cfg->ocr_backend == VJO_OCR_MEIKI
+            ? "Meiki OCR requires raw pixels. Use vjo-meiki-ocr for host tests."
+            : "Local OCR requires raw pixels. Use vjo-ocr for host tests.";
         return out->err.rc = VJO_E_OCR_UNAVAILABLE;
     }
     if (vjo_lens_ocr(a, p, src, &lr, &text, &out->err)) {
@@ -293,13 +295,13 @@ const char *vjo_err_text(VjoArena *a, int stage, const VjoErr *err)
         vjo_buf_puts(&b, "Invalid or incomplete local dictionary. Reconvert the Yomitan ZIP and copy the complete .vjdict file again.");
         break;
     case VJO_E_OCR_MODEL:
-        vjo_buf_puts(&b, "Local OCR model is missing or invalid. Run tools/prepare_ocr.py and copy the complete model to ocr_model_dir.");
+        vjo_buf_puts(&b, err->detail ? err->detail : "Local OCR model is missing or invalid. Copy the complete model for the selected ocr_backend to ocr_model_dir; see docs/local-ocr.md.");
         break;
     case VJO_E_OCR_REGION:
-        vjo_buf_puts(&b, "Local OCR needs a tight dialogue region with horizontal white text. Select a region, excluding portraits and menus.");
+        vjo_buf_puts(&b, err->detail ? err->detail : "Local OCR needs a tight dialogue region with horizontal white text. Select a region, excluding portraits and menus.");
         break;
     case VJO_E_OCR_UNAVAILABLE:
-        vjo_buf_puts(&b, err->detail ? err->detail : "This build has no local OCR. Install a build with ncnn or set ocr_backend = lens.");
+        vjo_buf_puts(&b, err->detail ? err->detail : "The selected local OCR engine is unavailable. Install a matching local OCR build; see docs/local-ocr.md.");
         break;
     case VJO_E_CANCELLED:
         vjo_buf_puts(&b, "Text recognition cancelled.");

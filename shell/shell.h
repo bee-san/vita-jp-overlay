@@ -76,7 +76,8 @@ void vjo_post_command(int cmd, const VjoRect *rect);
 
 /* worker.c */
 int vjo_worker_start(void);
-void vjo_worker_stop(void);
+/* Failure keeps remaining Shell resources for a later stop retry. */
+int vjo_worker_stop(void);
 /* Captures the screen (flags: VJO_CAPTURE_*) and encodes it as a JPEG into
  * out; serialized with the OCR job's capture (one kernel buffer). Returns
  * VJO_OK or a VJO_E_* code. */
@@ -84,7 +85,7 @@ int vjo_capture_jpeg(VjoArena *a, uint32_t flags, int quality, VjoBuf *out, VjoS
 
 /* anki.c: AnkiConnect thread */
 int vjo_anki_start(void);
-void vjo_anki_stop(void);
+int vjo_anki_stop(void);
 /* Settings for the next request (control thread, after each config load). */
 void vjo_anki_configure(const VjoConfig *cfg);
 /* Refresh the on-disk queue count (control thread, no network). */

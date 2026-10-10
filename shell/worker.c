@@ -218,6 +218,53 @@ static void log_hook_state(const char *why)
     hook_log_pending = 0;
 }
 
+/* Private diagnostics only for an explicit picker action. A pending OCR
+ * action is logged once its displayed rows arrive, never on live updates. */
+static const char *picker_log_pending;
+
+static void picker_log_text(char out[161], const char *text)
+{
+    copy_utf8(out, 161, text);
+    for (unsigned i = 0; out[i]; i++)
+        if ((uint8_t)out[i] < 0x20 || out[i] == 0x7F) out[i] = ' ';
+}
+
+static void picker_log(const char *why)
+{
+    unsigned count, session, match;
+    char text[161];
+    vjo_view_lock();
+    count = g_view.hook_picker ? g_view.hook_count : 0;
+    if (count > VJO_TEXT_CHOICES) count = VJO_TEXT_CHOICES;
+    session = g_view.hook_picker ? g_view.hook_session : text_state.session;
+    match = g_view.hook_match_state;
+    vjo_view_unlock();
+    vjo_log("picker %s session=%u rows=%u match=%u selected=%u", why,
+            session, count, match, text_state.current.id);
+    for (unsigned i = 0; i < count; i++) {
+        unsigned id, kind, encoding, address;
+        vjo_view_lock();
+        const VjoTextCandidate *c = &g_view.hooks[i];
+        id = c->id; kind = c->kind; encoding = c->encoding; address = c->address;
+        picker_log_text(text, c->text);
+        vjo_view_unlock();
+        vjo_log("picker row=%u id=%u kind=%u enc=%u addr=%08X text=%s",
+                i + 1, id, kind, encoding, address, text);
+    }
+    if (text_state.current.id) {
+        const VjoTextCandidate *c = &text_state.current;
+        picker_log_text(text, c->text);
+        vjo_log("picker selected id=%u kind=%u enc=%u addr=%08X text=%s",
+                c->id, c->kind, c->encoding, c->address, text);
+    }
+}
+
+static void picker_log_action(const char *why)
+{
+    picker_log_pending = job_running && job_anchor ? why : NULL;
+    if (!picker_log_pending) picker_log(why);
+}
+
 /* ---------------- memory ---------------- */
 
 static void mem_free(void);
@@ -749,6 +796,7 @@ static void open_overlay(void)
             view_publish(1, NULL, text_state.current.text[0] ? "Reading game text…" : "Waiting for the selected hook…", 0);
             start_job("native text", vjo_config_dict_ready(&cfg));
         }
+        picker_log_action("open");
         return;
     }
     if (!vjo_config_dict_ready(&cfg)) {
@@ -786,6 +834,7 @@ static void open_overlay(void)
 
 static void close_overlay(void)
 {
+    picker_log_pending = NULL;
     if (ov == OV_CLOSED)
         return;
     ov = OV_CLOSED;
@@ -897,6 +946,8 @@ static void on_job_done(void)
          * anchor storage no longer in use. No view retains an arena pointer. */
         mem_free();
         if (ov != OV_CLOSED) picker_publish();
+        if (ov != OV_CLOSED && picker_log_pending) picker_log(picker_log_pending);
+        picker_log_pending = NULL;
         return;
     }
     ocr_failed = d->failed_stage == VJO_STAGE_OCR;
@@ -1050,6 +1101,7 @@ static void on_command(void)
                 "Choose game text." : "Choose the text that matches the screenshot.", 0);
             picker_publish();
         }
+        picker_log_action("refresh");
         break;
     case VJO_CMD_HOOK_SELECT:
         if (!native_enabled() || job_running) break;
@@ -1057,12 +1109,14 @@ static void on_command(void)
             vjoTextControl(hook_session, VJO_TEXT_FOLLOW, hook_id) < 0) {
             view_publish(1, NULL, "That text source is no longer available. Press □ to refresh.", 1);
             picker_publish();
+            picker_log("select-missing");
             break;
         }
         __atomic_add_fetch(&capture_generation, 1, __ATOMIC_RELEASE);
         cache_ok = 0;
         vjoTextRead(&text_state);
         if (!picker_selection_current()) {
+            picker_log("select-changed");
             vjoTextControl(text_state.session, VJO_TEXT_LISTEN, 0);
             vjoTextRead(&text_state);
             view_publish(1, NULL, "That text changed while you were choosing. Check the refreshed choices.", 1);
@@ -1070,6 +1124,7 @@ static void on_command(void)
             break;
         }
         log_hook_state("select");
+        picker_log("select");
         picker_close();
         view_publish(1, NULL, "Reading the selected text…", 0);
         start_job("manual hook selection", vjo_config_dict_ready(&cfg));
@@ -1082,6 +1137,7 @@ static void on_command(void)
         text_calibrated = 0;
         backoff_note(&mem_backoff, 0);
         start_job("explicit OCR hook match", 0);
+        picker_log_action("refresh-ocr");
         break;
     case VJO_CMD_CLOSED:
         close_overlay();
@@ -1161,6 +1217,7 @@ static void activate_game(SceUID pid, const char *tid, int mode)
     seen_hook_id = 0; seen_hook_text[0] = 0;
     hook_log_after = 0;
     hook_log_pending = 0;
+    picker_log_pending = NULL;
     sceClibMemset(&text_state, 0, sizeof(text_state));
     picker_close();
     if (native_enabled() && vjoTextRead(&text_state) == 0) {

@@ -1,0 +1,143 @@
+{
+  "source_repository": "https://github.com/bee-san/vita-vn-ocr",
+  "source_commit": "2eaa0592a96583cd73fac7e21374cfc63dc4009e",
+  "source_directory": "ports/meiki",
+  "source_files_sha256": {
+    "arena.c": "30f3b7b6c95dd2310959ed4bfdc7f80240368b31e1572d9142b71d568561d1d1",
+    "arena.h": "510699fbd3778cfdb9de33b6280f6f1d415be2499ba63c121204979c0c2f0e7b",
+    "decode.c": "7a2e654b207b260306982a6e266ac0240cc38c20b437a370320aef6ef5e54a79",
+    "decode.h": "27ad16a639f5d0f77db1f0eb4fe86a4a2272c9987eb5e4faf44ff54d8ffc204c",
+    "runtime.cpp": "04f1d7aa1e763bbbe88ec9e9168f8c2d4eae7cce30668183731c0a1ac977eec2",
+    "runtime.h": "0a37260d0e33b3c2f7ca098d89f8a6a6f1a2b37fa1b17983e6d4edfb36aadcbb",
+    "preprocess.c": "02793943ccfcaf374eb4484e07fc8e892215a947b2654748a06b5007935e1c53",
+    "preprocess.h": "88f772d141a4c7db4c8622578fa2b28642114fd8161e2b16c59b32007a82be50",
+    "detect_runtime.cpp": "1278b79db2e7e84061ff9d0fa5c0835a2b5b4190cfb86a0510e5fe6f64319e3c",
+    "detect_runtime.h": "67188a2fb1dd2db82bc968420be52b483c6fd58aec42b48c3689cfddbbc65210",
+    "detect_preprocess.c": "694871a751bf63a5f11fe4234efaeac760131f996c8fca06f1b2db96289eae02",
+    "detect_preprocess.h": "f6a8899c2df44ee4e2479fd26549f7ca0c7b1c6268e11f477793e301efcb3f47",
+    "module/CMakeLists.txt": "9ad7bc0d774f7dca6674119ce5dc377e972b2f691332f41883d0ada0e17b6770",
+    "module/api.h": "c5fd4885502e3d44dd27925e367d85a8c91d231a53d06332d8ca60280db0ff2b",
+    "module/bridge.c": "b8e1b610bc6814c8810060e98eb34a1f9a26f6b3083f8ab81d2cbe29c328d208",
+    "module/metadata.c": "5d015b078996a3c0e11f13f0531bcea04da642089364777055c14537809e9a00",
+    "module/engine.cpp": "f504f8d79bfb2bf7e02ab2e7804351d67caf4f26533d859ff7e4940b711a98c1",
+    "module/exports.yml": "9c4b3ff5388eefea166a94988ead82c50c9cae335ca1a75dbe9a51ea594c51f4",
+    "module/internal.h": "ce6c66f00ef23504348ecaabd32210c1365d389cbc35236f67eb37093fef2e36"
+  },
+  "module_abi": 2,
+  "dependencies": {
+    "meiki": {
+      "repository": "https://github.com/rtr46/meikiocr",
+      "commit": "52aa607ecdc1038c7bf390f37cd9a8b306e8a08a",
+      "version": "0.3.5",
+      "code_license": "Apache-2.0"
+    },
+    "weights": {
+      "repository": "https://huggingface.co/rtr46/meiki.txt.recognition.v0",
+      "revision": "a28cf5874dc2438ebb1c86336be26bcec51e3375",
+      "filename": "meiki.text.rec.v0.960x32.onnx",
+      "bytes": 18593254,
+      "sha256": "3e96bc772fbee9717e536a6353032bb944c3382dd2f6960ef4890decda43b000",
+      "license": "LGPL-3.0"
+    },
+    "prepared": {
+      "filename": "meiki-stream.onnx",
+      "sha256": "683d52a9d1bcd3885fc8b0f38d5d1d92d3196b4f11513c5e1ec5a5ea2c44b9cd",
+      "batch": 1,
+      "class_chunk": 128,
+      "original_head_tensor_bytes": 11017440,
+      "prepared_head_tensor_bytes": 322560
+    },
+    "converted": {
+      "filename": "meiki-stream-int8.mnn",
+      "bytes": 5392856,
+      "sha256": "b7ba3219cd1bfeef5cb6b42ef6686683b991c6561b7ad3b1c41d32817deba21e",
+      "weight_quantization_bits": 8,
+      "license": "LGPL-3.0",
+      "tensor_precision": "float32",
+      "mnn_biz_code": "meiki-vita",
+      "mnn_uuid": "88dfd245-536c-4529-877b-e9f1eceafce0"
+    },
+    "mnn": {
+      "repository": "https://github.com/alibaba/MNN",
+      "commit": "ebdada82634300956e08bd4056ecfeb1e4f23b32",
+      "version": "3.2.0",
+      "license": "Apache-2.0",
+      "patch": "mnn-vita.patch",
+      "runtime_memory_mode": "Memory_Low",
+      "runtime_convolution_activations": "dynamic int8 in low-memory CPU convolutions; other tensor interfaces float32",
+      "embedding_exceptions_enabled": true
+    },
+    "vitasdk": {
+      "repository": "https://github.com/vitasdk/autobuilds",
+      "release": "sdk-snapshot-20260926.790.1",
+      "sdk_version": "0.20260926.321",
+      "gcc_version": "15.2.0",
+      "sha256": "87b111ff350c1f36bde1c2923e57467c1f86b044d54bc616631260486f2a512c"
+    },
+    "arena_source": {
+      "repository": "https://github.com/bee-san/vita-jp-overlay",
+      "license": "GPL-3.0-or-later",
+      "commit": "61a2a50ab93953753b7531ec408621f36618cf98",
+      "file": "core/ocr_heap.c"
+    },
+    "opencv_resize_source": {
+      "repository": "https://github.com/opencv/opencv",
+      "version": "4.12.0",
+      "path": "modules/imgproc/src/resize.cpp",
+      "sha256": "89db2e4de92e1d03890f3e7fe517f895a36514f355da097b2c8e4c55fc1847e4",
+      "license": "BSD-3-Clause notices retained for adapted sections"
+    }
+  },
+  "detector_dependencies": {
+    "weights": {
+      "repository": "https://huggingface.co/rtr46/meiki.text.detect.v0",
+      "revision": "a9cffa4f60cbf72ddb87edf19c6f98a01cd042e6",
+      "filename": "meiki.text.detect.v0.1.320x192.onnx",
+      "bytes": 14084361,
+      "sha256": "8cdc5daa5c13a5f93adb40ee2e53ad1a3d2f7e372584c5c665b038adeb74ae6d",
+      "license": "LGPL-3.0",
+      "license_source": "https://huggingface.co/rtr46/meiki.text.detect.v0/blob/a9cffa4f60cbf72ddb87edf19c6f98a01cd042e6/README.md",
+      "architecture": "Author-trained Meiki v0.1 D-FINE with MobileNet v4 small backbone,64 boxes"
+    },
+    "prepared": {
+      "filename": "meiki-detect-batch1.onnx",
+      "sha256": "c4219d056b083d97f3a2d1d44d669458d7ae3f65ace8ca19250c5cedcb1f8fbd",
+      "batch": 1,
+      "onnx_version": "1.18.0",
+      "onnxsim_version": "0.4.36",
+      "inputs": {
+        "images": [
+          1,
+          3,
+          192,
+          320
+        ],
+        "orig_target_sizes": [
+          1,
+          2
+        ]
+      },
+      "transformation": "Fix batch and simplify existing graph; no training, architecture replacement or output filtering"
+    },
+    "converted": {
+      "filename": "meiki-detect-int8.mnn",
+      "bytes": 4119220,
+      "sha256": "f0865ed291846a130905527f67c33f17e64d0f2c5eb38378ed1faea57f74b1ba",
+      "weight_quantization_bits": 8,
+      "tensor_precision": "float32",
+      "license": "LGPL-3.0",
+      "mnn_version": "3.2.0",
+      "mnn_commit": "ebdada82634300956e08bd4056ecfeb1e4f23b32",
+      "mnn_biz_code": "meiki-detector-diagnostic",
+      "mnn_uuid": "24ef4b84-9104-48e0-8b59-a96b92738c56"
+    },
+    "runtime": {
+      "dependency_manifest": "dependencies.json",
+      "input_bytes": 737280,
+      "scratch_bytes": 9600,
+      "shared_model_arena_bytes": 16777216,
+      "module_metadata_heap_bytes": 4194304,
+      "recognition": "Sequential reuse of the same input, scratch, model arena and private metadata domain"
+    }
+  }
+}

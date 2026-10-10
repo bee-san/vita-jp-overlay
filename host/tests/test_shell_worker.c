@@ -5,6 +5,7 @@
 #include "pb.h"
 #include "replay.h"
 #define VJO_TEST_MEMORY_STUBS 1
+#define VJO_TEST_WORKER_LIFECYCLE 1
 #include <psp2/host_stubs.h>
 #include "../../include/vjo_text.h"
 
@@ -17,7 +18,8 @@ static unsigned discard_requests;
 static uint32_t capture_flags;
 static int state_read_result;
 static unsigned raw_calls, raw_rows_copied, raw_fault_row;
-static int raw_short_read;
+static unsigned raw_row_zero_reads;
+static int raw_short_read, raw_sequential;
 
 static void capture_pixels(uint32_t row, uint32_t n, uint8_t *dst)
 {
@@ -32,14 +34,19 @@ static void capture_pixels(uint32_t row, uint32_t n, uint8_t *dst)
         }
     }
 }
+static unsigned control_polls_before_stop;
+static unsigned power_ticks;
+static void control_poll_hook(void);
 
 uint64_t sceKernelGetProcessTimeWide(void) { return test_now; }
+int sceKernelPowerTick(int type) { TEST_CHECK(type == SCE_KERNEL_POWER_TICK_DEFAULT); power_ticks++; return 0; }
 int sceKernelSetEventFlag(SceUID uid, unsigned int bits) { posted_events |= bits; return 0; }
 int sceKernelGetProcessTitleId(SceUID pid, char *titleid, SceSize len) { return -1; }
 int vjoGetVersion(void) { return VJO_API_VERSION; }
 int vjoRegisterShell(void) { return 0; }
 int vjoWaitEvent(uint32_t mask, uint32_t *out, uint32_t timeout) {
     test_now += timeout;
+    control_poll_hook();
     *out = 0;
     if (capture_pending > 0 && capture_waits > 0 && --capture_waits == 0) {
         kernel_state.done_seq = (uint32_t)capture_pending;
@@ -69,16 +76,19 @@ int vjoRequestCapture(uint32_t flags) {
 int vjoReadRaw(uint32_t row, uint32_t n, void *dst) {
     raw_calls++;
     if (row >= raw_fault_row) return raw_short_read ? (int)n - 1 : -1;
-    TEST_CHECK(row == raw_rows_copied && n && n <= 16);
+    TEST_CHECK((!raw_sequential || row == raw_rows_copied) && n && n <= 16);
     TEST_CHECK(row < kernel_state.height && n <= kernel_state.height-row);
     capture_pixels(row, n, dst);
+    if (!row) raw_row_zero_reads++;
     raw_rows_copied += n;
     return (int)n;
 }
 static VjoTextSnapshot hook_snapshot;
-int vjoTextRead(VjoTextSnapshot *out) { *out = hook_snapshot; return 0; }
+static unsigned text_reads, text_controls;
+int vjoTextRead(VjoTextSnapshot *out) { text_reads++; *out = hook_snapshot; return 0; }
 static int last_hook_mode, discover_calls;
 int vjoTextControl(uint32_t session, int mode, uint32_t selected) {
+    text_controls++;
     last_hook_mode = mode;
     if (mode == VJO_TEXT_DISCOVER) discover_calls++;
     if (session != hook_snapshot.session) return -1;
@@ -99,18 +109,132 @@ int vjoTextReference(uint32_t session, const char *text) {
 
 #include "../../shell/worker.c"
 
+enum { TEST_NET = 11, TEST_CTL, TEST_EVENT, TEST_CMD, TEST_CAPTURE, TEST_VIEW };
+static unsigned thread_joins, thread_deletes, event_deletes, mutex_deletes, anki_stops;
+static SceUID join_failure_uid;
+static int anki_stop_error;
+static char lifecycle_events[128];
+static unsigned lifecycle_event_count;
+
+static void lifecycle_event(char value)
+{
+    TEST_ASSERT(lifecycle_event_count + 1 < sizeof(lifecycle_events));
+    lifecycle_events[lifecycle_event_count++] = value;
+    lifecycle_events[lifecycle_event_count] = 0;
+}
+
+int sceKernelWaitThreadEnd(SceUID uid, int *status, void *timeout)
+{
+    TEST_CHECK(uid == TEST_NET || uid == TEST_CTL);
+    TEST_CHECK(!running && (posted_events & NET_EV_QUIT));
+    thread_joins++;
+    lifecycle_event(uid == TEST_NET ? 'n' : 'c');
+    return uid == join_failure_uid ? -1 : 0;
+}
+int sceKernelDeleteThread(SceUID uid)
+{
+    TEST_CHECK(uid == TEST_NET || uid == TEST_CTL);
+    thread_deletes++;
+    lifecycle_event(uid == TEST_NET ? 'N' : 'C');
+    return 0;
+}
+int sceKernelDeleteEventFlag(SceUID uid)
+{
+    TEST_CHECK(uid == TEST_EVENT);
+    event_deletes++;
+    lifecycle_event('e');
+    return 0;
+}
+int sceKernelDeleteMutex(SceUID uid)
+{
+    TEST_CHECK(uid == TEST_CMD || uid == TEST_CAPTURE || uid == TEST_VIEW);
+    mutex_deletes++;
+    lifecycle_event(uid == TEST_CMD ? 'm' : uid == TEST_CAPTURE ? 'p' : 'v');
+    return 0;
+}
+
+#ifdef VJO_WITH_MEIKI
+static unsigned bridge_finishes, bridge_starts;
+static unsigned bridge_recognitions, bridge_detections;
+static int bridge_start_error, bridge_inference_error, bridge_finish_error;
+static unsigned char borrowed_metadata[64], borrowed_workspace[64], borrowed_input[64];
+static float bridge_tensor[MEIKI_DETECT_ELEMENTS];
+static uint64_t bridge_scratch[(MEIKI_PREPROCESS_SCRATCH_BYTES + 7) / 8];
+
+int vjo_meiki_bridge_start_mode(VjoMeikiBridge *bridge, const VjoPlatform *platform,
+                               const char *model_dir, int dialogue_box,
+                               int (*cancelled)(void *), void *ud)
+{
+    (void)platform; (void)model_dir; (void)dialogue_box;
+    (void)cancelled; (void)ud;
+    bridge_starts++;
+    if (bridge_start_error) return bridge_start_error;
+    bridge->module = 77;
+    bridge->metadata = borrowed_metadata;
+    bridge->workspace = borrowed_workspace;
+    bridge->preprocessing = bridge_tensor;
+    bridge->input = bridge_tensor;
+    bridge->input_elements = MEIKI_DETECT_ELEMENTS;
+    bridge->scratch = bridge_scratch;
+    return VJO_OK;
+}
+static int bridge_recognize(void *ud, const char *model_path, const float *input,
+                            MeikiOutput *out, MeikiStats *stats)
+{
+    (void)ud;
+    TEST_CHECK(strstr(model_path, VJO_MEIKI_MODEL_FILENAME) != NULL);
+    TEST_CHECK(input == bridge_tensor);
+    bridge_recognitions++;
+    memset(out, 0, sizeof(*out));
+    memset(stats, 0, sizeof(*stats));
+    out->codes[0] = 0x732B; /* invented inference result: 猫 */
+    out->scores[0] = .9f;
+    out->boxes[2] = 10.0f;
+    return bridge_inference_error;
+}
+static int bridge_detect(void *ud, const char *model_path, const float *input,
+                         int32_t target_width, int32_t target_height,
+                         MeikiDetectOutput *out, MeikiStats *stats)
+{
+    (void)ud; (void)target_width; (void)target_height;
+    TEST_CHECK(strstr(model_path, VJO_MEIKI_DETECT_MODEL_FILENAME) != NULL);
+    TEST_CHECK(input == bridge_tensor);
+    bridge_detections++;
+    memset(out, 0, sizeof(*out));
+    memset(stats, 0, sizeof(*stats));
+    out->scores[0] = .9f;
+    out->boxes[0][2] = (float)kernel_state.width;
+    out->boxes[0][3] = (float)kernel_state.height;
+    return VJO_OK;
+}
+VjoMeikiEngine vjo_meiki_bridge_engine(VjoMeikiBridge *bridge)
+{
+    (void)bridge;
+    return (VjoMeikiEngine){NULL, bridge_recognize, bridge_detect};
+}
+int vjo_meiki_bridge_finish(VjoMeikiBridge *bridge)
+{
+    bridge_finishes++;
+    lifecycle_event('b');
+    if (bridge_finish_error) return bridge_finish_error;
+    memset(bridge, 0, sizeof(*bridge));
+    bridge->module = -1;
+    return 0;
+}
+#endif
+
 void vjo_config_load(VjoConfig *out, VjoArena *a) { *out = loaded_config; }
 void vjo_log_configure(const VjoConfig *c) {}
 void vjo_log(const char *fmt, ...) {}
 int vjo_region_load(const char *tid, VjoRect *out, VjoArena *a) { return 0; }
 int vjo_region_save(const char *tid, const VjoRect *r, VjoArena *a) { return 0; }
 int vjo_anki_start(void) { return -1; }
-void vjo_anki_stop(void) {}
+int vjo_anki_stop(void) { anki_stops++; lifecycle_event('a'); return anki_stop_error; }
 void vjo_anki_configure(const VjoConfig *c) {}
 void vjo_anki_post_check(unsigned int seq) {}
 void vjo_platform_vita(VjoPlatform *p) {}
 
-static uint8_t result_mem[2][RESULT_ARENA_SIZE];
+static uint8_t result_mem[2][RESULT_ARENA_SIZE] __attribute__((aligned(64)));
 static unsigned allocation_calls, allocation_frees;
 static int allocation_failure;
 static uint8_t heap_mem[RESULT_ARENA_SIZE];
@@ -142,6 +266,38 @@ int sceKernelGetMemBlockBase(SceUID uid, void **base)
     return 0;
 }
 int sceKernelFreeMemBlock(SceUID uid) { allocation_frees++; return 0; }
+#ifdef VJO_PAF_ALLOC
+static unsigned paf_allocations, paf_frees;
+static int paf_allocation_fail;
+void *vjo_paf_alloc(size_t bytes)
+{
+    TEST_CHECK(bytes == sizeof(result_mem));
+    paf_allocations++;
+    return paf_allocation_fail ? NULL : result_mem;
+}
+void vjo_paf_free(void *pointer)
+{
+    if (pointer) {
+        TEST_CHECK(pointer == result_mem);
+        paf_frees++;
+        lifecycle_event('r');
+    }
+}
+void vjo_paf_memory_report(void) {}
+#endif
+
+static void control_poll_hook(void)
+{
+    if (control_polls_before_stop && --control_polls_before_stop == 0)
+        running = 0;
+}
+
+/* Let the real control loop handle one queued completion, then stop. */
+static void poll_control_once(void)
+{
+    control_polls_before_stop = 2;
+    ctl_main(0, NULL);
+}
 static VjoMemConn relay_conn;
 static char relay_reply[1024], relay_request[4096];
 static int relay_connections;
@@ -180,6 +336,7 @@ static void setup(const char *ini)
     hook_log_after = 0;
     hook_log_pending = 0;
     anchor_calls = discover_calls = 0;
+    text_reads = text_controls = 0;
     last_hook_mode = VJO_TEXT_OFF;
     last_reference[0] = 0;
     allocation_bytes = heap_bytes = 0;
@@ -191,14 +348,33 @@ static void setup(const char *ini)
     capture_flags = 0;
     state_read_result = 0;
     raw_calls = raw_rows_copied = 0;
+    raw_row_zero_reads = 0;
     raw_fault_row = 0;
     raw_short_read = 0;
+    raw_sequential = 1;
     allocation_calls = allocation_frees = 0;
     allocation_failure = 1;
     heap_calls = heap_frees = 0;
     heap_available = 0;
     mem_heap = NULL;
     running = 1;
+    net_thread = ctl_thread = net_evf = cmd_lock = capture_lock = view_lock = -1;
+    threads_started = 0;
+    thread_joins = thread_deletes = event_deletes = mutex_deletes = anki_stops = 0;
+    join_failure_uid = -1;
+    anki_stop_error = 0;
+    lifecycle_event_count = 0;
+    lifecycle_events[0] = 0;
+#ifdef VJO_WITH_MEIKI
+    memset(&meiki_bridge, 0, sizeof(meiki_bridge));
+    meiki_bridge.module = -1;
+    bridge_finishes = bridge_starts = 0;
+    bridge_recognitions = bridge_detections = 0;
+    bridge_start_error = VJO_E_OCR_UNAVAILABLE;
+    bridge_inference_error = 0;
+    bridge_finish_error = 0;
+#endif
+    power_ticks = 0;
     region_selected = job_region_selected = 0;
     capture_generation = job_generation = 0;
     memset(&g_view, 0, sizeof(g_view));
@@ -210,7 +386,14 @@ static void setup(const char *ini)
     memset(&plat, 0, sizeof(plat));
     plat.connect = connect_relay;
     plat.disconnect = disconnect_relay;
+#ifdef VJO_PAF_ALLOC
+    result_memory = result_mem;
+    mem_uid = -1;
+    paf_allocations = paf_frees = 0;
+    paf_allocation_fail = 0;
+#else
     mem_uid = 1; /* preallocated game arenas, no SDK allocator needed */
+#endif
     for (int i = 0; i < 2; i++)
         vjo_arena_init(&results[i], result_mem[i], sizeof(result_mem[i]));
     vjo_arena_init(&scratch, scratch_mem, sizeof(scratch_mem));
@@ -232,6 +415,9 @@ static void setup(const char *ini)
     posted_events = 0;
     relay_connections = 0;
     relay_request[0] = '\0';
+    control_polls_before_stop = 0;
+    pending_cmd = VJO_CMD_NONE;
+    pending_pid = 0;
 }
 
 #define RELAY_CONFIG "dictionary = hachidori\nhachidori_host = anki.local:19634\n"
@@ -481,6 +667,11 @@ static void test_region_change_redoes_subtitle_job(void)
 static void native_setup(const char *mode)
 {
     setup(mode);
+#ifdef VJO_PAF_ALLOC
+    /* Installed native paths retain their USER-first ownership policy. */
+    result_memory = NULL;
+    mem_uid = 1;
+#endif
     native_game = 1;
     hook_snapshot.pid = 7;
     hook_snapshot.count = 1;
@@ -963,6 +1154,9 @@ static void test_blank_selected_hook_recovers(void)
 static void remove_game_arenas(void)
 {
     mem_uid = -1;
+#ifdef VJO_PAF_ALLOC
+    result_memory = NULL;
+#endif
     for (int i = 0; i < 2; i++) vjo_arena_init(&results[i], NULL, 0);
 }
 
@@ -1148,11 +1342,386 @@ static void test_native_heap_retires_for_ocr(void)
     cfg.text_source = VJO_SOURCE_OCR;
     allocation_failure = 0;
     TEST_ASSERT(mem_alloc() == 0);
-    TEST_CHECK(heap_frees == 1 && !mem_heap && mem_uid >= 0);
+    TEST_CHECK(heap_frees == 1 && !mem_heap && has_result_memory());
+#ifdef VJO_PAF_ALLOC
+    TEST_CHECK(result_memory == result_mem && mem_uid < 0 && paf_allocations == 1);
+#else
+    TEST_CHECK(mem_uid >= 0);
+#endif
     TEST_CHECK(results[0].size == RESULT_ARENA_SIZE && results[1].size == RESULT_ARENA_SIZE);
     mem_free();
+#ifdef VJO_PAF_ALLOC
+    TEST_CHECK(!allocation_frees && paf_frees == 1 && heap_frees == 1);
+#else
     TEST_CHECK(allocation_frees == 1 && heap_frees == 1);
+#endif
 }
+
+static void test_result_memory_reuse_and_job_gate(void)
+{
+    setup(RELAY_CONFIG);
+    TEST_CHECK(has_result_memory());
+    TEST_CHECK(mem_alloc() == 0); /* reuses both allocator kinds */
+#ifdef VJO_PAF_ALLOC
+    TEST_CHECK(paf_allocations == 0);
+#endif
+    start_job("preallocated memory", 1);
+    TEST_CHECK(job_running && (posted_events & NET_EV_JOB));
+    job_running = 0;
+    mem_free();
+    TEST_CHECK(!has_result_memory());
+    posted_events = 0;
+#ifdef VJO_PAF_ALLOC
+    paf_allocation_fail = 1;
+#endif
+    start_job("without result memory", 1);
+    TEST_CHECK(!job_running && !posted_events);
+    mem_free(); /* repeated cleanup must not free twice */
+#ifdef VJO_PAF_ALLOC
+    TEST_CHECK(paf_allocations == 1 && paf_frees == 1);
+#endif
+}
+
+static void test_game_exit_frees_idle_result_memory(void)
+{
+    setup(RELAY_CONFIG);
+    g_view.list = &cache_data[0].list;
+    on_game_exit();
+    TEST_CHECK(!has_result_memory() && !title_id[0]);
+    TEST_CHECK(!g_view.list && !results[0].base && !results[1].base);
+#ifdef VJO_PAF_ALLOC
+    TEST_CHECK(paf_frees == 1);
+#endif
+}
+
+static void test_game_exit_during_job_frees_after_cancelled_completion(void)
+{
+    setup(RELAY_CONFIG);
+    open_overlay();
+    TEST_ASSERT(job_running && has_result_memory());
+    unsigned old_generation = job_generation;
+    on_game_exit();
+    TEST_CHECK(job_running && has_result_memory());
+    TEST_CHECK(capture_generation != old_generation && job_cancelled(NULL));
+#ifdef VJO_PAF_ALLOC
+    TEST_CHECK(paf_frees == 0); /* worker still owns the allocation */
+#endif
+    cache_data[job_idx].sentence = "stale game";
+    job_text_ready = job_done = 1;
+    poll_control_once();
+    TEST_CHECK(!job_running && !has_result_memory());
+    TEST_CHECK(!cache_ok && active == -1 && !g_view.open && !g_view.list);
+    TEST_CHECK(!results[0].base && !results[1].base);
+#ifdef VJO_PAF_ALLOC
+    TEST_CHECK(paf_frees == 1);
+#endif
+}
+
+static void test_live_job_prevents_idle_cleanup(void)
+{
+    setup(RELAY_CONFIG);
+    open_overlay();
+    TEST_ASSERT(job_running);
+    on_game_exit();
+    poll_control_once(); /* no completion: result memory is still in use */
+    TEST_CHECK(job_running && has_result_memory());
+    TEST_CHECK(power_ticks > 0);
+#ifdef VJO_PAF_ALLOC
+    TEST_CHECK(paf_frees == 0);
+#endif
+}
+
+static void setup_live_worker(void)
+{
+    setup(RELAY_CONFIG);
+    net_thread = TEST_NET;
+    ctl_thread = TEST_CTL;
+    net_evf = TEST_EVENT;
+    cmd_lock = TEST_CMD;
+    capture_lock = TEST_CAPTURE;
+    view_lock = TEST_VIEW;
+    threads_started = anki_started = 1;
+}
+
+static void check_shell_resources_retained(void)
+{
+    TEST_CHECK(net_thread == TEST_NET && ctl_thread == TEST_CTL);
+    TEST_CHECK(net_evf == TEST_EVENT && cmd_lock == TEST_CMD);
+    TEST_CHECK(capture_lock == TEST_CAPTURE && view_lock == TEST_VIEW);
+    TEST_CHECK(anki_started && has_result_memory());
+    TEST_CHECK(thread_deletes == 0 && event_deletes == 0 && mutex_deletes == 0);
+#ifdef VJO_PAF_ALLOC
+    TEST_CHECK(paf_frees == 0);
+#endif
+}
+
+static void check_shell_resources_released(void)
+{
+    TEST_CHECK(net_thread == -1 && ctl_thread == -1 && net_evf == -1);
+    TEST_CHECK(cmd_lock == -1 && capture_lock == -1 && view_lock == -1);
+    TEST_CHECK(!threads_started && !anki_started && !has_result_memory());
+    TEST_CHECK(!results[0].base && !results[1].base);
+    TEST_CHECK(thread_deletes == 2 && event_deletes == 1 && mutex_deletes == 3);
+#ifdef VJO_PAF_ALLOC
+    TEST_CHECK(paf_frees == 1);
+#endif
+}
+
+static void test_worker_stop_success_and_idempotence(void)
+{
+    setup_live_worker();
+    TEST_CHECK(vjo_worker_stop() == 0);
+    TEST_CHECK(!running && (posted_events & NET_EV_QUIT));
+    TEST_CHECK(thread_joins == 2 && anki_stops == 1);
+    check_shell_resources_released();
+#ifdef VJO_WITH_MEIKI
+    TEST_CHECK(bridge_finishes == 1);
+    TEST_CHECK(!strcmp(lifecycle_events, "ncbaNCrempv"));
+#elif defined(VJO_PAF_ALLOC)
+    TEST_CHECK(!strcmp(lifecycle_events, "ncaNCrempv"));
+#else
+    TEST_CHECK(!strcmp(lifecycle_events, "ncaNCempv"));
+#endif
+    TEST_CHECK(vjo_worker_stop() == 0);
+    TEST_CHECK(thread_joins == 2); /* no joins or deletions of expired handles */
+    check_shell_resources_released();
+}
+
+static void test_worker_stop_join_failure_then_retry(void)
+{
+    const SceUID failed_threads[] = {TEST_NET, TEST_CTL};
+    for (unsigned i = 0; i < sizeof(failed_threads) / sizeof(failed_threads[0]); ++i) {
+        setup_live_worker();
+        join_failure_uid = failed_threads[i];
+        TEST_CHECK(vjo_worker_stop() < 0);
+        TEST_CHECK(!running && (posted_events & NET_EV_QUIT));
+        TEST_CHECK(threads_started && thread_joins == i + 1);
+        TEST_CHECK(anki_stops == 0);
+        check_shell_resources_retained();
+#ifdef VJO_WITH_MEIKI
+        TEST_CHECK(bridge_finishes == 0); /* engine cleanup waits for worker ownership */
+#endif
+        join_failure_uid = -1;
+        TEST_CHECK(vjo_worker_stop() == 0);
+        TEST_CHECK(thread_joins == i + 3 && anki_stops == 1);
+        check_shell_resources_released();
+        TEST_CHECK(vjo_worker_stop() == 0);
+        TEST_CHECK(thread_joins == i + 3);
+        check_shell_resources_released();
+    }
+}
+
+static void test_worker_stop_anki_failure_then_retry(void)
+{
+    setup_live_worker();
+    anki_stop_error = -1;
+    TEST_CHECK(vjo_worker_stop() < 0);
+    TEST_CHECK(!running && !threads_started && thread_joins == 2);
+    TEST_CHECK(anki_stops == 1);
+    check_shell_resources_retained();
+#ifdef VJO_WITH_MEIKI
+    TEST_CHECK(bridge_finishes == 1);
+#endif
+    TEST_CHECK(vjo_worker_stop() < 0);
+    TEST_CHECK(thread_joins == 2 && anki_stops == 2);
+    check_shell_resources_retained();
+    anki_stop_error = 0;
+    TEST_CHECK(vjo_worker_stop() == 0);
+    TEST_CHECK(thread_joins == 2 && anki_stops == 3);
+    check_shell_resources_released();
+    TEST_CHECK(vjo_worker_stop() == 0);
+    TEST_CHECK(thread_joins == 2);
+    check_shell_resources_released();
+}
+
+#ifdef VJO_WITH_MEIKI
+static void test_worker_stop_bridge_failure_then_retry(void)
+{
+    setup_live_worker();
+    meiki_bridge.module = 77;
+    meiki_bridge.metadata = borrowed_metadata;
+    meiki_bridge.workspace = borrowed_workspace;
+    meiki_bridge.preprocessing = borrowed_input;
+    bridge_finish_error = VJO_E_SOURCE;
+    TEST_CHECK(vjo_worker_stop() < 0);
+    TEST_CHECK(!running && !threads_started && thread_joins == 2);
+    TEST_CHECK(bridge_finishes == 1 && !strcmp(lifecycle_events, "ncb"));
+    TEST_CHECK(anki_stops == 0);
+    check_shell_resources_retained();
+    TEST_CHECK(meiki_bridge.module == 77 && meiki_bridge.metadata == borrowed_metadata);
+    TEST_CHECK(meiki_bridge.workspace == borrowed_workspace);
+    TEST_CHECK(meiki_bridge.preprocessing == borrowed_input);
+
+    TEST_CHECK(vjo_worker_stop() < 0); /* persistent refusal keeps the same owner */
+    TEST_CHECK(thread_joins == 2 && bridge_finishes == 2);
+    TEST_CHECK(anki_stops == 0);
+    check_shell_resources_retained();
+    TEST_CHECK(meiki_bridge.module == 77 && meiki_bridge.metadata == borrowed_metadata);
+    TEST_CHECK(meiki_bridge.workspace == borrowed_workspace);
+    TEST_CHECK(meiki_bridge.preprocessing == borrowed_input);
+
+    bridge_finish_error = 0;
+    TEST_CHECK(vjo_worker_stop() == 0);
+    TEST_CHECK(thread_joins == 2 && bridge_finishes == 3 && anki_stops == 1);
+    check_shell_resources_released();
+    TEST_CHECK(meiki_bridge.module == -1 && !meiki_bridge.metadata);
+    TEST_CHECK(!meiki_bridge.workspace && !meiki_bridge.preprocessing);
+    TEST_CHECK(!strcmp(lifecycle_events, "ncbbbaNCrempv"));
+    TEST_CHECK(vjo_worker_stop() == 0);
+    TEST_CHECK(thread_joins == 2);
+    check_shell_resources_released();
+}
+#endif
+
+#ifdef VJO_WITH_MEIKI
+static void meiki_capture_setup(void)
+{
+    native_setup(RELAY_CONFIG "text_source = ocr\nocr_backend = meiki\n"
+                 "meiki_layout = dialogue_box\nocr_mode = auto\n");
+    /* Even a game with an available native source must remain OCR-only. */
+    hook_snapshot.selected = hook_snapshot.candidates[0].id;
+    hook_snapshot.current = hook_snapshot.candidates[0];
+    activate_game(7, "PCSG00001", VJO_GAME);
+    region_selected = 1;
+    bridge_start_error = VJO_OK;
+    capture_reply = 71;
+    capture_waits = 2;
+    raw_fault_row = UINT32_MAX;
+    raw_sequential = 0; /* detector and recognizer each read the same capture */
+    kernel_state.width = 96;
+    kernel_state.height = 32;
+    kernel_state.raw_stride = kernel_state.width * 4;
+    kernel_state.capture_checksum = 0x12345678;
+    capture_connections = 0;
+    plat.connect = connect_capture; /* Any unexpected Lens call is observable. */
+    plat.disconnect = disconnect_capture;
+    plat.random = capture_random;
+    plat.plain_http = 1;
+}
+
+static void test_meiki_ocr_source_blocks_native_and_lens(void)
+{
+    meiki_capture_setup();
+    TEST_CHECK(VJO_API_VERSION == 8 && cfg.text_source == VJO_SOURCE_OCR);
+    TEST_CHECK(!native_enabled() && !auto_mode() && !background_wanted());
+    poll_hooks();
+    pending_cmd = VJO_CMD_HOOK_DISCOVER;
+    on_command();
+    vjo_post_hook(hook_snapshot.session, hook_snapshot.selected);
+    on_command();
+    TEST_CHECK(!text_reads && !text_controls && !anchor_calls && !discover_calls);
+    TEST_CHECK(!text_started && !g_view.hook_picker && !job_running);
+
+    open_overlay();
+    TEST_ASSERT(job_running && !job_native && !job_anchor && job_region_selected);
+    job_lookup = 0; /* Exercise the OCR boundary without a dictionary socket. */
+    uint32_t checksum = 0;
+    TEST_ASSERT(run_job(&results[job_idx], &cache_data[job_idx], &checksum) == VJO_OK);
+    TEST_CHECK(capture_calls == 1 && capture_flags == 0 && !discard_requests);
+    TEST_CHECK(raw_row_zero_reads >= 2); /* Actual detector + recognition passes. */
+    TEST_CHECK(bridge_starts == 1 && bridge_detections == 1 && bridge_recognitions == 1);
+    TEST_CHECK(bridge_finishes == 1 && meiki_bridge.module == -1);
+    TEST_CHECK(checksum == kernel_state.capture_checksum);
+    TEST_CHECK(!strcmp(cache_data[job_idx].sentence, "猫"));
+    TEST_CHECK(!capture_connections && !relay_connections);
+    on_job_text();
+    job_done = 1; on_job_done();
+    TEST_CHECK(!job_running && !g_view.hook_picker && !text_started);
+    TEST_CHECK(!text_reads && !text_controls && !anchor_calls && !discover_calls);
+    on_game_exit();
+    TEST_CHECK(!has_result_memory() && !meiki_bridge.workspace && !g_view.list);
+}
+
+static void test_meiki_capture_errors_cleanup_without_fallback(void)
+{
+    static const struct {
+        const char *name;
+        int request, result, stride_extra, start_error, inference_error, finish_error, expected;
+        unsigned starts, recognitions;
+    } cases[] = {
+        {"capture memory", VJO_ERR_NO_MEMORY, 0, 0, 0, 0, 0, VJO_E_OOM, 0, 0},
+        {"capture copy", 71, VJO_ERR_COPY, 0, 0, 0, 0, VJO_E_SOURCE, 0, 0},
+        {"invalid stride", 71, 0, 4, 0, 0, 0, VJO_E_SOURCE, 0, 0},
+        {"module unavailable", 71, 0, 0, VJO_E_OCR_UNAVAILABLE, 0, 0, VJO_E_OCR_UNAVAILABLE, 1, 0},
+        {"recognizer error", 71, 0, 0, 0, VJO_E_SOURCE, 0, VJO_E_SOURCE, 1, 1},
+        {"module finish error", 71, 0, 0, 0, 0, VJO_E_SOURCE, VJO_E_SOURCE, 1, 1},
+    };
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(*cases); ++i) {
+        meiki_capture_setup();
+        capture_reply = cases[i].request;
+        kernel_state.capture_result = cases[i].result;
+        kernel_state.raw_stride += (unsigned)cases[i].stride_extra;
+        bridge_start_error = cases[i].start_error;
+        bridge_inference_error = cases[i].inference_error;
+        bridge_finish_error = cases[i].finish_error;
+        open_overlay();
+        TEST_ASSERT(job_running && !job_native && !job_anchor);
+        uint32_t checksum = 0;
+        int rc = run_job(&results[job_idx], &cache_data[job_idx], &checksum);
+        TEST_CHECK_(rc == cases[i].expected, "%s: rc=%d", cases[i].name, rc);
+        TEST_CHECK(cache_data[job_idx].failed_stage == VJO_STAGE_OCR && !job_text_ready);
+        TEST_CHECK(bridge_starts == cases[i].starts && bridge_recognitions == cases[i].recognitions);
+        TEST_CHECK(bridge_finishes == 1 && capture_flags == 0 && !discard_requests);
+        TEST_CHECK(!capture_connections && !relay_connections && !text_reads && !text_controls);
+        if (cases[i].finish_error) {
+            TEST_CHECK(meiki_bridge.module == 77 && meiki_bridge.metadata == borrowed_metadata);
+            TEST_CHECK(meiki_bridge.workspace == borrowed_workspace && meiki_bridge.input == bridge_tensor);
+            bridge_finish_error = 0;
+            TEST_CHECK(vjo_meiki_bridge_finish(&meiki_bridge) == VJO_OK);
+        }
+        TEST_CHECK(meiki_bridge.module == -1 && !meiki_bridge.workspace);
+        job_done = 1; on_job_done();
+        TEST_CHECK(!job_running && g_view.status_is_error && !g_view.hook_picker);
+        on_game_exit();
+        TEST_CHECK(!has_result_memory() && !results[0].base && !results[1].base);
+    }
+}
+#endif
+
+static void test_meiki_manual_and_no_fallback(void)
+{
+    setup("ocr_backend = meiki\nocr_mode = auto\n" RELAY_CONFIG);
+    TEST_CHECK(cfg.ocr_backend == VJO_OCR_MEIKI);
+    TEST_CHECK(!auto_mode() && !background_wanted());
+    open_overlay();
+    TEST_ASSERT(job_running);
+    VjoOverlayData out;
+    uint32_t checksum = 0;
+#ifdef VJO_WITH_MEIKI
+    TEST_CHECK(run_job(&results[job_idx], &out, &checksum) == VJO_E_OCR_REGION);
+    TEST_CHECK(!bridge_starts && !bridge_finishes); /* selection is checked before capture/load */
+#else
+    TEST_CHECK(run_job(&results[job_idx], &out, &checksum) == VJO_E_OCR_UNAVAILABLE);
+#endif
+    TEST_CHECK(out.failed_stage == VJO_STAGE_OCR && !relay_connections);
+}
+
+static void test_meiki_layout_invalidates_cache(void)
+{
+    setup("dictionary = local\nocr_backend = meiki\n");
+    VjoConfig previous = cfg;
+    cache_ok = 1;
+    loaded_config.meiki_layout = VJO_MEIKI_DIALOGUE_BOX;
+    apply_config();
+    TEST_CHECK(!cache_ok && !same_pipeline(&previous, &cfg));
+    previous.ocr_backend = cfg.ocr_backend = VJO_OCR_LENS;
+    TEST_CHECK(same_pipeline(&previous, &cfg));
+}
+
+#ifdef VJO_PAF_ALLOC
+static void test_paf_allocation_failure_refuses_job(void)
+{
+    setup(RELAY_CONFIG);
+    mem_free();
+    paf_allocations = paf_frees = 0;
+    paf_allocation_fail = 1;
+    open_overlay();
+    TEST_CHECK(paf_allocations == 1 && paf_frees == 0);
+    TEST_CHECK(!has_result_memory() && !job_running && !posted_events);
+    TEST_CHECK(g_view.open && g_view.status_is_error);
+    TEST_CHECK(!strcmp(g_view.status, "Not enough memory for the overlay"));
+}
+#endif
 
 TEST_LIST = {
     {"capture_allocation_status_identifies_physical_error", test_capture_allocation_status_identifies_physical_error},
@@ -1182,7 +1751,24 @@ TEST_LIST = {
     {"lost_hook_stays_manual", test_lost_hook_stays_manual},
     {"hook_cache_uses_unfiltered_source", test_hook_cache_uses_unfiltered_source},
     {"blank_selected_hook_recovers", test_blank_selected_hook_recovers},
+    {"result_memory_reuse_and_job_gate", test_result_memory_reuse_and_job_gate},
+    {"game_exit_frees_idle_result_memory", test_game_exit_frees_idle_result_memory},
+    {"game_exit_during_job_frees_after_cancelled_completion", test_game_exit_during_job_frees_after_cancelled_completion},
+    {"live_job_prevents_idle_cleanup", test_live_job_prevents_idle_cleanup},
+    {"worker_stop_success_and_idempotence", test_worker_stop_success_and_idempotence},
+    {"worker_stop_join_failure_then_retry", test_worker_stop_join_failure_then_retry},
+    {"worker_stop_anki_failure_then_retry", test_worker_stop_anki_failure_then_retry},
+#ifdef VJO_WITH_MEIKI
+    {"worker_stop_bridge_failure_then_retry", test_worker_stop_bridge_failure_then_retry},
+    {"meiki_ocr_source_blocks_native_and_lens", test_meiki_ocr_source_blocks_native_and_lens},
+    {"meiki_capture_errors_cleanup_without_fallback", test_meiki_capture_errors_cleanup_without_fallback},
+#endif
+#ifdef VJO_PAF_ALLOC
+    {"paf_allocation_failure_refuses_job", test_paf_allocation_failure_refuses_job},
+#endif
     {"ncnn_manual_and_no_fallback", test_ncnn_manual_and_no_fallback},
+    {"meiki_manual_and_no_fallback", test_meiki_manual_and_no_fallback},
+    {"meiki_layout_invalidates_cache", test_meiki_layout_invalidates_cache},
     {"ocr_context_changes", test_ocr_context_changes},
     {"region_change_redoes_subtitle_job", test_region_change_redoes_subtitle_job},
     {"local_worker_and_config_changes", test_local_worker_and_config_changes},

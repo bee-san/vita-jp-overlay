@@ -12,6 +12,16 @@
 #include "../core/text_source.h"
 #include "../include/vjo_import.h"
 #include "shell.h"
+#ifdef VJO_WITH_MEIKI
+#include "meiki_bridge.h"
+static VjoMeikiBridge meiki_bridge = {.module = -1};
+#endif
+#ifdef VJO_PAF_ALLOC
+extern void *vjo_paf_alloc(size_t bytes);
+extern void vjo_paf_free(void *pointer);
+extern void vjo_paf_memory_report(void);
+static void *result_memory;
+#endif
 
 /* Memory: two result arenas (the overlay shows one while the network thread
  * fills the other) in one memblock allocated only when a job needs it, plus a small
@@ -269,51 +279,66 @@ static void picker_log_action(const char *why)
 
 static void mem_free(void);
 
+static int has_result_memory(void)
+{
+#ifdef VJO_PAF_ALLOC
+    if (result_memory) return 1;
+#endif
+    return mem_uid >= 0 || mem_heap != NULL;
+}
+
 static int mem_alloc(void)
 {
     void *base = NULL;
-    uint8_t *p;
     size_t arena_size = RESULT_ARENA_SIZE;
     size_t bytes = job_anchor ? RESULT_ARENA_SIZE : MEM_SIZE;
-    /* A later OCR request needs the full result capacity. No job is running
-     * when this function is called, so retire the native-only fallback. */
-    if ((mem_uid >= 0 || mem_heap) &&
+    /* Retire incompatible anchor/native arenas before a later OCR request. */
+    if (has_result_memory() &&
         ((job_anchor && mem_kind != MEM_ANCHOR) ||
          (!job_anchor && mem_kind == MEM_ANCHOR) ||
          (mem_kind == MEM_NATIVE && (!native_enabled() || !text_state.current.id))))
         mem_free();
-    if (mem_uid >= 0 || mem_heap)
-        return 0;
-    if (now_us() < mem_backoff.until)
-        return -1;
-    mem_uid = sceKernelAllocMemBlock("VjoShellMem", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW,
-                                     (bytes + 0xFFF) & ~0xFFF, NULL);
-    if (mem_uid < 0) {
-        vjo_log("shell memblock (%d KiB) failed 0x%08X", (unsigned)(bytes >> 10), mem_uid);
-        /* Native lookup needs neither the JPEG nor TLS OCR workspace. Paf
-         * can have unused space in pages it already owns even when a new
-         * physical memblock cannot be allocated. Keep this fallback bounded;
-         * an oversized dictionary result still leaves raw text available. */
-        if (job_anchor)
-            mem_heap = vjo_shell_heap_alloc(RESULT_ARENA_SIZE);
-        else if (native_enabled() && text_state.current.id)
-            mem_heap = vjo_shell_heap_alloc(2 * NATIVE_ARENA_SIZE);
-        if (!mem_heap) {
+    if (has_result_memory()) return 0;
+    if (now_us() < mem_backoff.until) return -1;
+#ifdef VJO_PAF_ALLOC
+    /* Native hooks retain their existing USER-first bounded fallback. Pure
+     * OCR borrows Paf's reserved pages rather than another USER memblock. */
+    if (!native_enabled()) {
+        vjo_paf_memory_report();
+        result_memory = vjo_paf_alloc(bytes);
+        if (!result_memory) {
+            vjo_log("result arenas: insufficient Paf heap (%u KiB)", (unsigned)(bytes >> 10));
             backoff_note(&mem_backoff, 1);
-            return mem_uid;
+            return -1;
         }
-        base = mem_heap;
-        if (!job_anchor) arena_size = NATIVE_ARENA_SIZE;
-        vjo_log("%s workspace: Paf heap, %u KiB", job_anchor ? "OCR match" : "native dictionary",
-                (unsigned)((job_anchor ? arena_size : 2 * arena_size) >> 10));
-    } else if (sceKernelGetMemBlockBase(mem_uid, &base) < 0 || !base) {
-        sceKernelFreeMemBlock(mem_uid);
-        mem_uid = -1;
-        backoff_note(&mem_backoff, 1);
-        return -1;
+        base = result_memory;
+    } else
+#endif
+    {
+        mem_uid = sceKernelAllocMemBlock("VjoShellMem", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW,
+                                         (bytes + 0xFFF) & ~0xFFF, NULL);
+        if (mem_uid < 0) {
+            vjo_log("shell memblock (%d KiB) failed 0x%08X", (unsigned)(bytes >> 10), mem_uid);
+            if (job_anchor) mem_heap = vjo_shell_heap_alloc(RESULT_ARENA_SIZE);
+            else if (native_enabled() && text_state.current.id)
+                mem_heap = vjo_shell_heap_alloc(2 * NATIVE_ARENA_SIZE);
+            if (!mem_heap) {
+                backoff_note(&mem_backoff, 1);
+                return mem_uid;
+            }
+            base = mem_heap;
+            if (!job_anchor) arena_size = NATIVE_ARENA_SIZE;
+            vjo_log("%s workspace: Paf heap, %u KiB", job_anchor ? "OCR match" : "native dictionary",
+                    (unsigned)((job_anchor ? arena_size : 2 * arena_size) >> 10));
+        } else if (sceKernelGetMemBlockBase(mem_uid, &base) < 0 || !base) {
+            sceKernelFreeMemBlock(mem_uid);
+            mem_uid = -1;
+            backoff_note(&mem_backoff, 1);
+            return -1;
+        }
     }
     backoff_note(&mem_backoff, 0);
-    p = (uint8_t *)base;
+    uint8_t *p = base;
     vjo_arena_init(&results[0], p, arena_size);
     vjo_arena_init(&results[1], job_anchor ? NULL : p + arena_size, job_anchor ? 0 : arena_size);
     mem_kind = job_anchor ? MEM_ANCHOR : mem_heap ? MEM_NATIVE : MEM_RESULTS;
@@ -324,13 +349,20 @@ static int mem_alloc(void)
 
 static void mem_free(void)
 {
-    if (mem_uid >= 0 || mem_heap) {
+    if (has_result_memory()) {
         vjo_view_lock();
         g_view.list = NULL;
         vjo_view_unlock();
+#ifdef VJO_PAF_ALLOC
+        if (result_memory) vjo_paf_free(result_memory);
+        else
+#endif
         if (mem_heap) vjo_shell_heap_free(mem_heap);
         else sceKernelFreeMemBlock(mem_uid);
     }
+#ifdef VJO_PAF_ALLOC
+    result_memory = NULL;
+#endif
     mem_heap = NULL;
     mem_uid = -1;
     mem_kind = MEM_RESULTS;
@@ -563,6 +595,48 @@ static int run_local_ocr(VjoArena *a, VjoOverlayData *out, uint32_t *checksum)
     return rc;
 }
 
+static int run_meiki_ocr(VjoArena *a, VjoOverlayData *out, uint32_t *checksum)
+{
+#ifdef VJO_WITH_MEIKI
+    VjoState st;
+    VjoMeikiStats stats = {0};
+    if (!job_region_selected) return VJO_E_OCR_REGION;
+    if (job_cancelled(NULL)) return VJO_E_CANCELLED;
+    char *text = vjo_arena_alloc(a, VJO_OCR_TEXT_CAP);
+    if (!text) return VJO_E_OOM;
+    sceKernelLockMutex(capture_lock, 1, NULL);
+    int rc = wait_capture(0, &st);
+    if (!rc && st.raw_stride != st.width * 4) rc = VJO_E_SOURCE;
+    if (!rc) rc = vjo_meiki_bridge_start_mode(&meiki_bridge, &plat, job_cfg.ocr_model_dir,
+                      job_cfg.meiki_layout == VJO_MEIKI_DIALOGUE_BOX, job_cancelled, NULL);
+    if (!rc) {
+        VjoOcrImage image = {NULL, st.width, st.height, raw_rows, job_cancelled};
+        VjoMeikiEngine engine = vjo_meiki_bridge_engine(&meiki_bridge);
+        rc = (job_cfg.meiki_layout == VJO_MEIKI_DIALOGUE_BOX
+               ? vjo_meiki_ocr_detected : vjo_meiki_ocr_single_line)(
+                           job_cfg.ocr_model_dir, &image, &engine,
+                           meiki_bridge.input, meiki_bridge.input_elements,
+                           meiki_bridge.scratch, MEIKI_PREPROCESS_SCRATCH_BYTES,
+                           text, VJO_OCR_TEXT_CAP, &stats);
+        *checksum = st.capture_checksum;
+    }
+    /* Never release buffers while the module could still reference them. */
+    int finish_rc = vjo_meiki_bridge_finish(&meiki_bridge);
+    if (!rc) rc = finish_rc;
+    sceKernelUnlockMutex(capture_lock, 1);
+    vjo_log("Meiki rc=%d lines=%u/%u pool peak=%u KiB remaining=%u; metadata brk peak=%u KiB tainted=%u",
+            rc, stats.completed_lines, stats.lines, (unsigned)(stats.heap_peak >> 10),
+            (unsigned)stats.heap_remaining, meiki_bridge.module_stats.metadata_brk_peak >> 10,
+            meiki_bridge.module_stats.tainted);
+    if (!rc && job_cancelled(NULL)) rc = VJO_E_CANCELLED;
+    if (!rc) rc = vjo_overlay_ocr_text(a, &job_cfg, text, out);
+    return rc;
+#else
+    (void)a; (void)out; (void)checksum;
+    return VJO_E_OCR_UNAVAILABLE;
+#endif
+}
+
 static int run_job(VjoArena *a, VjoOverlayData *out, uint32_t *checksum)
 {
     VjoState st;
@@ -579,10 +653,17 @@ static int run_job(VjoArena *a, VjoOverlayData *out, uint32_t *checksum)
         *checksum = 0;
         goto recognized;
     }
-    if (job_cfg.ocr_backend == VJO_OCR_NCNN) {
-        int rc = run_local_ocr(a, out, checksum);
+    if (job_cfg.ocr_backend == VJO_OCR_NCNN || job_cfg.ocr_backend == VJO_OCR_MEIKI) {
+        int rc = job_cfg.ocr_backend == VJO_OCR_MEIKI
+            ? run_meiki_ocr(a, out, checksum) : run_local_ocr(a, out, checksum);
         if (rc) {
             out->failed_stage = VJO_STAGE_OCR;
+            if (job_cfg.ocr_backend == VJO_OCR_MEIKI && rc == VJO_E_OCR_REGION)
+                out->err.detail = job_cfg.meiki_layout == VJO_MEIKI_SINGLE_LINE
+                    ? "Select one horizontal line with Square, then save with Cross."
+                    : "Select a horizontal dialogue area with Square, then save with Cross.";
+            if (job_cfg.ocr_backend == VJO_OCR_MEIKI && rc == VJO_E_OCR_MODEL)
+                out->err.detail = "Install the pinned Meiki model files for the selected layout.";
             return out->err.rc = rc;
         }
         goto recognized;
@@ -719,6 +800,7 @@ static int same_dictionary(const VjoConfig *a, const VjoConfig *b)
 static int same_pipeline(const VjoConfig *a, const VjoConfig *b)
 {
     return same_dictionary(a, b) && a->text_source == b->text_source && a->ocr_backend == b->ocr_backend &&
+           (a->ocr_backend != VJO_OCR_MEIKI || a->meiki_layout == b->meiki_layout) &&
            a->non_japanese_filter == b->non_japanese_filter &&
            !sceClibStrcmp(a->ocr_model_dir, b->ocr_model_dir);
 }
@@ -1226,7 +1308,7 @@ static void activate_game(SceUID pid, const char *tid, int mode)
     vjo_log("game %s started: dictionary %s (key %s), trigger %s, subtitles %s, ocr %s, ocr_mode %s", title_id,
             vjo_dict_name(cfg.dictionary), vjo_config_api_key(&cfg)[0] ? "set" : "MISSING",
             vjo_trigger_name(cfg.toggle_button), vjo_trigger_name(cfg.subtitle_button),
-            cfg.ocr_backend == VJO_OCR_NCNN ? "ncnn" : "lens",
+            cfg.ocr_backend == VJO_OCR_NCNN ? "ncnn" : cfg.ocr_backend == VJO_OCR_MEIKI ? "meiki" : "lens",
             cfg.ocr_mode == VJO_OCR_AUTO ? "auto" : "on_press");
 }
 
@@ -1386,6 +1468,8 @@ static int ctl_main(SceSize args, void *argp)
         vjoWaitEvent(VJO_EV_TRIGGER | VJO_EV_SUBTITLE | VJO_EV_REGION_STABLE | VJO_EV_GAME_START |
                          VJO_EV_GAME_EXIT,
                      &bits, POLL_TIMEOUT_US);
+        /* Keep the independent control thread awake while inference runs. */
+        if (job_running) sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DEFAULT);
 
         if (bits & VJO_EV_GAME_EXIT)
             on_game_exit();
@@ -1407,7 +1491,7 @@ static int ctl_main(SceSize args, void *argp)
         if (bits & VJO_EV_REGION_STABLE)
             stable_pending = 1;
         auto_prefetch();
-        if (!game_active() && !job_running && (mem_uid >= 0 || mem_heap) && ov == OV_CLOSED)
+        if (!game_active() && !job_running && has_result_memory() && ov == OV_CLOSED)
             mem_free();
     }
     return 0;
@@ -1490,22 +1574,34 @@ int vjo_worker_start(void)
 }
 
 /* Also undoes a partial vjo_worker_start. */
-void vjo_worker_stop(void)
+int vjo_worker_stop(void)
 {
     running = 0;
     if (net_evf >= 0)
         sceKernelSetEventFlag(net_evf, NET_EV_QUIT);
     if (threads_started) {
-        sceKernelWaitThreadEnd(net_thread, NULL, NULL);
-        sceKernelWaitThreadEnd(ctl_thread, NULL, NULL);
+        if (sceKernelWaitThreadEnd(net_thread, NULL, NULL) < 0 ||
+            sceKernelWaitThreadEnd(ctl_thread, NULL, NULL) < 0) {
+            vjo_log("worker join failed; keeping Shell resources for a stop retry");
+            return -1;
+        }
         threads_started = 0;
+    }
+#ifdef VJO_WITH_MEIKI
+    if (vjo_meiki_bridge_finish(&meiki_bridge)) {
+        vjo_log("Meiki cleanup pending; refusing Shell unload");
+        return -1;
+    }
+#endif
+    if (vjo_anki_stop() < 0) {
+        vjo_log("Anki cleanup pending; refusing Shell unload");
+        return -1;
     }
     if (net_thread >= 0)
         sceKernelDeleteThread(net_thread);
     if (ctl_thread >= 0)
         sceKernelDeleteThread(ctl_thread);
     net_thread = ctl_thread = -1;
-    vjo_anki_stop();
     anki_started = 0;
     mem_free();
     if (net_evf >= 0)
@@ -1517,4 +1613,5 @@ void vjo_worker_stop(void)
     if (view_lock >= 0)
         sceKernelDeleteMutex(view_lock);
     net_evf = cmd_lock = capture_lock = view_lock = -1;
+    return 0;
 }

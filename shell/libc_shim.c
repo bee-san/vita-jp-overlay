@@ -2,6 +2,10 @@
  * and BearSSL use to SceLibKernel's sceClib. */
 #include <psp2/kernel/clib.h>
 #include <stddef.h>
+#ifdef VJO_WITH_MEIKI
+#include <paf/std/math.h>
+float floorf(float x) { return sce_paf_floorf(x); }
+#endif
 
 void *memcpy(void *d, const void *s, size_t n) { return sceClibMemcpy(d, s, n); }
 void *memmove(void *d, const void *s, size_t n) { return sceClibMemmove(d, s, n); }

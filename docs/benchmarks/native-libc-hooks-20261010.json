@@ -20,18 +20,18 @@
   "validation": {
     "host_command": "ctest --test-dir build/host --output-on-failure",
     "host_suites_passed": 10,
-    "host_elapsed_seconds": 2.14,
+    "host_elapsed_seconds": 5.44,
     "production_kernel_cases_passed": 10,
     "vita_command": "cmake --build build/vita -j4",
     "vita_build": "Release, VJO_WITH_NCNN=OFF, VJO_TEXT_TEST_APP=ON",
     "vita_build_passed": true,
     "packaged_syscall_abi_passed": true,
-    "emulator_command": "python3 tools/test_vita3k_hooks.py --vpk build/vita/vjo-hook-test.vpk --workdir build/vita3k-libc-test",
+    "emulator_command": "python3 tools/test_vita3k_hooks.py --vpk build/vita/vjo-hook-test.vpk --workdir build/vita3k-libc-ranking-test",
     "emulator_checks": {
-      "portable": 43,
+      "portable": 52,
       "observer": 192,
       "plugin": 20,
-      "total": 255,
+      "total": 264,
       "failures": 0
     },
     "emulator_plugin_cases": "Both C libraries, bounded strcpy transport, preserved return values, overlapping memmove, zero-length copy ignored, all hooks removed on unload",
@@ -86,12 +86,30 @@
         "This helper filtered short/non-Japanese events before ranking; selectable-source continuity requires a separate full-feed snapshot check",
         "No physical kernel mapping, overlay rendering, speed or memory measurement"
       ]
+    },
+    "kernel_instruction_audit": {
+      "arm_instructions": 5921,
+      "fpu_neon_instructions": 0
+    },
+    "source_table_bytes": 26480,
+    "ranking_regression": {
+      "problem": "Frequent short and low-Japanese copy streams filled the five picker choices despite three retained current dialogue streams",
+      "change": "Japanese presence, OCR score, Japanese fraction, normalized length, updates, stable ID; no new allocation",
+      "invented_fixture": "Five active noise/menu streams and three quiet complete Japanese streams; OCR priority and selected short-line updates preserved",
+      "old_comparator_failures": 4,
+      "new_portable_checks_passed": 52,
+      "real_game_baseline": {
+        "first_page_matching_sources": 3,
+        "first_page_matching_sources_in_top_five": 0,
+        "later_page_matching_sources_in_top_five": 1
+      },
+      "fixed_game_picker_check": "Tracked separately from the initial filtered-bridge capture experiment; real-game rerun pending at this record"
     }
   },
   "artifacts": {
     "VitaJPOverlay_Kernel.skprx": {
-      "bytes": 38604,
-      "sha256": "97d4901e8de5e58bcd9c1b2c926e7fb3fa7532b9d74bd93997203cc6ee90a1c7"
+      "bytes": 38620,
+      "sha256": "6cc2dc868dc4403bcab252d689acd2f0779a55f9bd8069654b335eaffa571933"
     },
     "VitaJPOverlay_Shell.suprx": {
       "bytes": 156196,

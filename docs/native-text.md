@@ -48,7 +48,7 @@ entries so an untested interceptor does not load into every app.
    folded. At least four normalized characters are required. Equal best scores
    require a manual choice.
 3. The picker shows at most five candidates. Japanese text ranks first, followed
-   by OCR score, observed changes, Japanese fraction, length and stable ID.
+   by OCR score, Japanese fraction, length, observed changes and stable ID.
    Use ▲/▼ and × to choose. A **hook** observes a call site; a **pointer** follows
    a changing string pointer; a **buffer** rereads the same address. A static
    script buffer can match perfectly yet never advance: choose a hook or pointer
@@ -179,7 +179,10 @@ result in the game plugin. Zero-length memory copies remain ignored.
 The ARM self-test explicitly imports both libraries (avoiding newlib's local
 implementations), exercises each interceptor, checks return values and an
 overlapping `memmove`, and checks that unloading restores all four retail
-imports. It passed 255 checks in isolated Vita3K. The real-game experiment used
+imports. It passed 264 checks in isolated Vita3K, including a regression for
+frequent short/binary streams hiding complete dialogue. Ranking prefers
+Japanese fraction and length before update counts; selected short lines still
+update normally, and OCR evidence keeps priority. The real-game experiment used
 an emulator-only user-space transport with the production decoder; it does not
 validate kernel page mapping or the physical overlay. See the
 [retail-hook measurements](benchmarks/native-libc-hooks-20261010.json).

@@ -130,7 +130,7 @@ const char *vjo_config_default_text(void)
            "; acts on release.\n"
            "subtitle_button = select+r\n"
            "\n"
-           "; Text: auto (OCR once to choose a native hook) | hooks (manual, no OCR) | ocr\n"
+           "; Text: auto (read screenshot and show native text matches) | hooks (manual, no OCR) | ocr\n"
            "text_source = auto\n"
            "\n"
            "; OCR: lens (online) | ncnn (experimental CPU-only PP-OCRv5 mobile)\n"

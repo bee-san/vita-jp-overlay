@@ -172,6 +172,22 @@ static TrigHold hold[HOLD_PORTS][TRIG_COUNT];
 static volatile int hold_busy;
 static uint32_t hold_gen;
 
+/* At most one line per condition during each overlay opening. */
+static volatile uint32_t input_trace;
+enum { INPUT_TRACE_FIRST = 1, INPUT_TRACE_CROSS = 2, INPUT_TRACE_COPY = 4,
+       INPUT_TRACE_FOREIGN = 8, INPUT_TRACE_EMPTY = 16 };
+
+void input_trace_reset(void)
+{
+    __atomic_store_n(&input_trace, 0, __ATOMIC_RELEASE);
+}
+
+static int input_trace_claim(uint32_t bit)
+{
+    if (__atomic_load_n(&input_trace, __ATOMIC_RELAXED) & bit) return 0;
+    return !(__sync_fetch_and_or(&input_trace, bit) & bit);
+}
+
 static void trig_config(TrigConfig *c)
 {
     for (int k = 0; k < TRIG_COUNT; k++) {
@@ -182,13 +198,22 @@ static void trig_config(TrigConfig *c)
 }
 
 /* Rewrites the game's pad data (user memory) in place. */
-static void filter_ctrl(int port, SceCtrlData *pad_data, int n, int negative)
+static int filter_ctrl(int hook, int port, SceCtrlData *pad_data, int n, int negative)
 {
     TrigConfig c;
     TrigHold *holds = NULL;
     int64_t now;
-    if (n <= 0 || g.game_pid <= 0 || !g.game_active || ksceKernelGetProcessId() != g.game_pid)
-        return;
+    SceUID caller = ksceKernelGetProcessId();
+    if (n <= 0 || g.game_pid <= 0 || !g.game_active)
+        return n;
+    if (caller != g.game_pid) {
+        if (g.input_block && hook == H_READ_POS2 && input_trace_claim(INPUT_TRACE_FOREIGN))
+            klog("input foreign hook=%d pid=%X game=%X block=%d", hook, caller, g.game_pid, g.input_block);
+        return n;
+    }
+    if (n > 64 && g.input_block)
+        return VJO_ERR_ARG;
+    int returned = n;
     if (n > 64)
         n = 64;
     /* One time for the call's samples: games read one at a time. */
@@ -207,21 +232,44 @@ static void filter_ctrl(int port, SceCtrlData *pad_data, int n, int negative)
             uint8_t lx, ly, rx, ry;
         } d;
         uint32_t pos;
+        int copy_rc;
         uintptr_t u = (uintptr_t)&pad_data[i].buttons;
-        if (ksceKernelMemcpyUserToKernel(&d, (const void *)u, sizeof(d)) < 0)
-            break;
-        pos = negative ? ~d.buttons : d.buttons;
         if (g.input_block) {
-            pos = 0;
+            /* Neutral output must not depend on reading the old sample. */
+            int trace = input_trace_claim(INPUT_TRACE_FIRST);
+            if ((g.raw_buttons & SCE_CTRL_CROSS) && input_trace_claim(INPUT_TRACE_CROSS))
+                trace = 1;
+            uint32_t before = 0;
+            int read_rc = 0;
+            if (trace) {
+                read_rc = ksceKernelMemcpyUserToKernel(&d, (const void *)u, sizeof(d));
+                if (read_rc >= 0) before = negative ? ~d.buttons : d.buttons;
+            }
+            d.buttons = negative ? ~0u : 0;
             d.lx = d.ly = d.rx = d.ry = 0x80;
+            copy_rc = ksceKernelMemcpyKernelToUser((void *)u, &d, sizeof(d));
+            if (trace || (copy_rc < 0 && input_trace_claim(INPUT_TRACE_COPY)))
+                klog("input blocked hook=%d pid=%X game=%X read=%08X write=%08X buttons=%08X raw=%08X",
+                     hook, caller, g.game_pid, read_rc, copy_rc, before, g.raw_buttons);
         } else {
+            copy_rc = ksceKernelMemcpyUserToKernel(&d, (const void *)u, sizeof(d));
+            if (copy_rc < 0) {
+                returned = copy_rc;
+                break;
+            }
+            pos = negative ? ~d.buttons : d.buttons;
             pos = trig_filter(&c, holds, pos, now) & ~g.suppress_mask;
+            d.buttons = negative ? ~pos : pos;
+            copy_rc = ksceKernelMemcpyKernelToUser((void *)u, &d, sizeof(d));
         }
-        d.buttons = negative ? ~pos : pos;
-        ksceKernelMemcpyKernelToUser((void *)u, &d, sizeof(d));
+        if (copy_rc < 0) {
+            returned = copy_rc;
+            break;
+        }
     }
     if (holds)
         __sync_lock_release(&hold_busy);
+    return returned;
 }
 
 #define CTRL_HOOK(idx, name, negative)                                       \
@@ -232,7 +280,10 @@ static void filter_ctrl(int port, SceCtrlData *pad_data, int n, int negative)
         rear_sample();                                                       \
         display_static_fb_sample();                                          \
         if (ret > 0)                                                         \
-            filter_ctrl(port, pad_data, ret, negative);                            \
+            ret = filter_ctrl(idx, port, pad_data, ret, negative);            \
+        else if (g.input_block && ksceKernelGetProcessId() == g.game_pid &&   \
+                 input_trace_claim(INPUT_TRACE_EMPTY))                       \
+            klog("input empty hook=%d pid=%X result=%d", idx, g.game_pid, ret); \
         return ret;                                                          \
     }
 

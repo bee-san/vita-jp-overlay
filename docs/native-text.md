@@ -107,6 +107,32 @@ The plugin refuses wrong title/module NIDs, out-of-range sites and mismatched
 signatures. Do not hook inside a Thumb IT block or where branches enter the
 instructions taiHEN replaces. Its relocator must support the selected site.
 
+### CLANNAD (PCSG00415)
+
+`profiles/PCSG00415.vjhook` targets native module NID `C5187D60`. Copy it to
+`ux0:data/VitaJPOverlay/hooks/PCSG00415.vjhook`, then restart the game. The
+existing title, module and instruction checks reject incompatible revisions.
+
+The profile reads CP932 dialogue from r6 at segment 0 offset `2CA70`, after
+the function's display-state branch and immediately before its text copy.
+Hooking the function entry also captures future script lines; it is unsuitable
+for following the visible dialogue. The selected site replaces eight bytes of
+straight-line Thumb instructions, leaving the adjacent calls and branches intact.
+
+With manual hook selection, advance one complete dialogue page and open L+R.
+Choose the matching Japanese text with ▲/▼ and ×. The list stays fixed until
+you press □ to refresh; after selection the same source follows new dialogue.
+This profile does not use OCR or a network service.
+
+On 2026-10-10, the unchanged production Text plugin and this profile captured
+two different visible opening narration pages in isolated Vita3K. The same
+register source matched 24 and 18 UTF-8 bytes, with update counts 1 and 3.
+The complete source row stayed unchanged without input for 10.330 and
+11.290 seconds. This validates those two emulator checkpoints. Physical
+kernel copying, shell selection/follow and other scenes remain unverified.
+The private test bridge uses checked current-thread stack bounds where
+Vita3K's user memory-block lookup cannot enumerate stacks.
+
 Simple register/string descriptors from
 [Luna's pinned Vita table](https://github.com/HIllya51/LunaTranslator/blob/b0c0c2d2a03b330c388b42d7e8f0556b6d230980/src/NativeImpl/LunaHook/LunaHook/emulators/vita3k_1.cpp)
 can be adapted this way. Engine-specific extraction/filter callbacks and

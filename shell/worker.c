@@ -91,6 +91,7 @@ static uint32_t pending_hook_session, pending_hook_id;
 enum { OV_CLOSED, OV_OPEN, OV_OPEN_OLD_JOB };
 static int ov = OV_CLOSED;
 static int subtitles; /* written by set_subtitles only */
+static int input_block_error;
 static int stable_pending;
 typedef struct {
     int64_t until, us;
@@ -761,11 +762,32 @@ static int game_active(void)
     return title_id[0] != '\0';
 }
 
+static void clear_input_block_error(void)
+{
+    if (input_block_error) {
+        input_block_error = 0;
+        strip_publish("", VJO_STRIP_STATUS, 0);
+    }
+}
+
 static void open_overlay(void)
 {
     VjoState st;
+    int block_rc = vjoSetInputBlock(1);
+    vjo_log("input block on rc=%d (%08X)", block_rc, block_rc);
+    if (block_rc < 0) {
+        input_block_error = 1;
+        ov = OV_CLOSED;
+        picker_close();
+        view_publish(0, NULL, NULL, 0);
+        strip_publish("Overlay unavailable: cannot block game controls.", VJO_STRIP_ERROR, 0);
+        vjo_view_lock();
+        __atomic_store_n(&g_view.strip_on, 1, __ATOMIC_RELEASE);
+        vjo_view_unlock();
+        return;
+    }
+    clear_input_block_error();
     ov = OV_OPEN;
-    vjoSetInputBlock(1);
     apply_config(); /* settings are re-read on every open */
     if (cfg.text_source == VJO_SOURCE_HOOKS && !native_game) {
         view_publish(1, NULL, "Native text hooks are available for Vita games", 1);
@@ -1258,6 +1280,7 @@ static void on_game_exit(void)
     close_overlay();
     if (subtitles)
         set_subtitles(0);
+    clear_input_block_error();
     /* Free memory unless the network thread still uses it. */
     if (!job_running)
         mem_free();
@@ -1276,6 +1299,7 @@ static void on_game_start(void)
     stable_pending = 0;
     if (subtitles) /* over a game, without its exit: the strip goes */
         set_subtitles(0);
+    clear_input_block_error();
     st.size = sizeof(st);
     vjoGetState(&st);
     title_id[0] = '\0';

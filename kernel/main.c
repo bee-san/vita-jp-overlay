@@ -334,11 +334,16 @@ int vjoSetTriggers(int toggle, int subtitle)
 
 int vjoSetInputBlock(int on)
 {
-    if (!caller_ok())
+    if (!caller_ok()) {
+        klog("input block refused: pid=%X shell=%X", ksceKernelGetProcessId(), g.shell_pid);
         return VJO_ERR_PERM;
+    }
+    if (on) input_trace_reset();
     if (!on && g.input_block) /* e.g. the ○ that closed the overlay */
         __sync_fetch_and_or(&g.suppress_mask, g.raw_buttons);
-    g.input_block = on ? 1 : 0;
+    __atomic_store_n(&g.input_block, on ? 1 : 0, __ATOMIC_RELEASE);
+    klog("input block=%d pid=%X game=%X raw=%08X", g.input_block,
+         ksceKernelGetProcessId(), g.game_pid, g.raw_buttons);
     return 0;
 }
 

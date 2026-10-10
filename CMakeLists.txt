@@ -57,6 +57,11 @@ target_include_directories(vjo-kernel-text-tests PRIVATE third_party/acutest/inc
 target_compile_options(vjo-kernel-text-tests PRIVATE -Wall -Wextra -Wno-unused-parameter)
 target_link_libraries(vjo-kernel-text-tests vjo_core)
 add_test(NAME kernel_text COMMAND vjo-kernel-text-tests)
+add_executable(vjo-kernel-input-tests host/tests/test_kernel_input.c kernel/triggers.c)
+target_include_directories(vjo-kernel-input-tests PRIVATE third_party/acutest/include host/tests/vita_stubs)
+target_compile_definitions(vjo-kernel-input-tests PRIVATE VJO_HOST=1)
+target_compile_options(vjo-kernel-input-tests PRIVATE -Wall -Wextra -Wno-unused-parameter)
+add_test(NAME kernel_input COMMAND vjo-kernel-input-tests)
 # kernel/foreground.c, kernel/triggers.c: kernel state machines (no psp2kern).
 add_executable(vjo-tests host/tests/test_core.c kernel/foreground.c kernel/triggers.c)
 target_include_directories(vjo-tests PRIVATE third_party/acutest/include kernel)

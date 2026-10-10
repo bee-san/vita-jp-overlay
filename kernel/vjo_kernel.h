@@ -82,6 +82,7 @@ typedef struct {
 } VjoKernelState;
 
 extern VjoKernelState g;
+void input_trace_reset(void);
 
 /* log.c: ring buffer, flushed to kernel.txt by the worker */
 void klog(const char *fmt, ...);

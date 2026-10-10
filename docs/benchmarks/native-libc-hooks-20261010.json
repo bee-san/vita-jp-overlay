@@ -1,0 +1,59 @@
+{
+  "date": "2026-10-10",
+  "version": "0.6-hooks.5",
+  "scope": "Retail SceLibc import coverage; no physical CLANNAD capture claim",
+  "game": {
+    "title_id": "PCSG00415",
+    "module": "VITA",
+    "self_sha256": "76b2b2af4ba367ada9dfcd9d464c713d18976f14cd5a4d117bb188b1a9c61b5b",
+    "loaded_elf_sha256": "23611e880fb573f85246756073edeb20cdfa02c3f7062cd0427cb3b0f5d499d9",
+    "inspection": "Isolated Vita3K decrypted and relocated PT_LOAD memory, paused before game execution; 250 function imports",
+    "existing_clib_hooks_imported": 0,
+    "retail_library_nid": "0xBE43BB07",
+    "retail_imports": {
+      "memcpy": "0x7205BFDB",
+      "strcpy": "0x85B924B7",
+      "strncpy": "0x9F87712D",
+      "memmove": "0xAF5C218D"
+    }
+  },
+  "validation": {
+    "host_command": "ctest --test-dir build/host --output-on-failure",
+    "host_suites_passed": 10,
+    "host_elapsed_seconds": 2.14,
+    "production_kernel_cases_passed": 10,
+    "vita_command": "cmake --build build/vita -j4",
+    "vita_build": "Release, VJO_WITH_NCNN=OFF, VJO_TEXT_TEST_APP=ON",
+    "vita_build_passed": true,
+    "packaged_syscall_abi_passed": true,
+    "emulator_command": "python3 tools/test_vita3k_hooks.py --vpk build/vita/vjo-hook-test.vpk --workdir build/vita3k-libc-test",
+    "emulator_checks": {
+      "portable": 43,
+      "observer": 192,
+      "plugin": 20,
+      "total": 255,
+      "failures": 0
+    },
+    "emulator_plugin_cases": "Both C libraries, bounded strcpy transport, preserved return values, overlapping memmove, zero-length copy ignored, all hooks removed on unload"
+  },
+  "artifacts": {
+    "VitaJPOverlay_Kernel.skprx": {
+      "bytes": 38604,
+      "sha256": "97d4901e8de5e58bcd9c1b2c926e7fb3fa7532b9d74bd93997203cc6ee90a1c7"
+    },
+    "VitaJPOverlay_Shell.suprx": {
+      "bytes": 156196,
+      "sha256": "45f86b1ea83c08bdf61c1dfd174cc5356151e746a3659a0299218436a8f10c8c"
+    },
+    "VitaJPOverlay_Text.suprx": {
+      "bytes": 7936,
+      "sha256": "84259631e0efe87472750a04a944a0d2cb7673f218c85f316ae3a450e6c7565f"
+    }
+  },
+  "unverified": [
+    "Real CLANNAD dialogue through the new imports",
+    "Physical hardware startup/capture with this revision",
+    "Runtime performance and memory cost",
+    "Whether a game-specific hook is necessary"
+  ]
+}

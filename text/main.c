@@ -12,8 +12,9 @@
 #include "../include/vjo_import.h"
 #include "../core/hook_profile.h"
 
-static tai_hook_ref_t refs[4], native_refs[VJO_NATIVE_HOOKS];
-static SceUID uids[4] = {-1,-1,-1,-1};
+#define IMPORT_HOOKS 8
+static tai_hook_ref_t refs[IMPORT_HOOKS], native_refs[VJO_NATIVE_HOOKS];
+static SceUID uids[IMPORT_HOOKS] = {-1,-1,-1,-1,-1,-1,-1,-1};
 static SceUID native_uids[VJO_NATIVE_HOOKS];
 static VjoNativeProfile profile;
 static volatile int submitting;
@@ -21,9 +22,9 @@ static int enabled;
 
 /* Single producer at a time. Recursion from our own syscalls is skipped;
  * a busy capture never waits on another game thread. */
-static void offer(const void *ptr, unsigned bytes, uint32_t stream)
+static void offer_bounded(const void *ptr, unsigned bytes, uint32_t stream)
 {
-    if (!enabled || bytes < 4 || bytes >= VJO_TEXT_BYTES || !ptr) return;
+    if (!enabled || bytes >= VJO_TEXT_BYTES || !ptr) return;
     if (!__sync_bool_compare_and_swap(&submitting, 0, 1)) return;
     /* Inspect only the kernel's pinned copy. Another game thread may free a
      * source immediately after the original call returns. One syscall picks
@@ -32,6 +33,11 @@ static void offer(const void *ptr, unsigned bytes, uint32_t stream)
                        (uint32_t)(uintptr_t)ptr, bytes, 0, 0};
     vjoTextSubmit(&e);
     __sync_lock_release(&submitting);
+}
+
+static void offer(const void *ptr, unsigned bytes, uint32_t stream)
+{
+    if (bytes >= 4) offer_bounded(ptr, bytes, stream);
 }
 
 static unsigned strnlen_hook(const char *s, unsigned max)
@@ -58,6 +64,36 @@ static char *strncpy_hook(char *dst, const char *src, unsigned n)
     char *result = TAI_CONTINUE(char *, refs[3], dst, src, n);
     offer(dst, n < VJO_TEXT_BYTES ? n : VJO_TEXT_BYTES-1,
           (uint32_t)(uintptr_t)__builtin_return_address(0));
+    return result;
+}
+
+/* Retail SDK games commonly import SceLibc rather than SceLibKernel's clib
+ * helpers. Keep separate references: both families may exist in one module. */
+static void *libc_memcpy_hook(void *dst, const void *src, unsigned n)
+{
+    void *result = TAI_CONTINUE(void *, refs[4], dst, src, n);
+    offer(dst, n, (uint32_t)(uintptr_t)__builtin_return_address(0));
+    return result;
+}
+static char *libc_strcpy_hook(char *dst, const char *src)
+{
+    char *result = TAI_CONTINUE(char *, refs[5], dst, src);
+    /* No user-side strlen: copy and bound the NUL-terminated result in the
+     * kernel while the allocation is pinned, just like a register profile. */
+    offer_bounded(dst, 0, (uint32_t)(uintptr_t)__builtin_return_address(0));
+    return result;
+}
+static char *libc_strncpy_hook(char *dst, const char *src, unsigned n)
+{
+    char *result = TAI_CONTINUE(char *, refs[6], dst, src, n);
+    offer(dst, n < VJO_TEXT_BYTES ? n : VJO_TEXT_BYTES-1,
+          (uint32_t)(uintptr_t)__builtin_return_address(0));
+    return result;
+}
+static void *libc_memmove_hook(void *dst, const void *src, unsigned n)
+{
+    void *result = TAI_CONTINUE(void *, refs[7], dst, src, n);
+    offer(dst, n, (uint32_t)(uintptr_t)__builtin_return_address(0));
     return result;
 }
 
@@ -149,6 +185,11 @@ int module_start(SceSize argc, const void *args)
     uids[1] = taiHookFunctionImport(&refs[1], module.module_name, 0xCAE9ACE6, 0x2CDFCD1C, strlcpy_hook);
     uids[2] = taiHookFunctionImport(&refs[2], module.module_name, 0xCAE9ACE6, 0x14E9DBD7, memcpy_hook);
     uids[3] = taiHookFunctionImport(&refs[3], module.module_name, 0xCAE9ACE6, 0xC458D60A, strncpy_hook);
+    /* Verified against VitaSDK and CLANNAD PCSG00415's loaded import table. */
+    uids[4] = taiHookFunctionImport(&refs[4], module.module_name, 0xBE43BB07, 0x7205BFDB, libc_memcpy_hook);
+    uids[5] = taiHookFunctionImport(&refs[5], module.module_name, 0xBE43BB07, 0x85B924B7, libc_strcpy_hook);
+    uids[6] = taiHookFunctionImport(&refs[6], module.module_name, 0xBE43BB07, 0x9F87712D, libc_strncpy_hook);
+    uids[7] = taiHookFunctionImport(&refs[7], module.module_name, 0xBE43BB07, 0xAF5C218D, libc_memmove_hook);
     load_profile(&module);
     return SCE_KERNEL_START_SUCCESS;
 }
@@ -157,7 +198,7 @@ int module_stop(SceSize argc, const void *args)
 {
     (void)argc; (void)args;
     enabled = 0;
-    for (unsigned i = 0; i < 4; i++) if (uids[i] >= 0) taiHookRelease(uids[i], refs[i]);
+    for (unsigned i = 0; i < IMPORT_HOOKS; i++) if (uids[i] >= 0) taiHookRelease(uids[i], refs[i]);
     for (unsigned i = 0; i < VJO_NATIVE_HOOKS; i++)
         if (native_uids[i] >= 0) taiHookRelease(native_uids[i], native_refs[i]);
     return SCE_KERNEL_STOP_SUCCESS;

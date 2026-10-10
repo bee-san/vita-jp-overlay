@@ -23,7 +23,7 @@ set(ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
 set(VJO_ROOT ${ROOT})
 set(VJO_BUILD_VITA ON)
 option(VJO_WITH_NCNN "Build the CPU-only local mobile OCR recognizer" ON)
-set(VJO_VERSION "0.6-hooks.4")
+set(VJO_VERSION "0.6-hooks.5")
 
 # ---------------- kernel ----------------
 add_executable(VitaJPOverlay_Kernel
@@ -170,6 +170,13 @@ vita_create_self(VitaJPOverlay_Text.suprx VitaJPOverlay_Text UNSAFE CONFIG ${ROO
 # kernel's process isolation and ScePaf overlay require separate validation.
 option(VJO_TEXT_TEST_APP "Build the text-capture ARM self-test VPK" OFF)
 if(VJO_TEXT_TEST_APP)
+  set(VJO_TEST_LIBC_DIR ${CMAKE_CURRENT_BINARY_DIR}/test_libc_stubs)
+  add_custom_command(OUTPUT ${VJO_TEST_LIBC_DIR}/libSceLibc_stub.a
+    COMMAND ${VITA_LIBS_GEN} ${ROOT}/text/tests/libc-imports.yml ${VJO_TEST_LIBC_DIR}
+    COMMAND make -C ${VJO_TEST_LIBC_DIR}
+    DEPENDS ${ROOT}/text/tests/libc-imports.yml
+    COMMENT "Building explicit retail libc imports for the hook test")
+  add_custom_target(vjo_test_libc_stubs DEPENDS ${VJO_TEST_LIBC_DIR}/libSceLibc_stub.a)
   # VitaSDK's helper accumulates CONFIG arguments globally. A standalone app
   # must not inherit the three plugins' export files.
   set(VITA_ELF_CREATE_FLAGS "${VJO_ELF_FLAGS}")
@@ -179,6 +186,8 @@ if(VJO_TEXT_TEST_APP)
     ${ROOT}/core/text_source.c ${ROOT}/core/text_match.c ${ROOT}/core/text_scan.c ${ROOT}/core/hook_profile.c ${ROOT}/core/utf.c)
   target_compile_options(vjo-hook-test PRIVATE -O2 -Wall -Wextra -Werror -mcpu=cortex-a9 -mfpu=neon -mfloat-abi=hard)
   target_link_libraries(vjo-hook-test SceIofilemgr_stub SceProcessmgr_stub SceLibKernel_stub SceKernelModulemgr_stub taihen_stub)
+  add_dependencies(vjo-hook-test vjo_test_libc_stubs)
+  target_link_libraries(vjo-hook-test ${VJO_TEST_LIBC_DIR}/libSceLibc_stub.a)
   vita_create_self(vjo-hook-test.self vjo-hook-test CONFIG ${ROOT}/text/tests/exports.yml)
   vita_create_vpk(vjo-hook-test.vpk VJOHK0001 vjo-hook-test.self VERSION 01.00 NAME "Vita text hook self-test"
     FILE ${CMAKE_CURRENT_BINARY_DIR}/VitaJPOverlay_Text.suprx VitaJPOverlay_Text.suprx)

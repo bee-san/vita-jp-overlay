@@ -271,7 +271,7 @@ int vjoTextSubmit(const VjoTextEvent *user_event)
     if (ksceKernelMemcpyUserToKernel(&event, user_event, sizeof(event)) < 0 ||
         event.size != sizeof(event) || (event.kind != VJO_TEXT_CALL && event.kind != VJO_TEXT_REGISTER) ||
         event.encoding > VJO_TEXT_CP932 || event.bytes > VJO_TEXT_BYTES ||
-        (event.encoding == VJO_TEXT_AUTO && (event.kind != VJO_TEXT_CALL || !event.bytes)) ||
+        (event.encoding == VJO_TEXT_AUTO && event.kind != VJO_TEXT_CALL) ||
         event.indirections > 4 || event.padding < -0x100000 || event.padding > 0x100000) {
         rc = VJO_ERR_ARG; goto out;
     }

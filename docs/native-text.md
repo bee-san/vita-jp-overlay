@@ -165,3 +165,18 @@ lazily; a selected native source can use two bounded 128 KiB Paf arenas if the
 before retrying. The picker now opens in physical CLANNAD without the previous
 memory error, but dialogue discovery still returns no candidates. This is not
 a verified CLANNAD text hook. See the [memory measurements](benchmarks/native-text-low-memory-20261010.json).
+
+`0.6-hooks.5` adds retail `SceLibc` imports for `memcpy`, `strcpy`, `strncpy`
+and `memmove` alongside the existing `SceLibKernel` clib hooks. An offline
+inspection of CLANNAD PCSG00415 found all four retail imports and none of the
+four original clib imports. This is a confirmed coverage gap; it does not yet
+prove that these calls carry the visible dialogue. `strcpy` results use a
+kernel-bounded, NUL-terminated UTF-8/CP932 read rather than dereferencing the
+result in the game plugin. Zero-length memory copies remain ignored.
+
+The ARM self-test explicitly imports both libraries (avoiding newlib's local
+implementations), exercises each interceptor, checks return values and an
+overlapping `memmove`, and checks that unloading restores all four retail
+imports. It passed 255 checks in isolated Vita3K. These checks validate the
+plugin mechanics; CLANNAD gameplay capture and hardware performance remain
+unverified.

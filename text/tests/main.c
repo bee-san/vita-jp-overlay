@@ -11,6 +11,10 @@
 #include <string.h>
 
 unsigned sceClibStrlcpy(char *dst, const char *src, unsigned cap);
+extern void *vjo_test_libc_memcpy(void *, const void *, unsigned);
+extern char *vjo_test_libc_strcpy(char *, const char *);
+extern char *vjo_test_libc_strncpy(char *, const char *, unsigned);
+extern void *vjo_test_libc_memmove(void *, const void *, unsigned);
 
 uint32_t vjo_probe_expected_sp, vjo_probe_sp_captured;
 uint32_t vjo_probe_gp_captured[14], vjo_probe_callback[18];
@@ -86,6 +90,20 @@ static int plugin_checks(FILE *out)
     before = call_captures;
     PLUGIN_CHECK(sceClibStrncpy(copy, line, sizeof(copy)) == copy &&
                  !strcmp(copy, line) && call_captures > before);
+    before = call_captures;
+    PLUGIN_CHECK(vjo_test_libc_memcpy(copy, line, strlen(line)+1) == copy &&
+                 !strcmp(copy, line) && call_captures == before+1);
+    before = call_captures;
+    PLUGIN_CHECK(vjo_test_libc_strcpy(copy, line) == copy &&
+                 !strcmp(copy, line) && call_captures == before+1);
+    before = call_captures;
+    PLUGIN_CHECK(vjo_test_libc_strncpy(copy, line, sizeof(copy)) == copy &&
+                 !strcmp(copy, line) && call_captures == before+1);
+    before = call_captures;
+    PLUGIN_CHECK(vjo_test_libc_memmove(copy+1, copy, strlen(line)+1) == copy+1 &&
+                 !strcmp(copy+1, line) && call_captures == before+1);
+    before = call_captures;
+    PLUGIN_CHECK(vjo_test_libc_memcpy(copy, line, 0) == copy && call_captures == before);
     before = register_captures;
     PLUGIN_CHECK(vjo_profile_arm(line) == 17 && register_captures == before+1);
     before = register_captures;
@@ -95,11 +113,16 @@ static int plugin_checks(FILE *out)
     unsigned japanese = 0;
     for (unsigned i = 0; i < VJO_TEXT_SOURCES; i++)
         if (captured.items[i].id && !strcmp(captured.items[i].text, line)) japanese++;
-    PLUGIN_CHECK(japanese >= 6);
+    PLUGIN_CHECK(japanese >= 10);
     PLUGIN_CHECK(sceKernelStopUnloadModule(plugin, 0, NULL, 0, NULL, &status) == 0 && status == 0);
     before = captures;
     PLUGIN_CHECK(sceClibStrnlen(line, 100) == strlen(line) &&
                  vjo_profile_arm(line) == 17 && vjo_profile_thumb(line) == 19 && captures == before);
+    PLUGIN_CHECK(vjo_test_libc_strcpy(copy, line) == copy &&
+                 vjo_test_libc_memcpy(copy, line, strlen(line)+1) == copy &&
+                 vjo_test_libc_strncpy(copy, line, sizeof(copy)) == copy &&
+                 vjo_test_libc_memmove(copy+1, copy, strlen(line)+1) == copy+1 &&
+                 !strcmp(copy+1, line) && captures == before);
     fprintf(out, "plugin checks=%u failures=%u call_events=%u register_events=%u matching_sources=%u\n",
             checks, failures, call_captures, register_captures, japanese);
 #undef PLUGIN_CHECK

@@ -157,3 +157,11 @@ Normal boot and all three plugin starts were verified on the physical 3.65 Vita;
 CLANNAD then exposed a separate overlay-allocation failure. See the
 [firmware fix measurements](benchmarks/native-hooks-fw365-20261010.json) for the
 installed hashes, validation commands, and remaining game-capture limitation.
+
+`0.6-hooks.4` opens the native picker and publishes selected raw text/subtitles
+without allocating the two large result arenas. Dictionary lookup allocates
+lazily; a selected native source can use two bounded 128 KiB Paf arenas if the
+768 KiB memblock fails. Allocation failure preserves the text and backs off
+before retrying. The picker now opens in physical CLANNAD without the previous
+memory error, but dialogue discovery still returns no candidates. This is not
+a verified CLANNAD text hook. See the [memory measurements](benchmarks/native-text-low-memory-20261010.json).

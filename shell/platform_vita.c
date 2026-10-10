@@ -9,11 +9,22 @@
 #include <psp2/net/net.h>
 #include <psp2/net/netctl.h>
 #include <psp2/rtc.h>
+#include <paf/std/stdlib.h>
 
 #include "shell.h"
 
 #define NET_TIMEOUT_US (20 * 1000 * 1000)
 #define CONNECT_POLL_US 20000
+
+void *vjo_shell_heap_alloc(size_t bytes)
+{
+    return sce_paf_memalign(16, bytes);
+}
+
+void vjo_shell_heap_free(void *ptr)
+{
+    sce_paf_free(ptr);
+}
 
 static int sock_send(void *ctx, const void *p, size_t n)
 {

@@ -22,9 +22,15 @@ uint64_t sceKernelGetProcessTimeWide(void);
 int sceKernelSetEventFlag(SceUID uid, unsigned int bits);
 static inline int sceKernelLockMutex(SceUID uid, int count, void *timeout) { return 0; }
 static inline int sceKernelUnlockMutex(SceUID uid, int count) { return 0; }
+#ifdef VJO_TEST_MEMORY_STUBS
+SceUID sceKernelAllocMemBlock(const char *name, int type, unsigned int size, void *opt);
+int sceKernelGetMemBlockBase(SceUID uid, void **base);
+int sceKernelFreeMemBlock(SceUID uid);
+#else
 static inline SceUID sceKernelAllocMemBlock(const char *name, int type, unsigned int size, void *opt) { return -1; }
 static inline int sceKernelGetMemBlockBase(SceUID uid, void **base) { return -1; }
 static inline int sceKernelFreeMemBlock(SceUID uid) { return 0; }
+#endif
 static inline int sceKernelWaitEventFlag(SceUID uid, unsigned int bits, unsigned int mode,
                                         unsigned int *out, void *timeout) { return -1; }
 static inline SceUID sceKernelCreateMutex(const char *name, unsigned int attr, int count, void *opt) { return -1; }

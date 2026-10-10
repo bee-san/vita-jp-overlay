@@ -1,0 +1,38 @@
+{
+  "date": "2026-10-10",
+  "scope": "Native picker and raw-text allocation policy; commercial game capture remains unverified",
+  "source_commit": "e2ed3b7",
+  "environment": {
+    "device": "PS Vita PCH-1001",
+    "firmware": "3.65",
+    "game": "CLANNAD PCSG00415",
+    "host_build": "Release, VJO_WITH_NCNN=OFF"
+  },
+  "change": {
+    "eager_result_bytes_removed": 786432,
+    "optional_paf_result_bytes": 262144,
+    "paf_arena_bytes_each": 131072,
+    "picker_and_raw_text_require_result_arenas": false
+  },
+  "validation": {
+    "host_command": "ctest --test-dir build/host --output-on-failure",
+    "host_suites_passed": 10,
+    "worker_cases_passed": 30,
+    "host_elapsed_seconds": 1.59,
+    "vita_command": "cmake --build build/vita-hooks-device -j4",
+    "vita_build_passed": true,
+    "packaged_syscall_abi_passed": true,
+    "physical_install_readback_sha256": "45f86b1ea83c08bdf61c1dfd174cc5356151e746a3659a0299218436a8f10c8c",
+    "normal_boot_verified": true,
+    "clannad_picker_open_verified_by_user": true,
+    "clannad_memory_error_resolved": true,
+    "clannad_dialogue_capture_verified": false,
+    "physical_dictionary_fallback_verified": false
+  },
+  "remaining_failure": "Picker opens, but user reports no candidates after dialogue advances. Live metadata confirms zero candidates with discovery scanning. Memory mapping success and installed generic hook results require separate diagnostics.",
+  "limits": [
+    "Host allocator failure tests are simulated; Paf fallback success has not been observed on the device.",
+    "No real-screenshot CER, console capture overhead or game-specific compatibility claim.",
+    "No proprietary screenshots, dialogue or executables included."
+  ]
+}

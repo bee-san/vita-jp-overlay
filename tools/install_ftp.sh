@@ -1,13 +1,15 @@
 #!/bin/bash
 # Installs Vita JP Overlay over VitaShell's FTP server (VitaShell: SELECT ->
 # FTP). Backs up the taiHEN configs first (locally and as config.txt.vjo-bak on
-# the Vita) and adds the two plugin lines once. config.ini is created on the
+# the Vita) and adds plugin entries once. config.ini is created on the
 # first install; later installs keep its values and bring it up to the current
 # set of settings. Local copies (backups, logs, dumps) go to build/device/.
 # Needs bash, curl and python3.
 #
 #   tools/install_ftp.sh 192.168.1.50[:1337]
 #   tools/install_ftp.sh --set dictionary=jiten --set jiten_api_key=KEY 192.168.1.50
+#   tools/install_ftp.sh --text-title PCSG00001 192.168.1.50
+#     (load the native text plugin in this title; repeat for more games)
 #   tools/install_ftp.sh --add-kernel-plugin NoPowerLimits.skprx 192.168.1.50
 #     (also uploads another kernel plugin to ur0:tai/ and adds it under *KERNEL;
 #      --uninstall leaves such plugins in place)
@@ -26,6 +28,7 @@ STATUS=0
 DUMPS=0
 SETS=()
 EXTRA_K=()
+TEXT_TITLES=()
 while [ $# -gt 1 ]; do
   case $1 in
     --uninstall) UNINSTALL=1 ;;
@@ -34,6 +37,7 @@ while [ $# -gt 1 ]; do
     --status) STATUS=1 ;;
     --set) SETS+=("$2"); shift ;;
     --add-kernel-plugin) EXTRA_K+=("$2"); shift ;;
+    --text-title) TEXT_TITLES+=("$2"); shift ;;
     *) break ;;
   esac
   shift
@@ -42,8 +46,11 @@ HOST=${1:?usage: tools/install_ftp.sh [--set key=value]... [--uninstall|--status
 [[ $HOST == *:* ]] || HOST=$HOST:1337
 FTP=ftp://$HOST
 B=build/vita
-KLINE=ur0:tai/VitaJPOverlay_Kernel.skprx
-SLINE=ur0:tai/VitaJPOverlay_Shell.suprx
+PATCH_ARGS=()
+for title in ${TEXT_TITLES[@]+"${TEXT_TITLES[@]}"}; do
+  [[ $title =~ ^[A-Z0-9]{9}$ ]] || { echo "invalid Vita title ID: $title"; exit 1; }
+  PATCH_ARGS+=(--text-title "$title")
+done
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -112,7 +119,7 @@ echo "backup: $BK"
 if [ $UNINSTALL = 1 ]; then
   for CFG in "${CFGS[@]}"; do
     n=${CFG%%:*}
-    grep -v -F -e "$KLINE" -e "$SLINE" "$TMP/$n.txt" > "$TMP/$n.new" || true
+    python3 tools/patch_tai_config.py "$TMP/$n.txt" "$TMP/$n.new" --uninstall
     put "$TMP/$n.new" "$CFG"
     echo "removed the plugin lines from $CFG"
   done
@@ -139,7 +146,7 @@ def rm(path):
     except ftplib.all_errors:
         return
     print("deleted", path)
-for name in ("VitaJPOverlay_Kernel.skprx", "VitaJPOverlay_Shell.suprx", "config.txt.vjo-bak"):
+for name in ("VitaJPOverlay_Kernel.skprx", "VitaJPOverlay_Shell.suprx", "VitaJPOverlay_Text.suprx", "config.txt.vjo-bak"):
     rm("/ur0:/tai/" + name)
 rm("/ux0:/tai/config.txt.vjo-bak")
 for d in ("/ur0:/data/VitaJPOverlay", "/ux0:/data/VitaJPOverlay"):
@@ -164,45 +171,26 @@ PY
   exit 0
 fi
 
-for f in "$B/VitaJPOverlay_Kernel.skprx" "$B/VitaJPOverlay_Shell.suprx" "$B/vitajpoverlay.rco" \
+for f in "$B/VitaJPOverlay_Kernel.skprx" "$B/VitaJPOverlay_Shell.suprx" "$B/VitaJPOverlay_Text.suprx" "$B/vitajpoverlay.rco" \
          ${EXTRA_K[@]+"${EXTRA_K[@]}"}; do
   [ -f "$f" ] || { echo "missing $f: run cmake --build build/vita first"; exit 1; }
 done
-EXTRA_LINES=()
 for f in ${EXTRA_K[@]+"${EXTRA_K[@]}"}; do
   [ "$(head -c 3 "$f")" = "SCE" ] || { echo "$f is not a Vita plugin (no SCE header)"; exit 1; }
-  EXTRA_LINES+=("ur0:tai/$(basename "$f")")
+  PATCH_ARGS+=(--kernel-plugin "ur0:tai/$(basename "$f")")
 done
 
 # Patch each config (CRLF-safe): kernel line after *KERNEL, shell after *main.
 for CFG in "${CFGS[@]}"; do
   n=${CFG%%:*}
-  python3 - "$TMP/$n.txt" "$TMP/$n.new" "$KLINE" "$SLINE" ${EXTRA_LINES[@]+"${EXTRA_LINES[@]}"} <<'PY'
-import sys
-src, dst, kline, sline, *extra = sys.argv[1:]
-raw = open(src, "rb").read().decode("utf-8", "replace")
-nl = "\r\n" if "\r\n" in raw else "\n"
-lines = raw.splitlines()
-def add(section, line):
-    if any(l.strip() == line for l in lines):
-        return
-    for i, l in enumerate(lines):
-        if l.strip() == section:
-            lines.insert(i + 1, line)
-            return
-    lines.extend(["", section, line])
-add("*KERNEL", kline)
-for line in extra:
-    add("*KERNEL", line)
-add("*main", sline)
-open(dst, "wb").write((nl.join(lines) + nl).encode())
-PY
+  python3 tools/patch_tai_config.py "$TMP/$n.txt" "$TMP/$n.new" ${PATCH_ARGS[@]+"${PATCH_ARGS[@]}"}
   echo "--- $CFG changes:"; diff "$TMP/$n.txt" "$TMP/$n.new" || true
   put "$TMP/$n.txt" "${CFG}.vjo-bak"
 done
 
 put "$B/VitaJPOverlay_Kernel.skprx" "ur0:/tai/VitaJPOverlay_Kernel.skprx"
 put "$B/VitaJPOverlay_Shell.suprx" "ur0:/tai/VitaJPOverlay_Shell.suprx"
+put "$B/VitaJPOverlay_Text.suprx" "ur0:/tai/VitaJPOverlay_Text.suprx"
 put "$B/vitajpoverlay.rco" "ur0:/data/VitaJPOverlay/vitajpoverlay.rco"
 for f in ${EXTRA_K[@]+"${EXTRA_K[@]}"}; do
   put "$f" "ur0:/tai/$(basename "$f")"

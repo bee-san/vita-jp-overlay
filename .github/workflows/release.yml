@@ -44,11 +44,15 @@ jobs:
       - run: WORK=$PWD/.refs/toolchain bash tools/setup_toolchain.sh
       - run: |
           export PATH=$PWD/.refs/toolchain/psp2cxml-tool/mbuild:$PATH
-          cmake -S vita -B build/vita -DCMAKE_BUILD_TYPE=Release && cmake --build build/vita -j4 && cmake --build build/vita --target release
+          cmake -S vita -B build/vita -DCMAKE_BUILD_TYPE=Release -DVJO_TEXT_TEST_APP=ON && cmake --build build/vita -j4 && cmake --build build/vita --target release
       - uses: actions/upload-artifact@v4
         with:
           name: VitaJPOverlay
           path: build/vita/VitaJPOverlay-*.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Native-text-self-test
+          path: build/vita/vjo-hook-test.vpk
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')

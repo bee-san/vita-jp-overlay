@@ -1,0 +1,154 @@
+{
+  "date": "2026-10-10",
+  "version": "0.6-hooks.3",
+  "source_base_commit": "5a803f8742a5e80f5fcd91a34af6bca1914c6218",
+  "scope": "Firmware 3.65 boot recovery and native-text runtime validation; measured with the fixes in this change applied to the source base.",
+  "environment": {
+    "device": "Physical PS Vita",
+    "firmware": "3.65",
+    "vita_compiler": "arm-vita-eabi-gcc 15.2.0",
+    "device_build_local_ocr": false,
+    "host_build_local_ocr": false,
+    "emulator_storage": "Isolated Vita3K self-test directory"
+  },
+  "boot_failure": {
+    "kernel_native_state": 2,
+    "kernel_native_state_name": "READY",
+    "shell_last_marker": "worker startup: checking kernel API",
+    "runtime_import_stub_words": ["0xE24FC008", "0xE3A0F000"],
+    "runtime_import_effect": "Unresolved kernel import branches to address zero.",
+    "incompatible_strong_import": {
+      "library": "SceSysmemForKernel",
+      "function": "ksceKernelGetMemBlockType",
+      "built_library_nid": "0x63A519E5",
+      "built_function_nid": "0x289BE3EC",
+      "built_firmware_abi": "3.60",
+      "device_library_nid": "0x02451F0F",
+      "device_function_nid": "0xD44FE44B",
+      "device_firmware": "3.65"
+    },
+    "correction": {
+      "library": "SceSysmemForDriver",
+      "function": "ksceKernelMemBlockGetInfoEx",
+      "function_nid": "0x24A99FFF",
+      "type_field": "core_info.type",
+      "build_guard": "Reject strong firmware-specific SceSysmemForKernel imports in the packaged kernel.",
+      "runtime_guard": "Both user plugins inspect custom kernel import stubs before calling them and fail closed when unbound."
+    }
+  },
+  "physical_device": {
+    "normal_boot_verified": true,
+    "kernel_native_state": 6,
+    "shell_native_state": 6,
+    "kernel_api_returned": 8,
+    "shell_registration_result": 0,
+    "final_startup_marker": "bootstrap: worker started",
+    "game": {
+      "name": "CLANNAD",
+      "title_id": "PCSG00415",
+      "launch_verified": true,
+      "text_plugin_native_state": 6,
+      "game_text_capture_verified": null,
+      "overlay_open_verified": false,
+      "overlay_open_blocker": {
+        "trigger": "Press L+R while CLANNAD is running.",
+        "reported_message": "Not enough memory for overlay",
+        "failed_allocation_bytes": 786432,
+        "error_code": "0x80024302",
+        "error_name": "SCE_KERNEL_ERROR_NO_FREE_PHYSICAL_PAGE",
+        "evidence_file": "status-clannad-memory.txt",
+        "status": "Separate memory-allocation follow-up required before physical game dialogue capture can be verified."
+      }
+    },
+    "evidence": {
+      "method": "Paired vita-agent-use runtime module enumeration, shell startup log retrieval, and full installed-file readback.",
+      "private_artifact_directory": "overlay-firmware-fix-20261010",
+      "postboot_files": ["plugins-after-boot.json", "status-after-boot.txt", "plugins-clannad.json"],
+      "note": "Raw device snapshots and binaries remain private. The installation report was written before reboot; successful boot is established by the subsequent runtime snapshots and startup log."
+    },
+    "plugin_files": {
+      "VitaJPOverlay_Kernel.skprx": {
+        "bytes": 38620,
+        "sha256": "447f2e640973743f80dbeb6099e62b6e7c2b72fe85936af4f8d9c24dfd54f217",
+        "full_readback_verified": true
+      },
+      "VitaJPOverlay_Shell.suprx": {
+        "bytes": 155068,
+        "sha256": "e5a408f3b68aaf809a0e37ada54160fbaa91d1b615d0b12b2774ab32a58bde57",
+        "full_readback_verified": true
+      },
+      "VitaJPOverlay_Text.suprx": {
+        "bytes": 7680,
+        "sha256": "c146238b6e6544ec9ba27f1b03d35db89072c2fc4f3a05d0e75d94c679a777a7",
+        "full_readback_verified": true
+      }
+    }
+  },
+  "host": {
+    "commands": [
+      "cmake -S . -B build/host -G Ninja -DVJO_WITH_NCNN=OFF",
+      "cmake --build build/host -j4",
+      "ctest --test-dir build/host --output-on-failure"
+    ],
+    "ctest_suites_passed": 10,
+    "ctest_suites_failed": 0,
+    "kernel_policy_cases": 9,
+    "added_kernel_coverage": [
+      "Maximum 1024-byte UTF-16 input, 256 Japanese codepoints, reference scoring, oversized rejection, and persistence after scanner scratch reuse.",
+      "Stable driver memory-info type selection and error handling."
+    ]
+  },
+  "vita_builds": {
+    "prerequisite": "VITASDK names the installed SDK and its bin directory is on PATH.",
+    "commands": [
+      "cmake -S vita -B build/vita-hooks-device -G Ninja -DCMAKE_BUILD_TYPE=Release -DVJO_WITH_NCNN=OFF -DVJO_TEXT_TEST_APP=ON",
+      "cmake --build build/vita-hooks-device -j4",
+      "cmake -S vita -B build/vita-full -G Ninja -DCMAKE_BUILD_TYPE=Release -DVJO_WITH_NCNN=ON -DVJO_TEXT_TEST_APP=ON",
+      "cmake --build build/vita-full -j4",
+      "python3 tools/check_kernel_instructions.py --objdump \"$VITASDK/bin/arm-vita-eabi-objdump\" build/vita-hooks-device/VitaJPOverlay_Kernel",
+      "python3 tools/check_vita_syscall_abi.py --kernel build/vita-hooks-device/VitaJPOverlay_Kernel.skprx --shell build/vita-hooks-device/VitaJPOverlay_Shell.suprx --require-hooks"
+    ],
+    "local_ocr_off_build": "passed",
+    "local_ocr_on_build": "passed",
+    "kernel_decoded_arm_instructions": 5923,
+    "kernel_fpu_neon_instructions": 0,
+    "packaged_syscall_abi_audit": "passed"
+  },
+  "syscall_stack": {
+    "method": "GCC -fstack-usage for the Vita kernel; sum the nested submit, offer, and similarity frames. This is a static compiled-code measurement, not an on-device high-water measurement.",
+    "commands": [
+      "cmake -S vita -B build/vita-hooks-stack -G Ninja -DVJO_WITH_NCNN=OFF -DCMAKE_C_FLAGS=-fstack-usage",
+      "cmake --build build/vita-hooks-stack --target VitaJPOverlay_Kernel -j4"
+    ],
+    "stack_limit_bytes": 4096,
+    "before_submit_frame_bytes": 2120,
+    "after_submit_frame_bytes": 64,
+    "offer_frame_bytes": 2152,
+    "similarity_frame_bytes": 568,
+    "before_summed_chain_bytes": 4840,
+    "after_summed_chain_bytes": 2784,
+    "os_overhead_included": false,
+    "scratch_buffer_bytes": 5122,
+    "additional_resident_scratch_bytes": 0,
+    "correction": "Reuse disjoint raw and decoded-text regions of the existing scan buffer while holding the text mutex."
+  },
+  "vita3k": {
+    "command": "python3 tools/test_vita3k_hooks.py --vpk build/vita-hooks-device/vjo-hook-test.vpk",
+    "portable_checks": 43,
+    "observer_checks": 192,
+    "production_plugin_checks": 14,
+    "total_checks": 249,
+    "failures": 0,
+    "result": "PASS",
+    "scope": "Portable text and import-guard cases, ARM/Thumb observer register preservation, and the production user plugin using the self-test app's transport exports. Physical kernel loading and SceShell startup are verified separately above."
+  },
+  "unmeasured": {
+    "real_screenshot_CER": null,
+    "physical_game_dialogue_capture": null,
+    "other_commercial_game_compatibility": null,
+    "physical_firmware_360_boot": null,
+    "console_peak_memory_bytes": null,
+    "console_hook_latency_us": null,
+    "console_scan_duration_s": null
+  }
+}

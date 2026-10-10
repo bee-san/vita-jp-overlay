@@ -17,8 +17,9 @@
     "hook_check_failures": 0,
     "full_local_ocr_build": "passed",
     "device_build_local_ocr": false,
-    "normal_physical_boot_verified": null,
-    "game_text_capture_verified": null
+    "normal_physical_boot_verified": false,
+    "game_text_capture_verified": null,
+    "followup": "Physical boot still shut down at the first unresolved custom syscall. Runtime probe found kernel state READY (2) and a mov pc,#0 import trap. A firmware-specific SceSysmemForKernel import remained; fixed in 0.6-hooks.3."
   },
   "commands": [
     "python3 tools/check_kernel_instructions.py --objdump \"$VITASDK/bin/arm-vita-eabi-objdump\" build/vita-full/VitaJPOverlay_Kernel (before rebuilding)",

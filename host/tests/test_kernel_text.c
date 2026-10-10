@@ -12,7 +12,7 @@ static uint8_t memory[8192];
 static const uint32_t base_address = 0x81000000u;
 static SceUID caller, allocation;
 static unsigned allocation_type, maps, releases, pinned, probes;
-static int bad_window, copy_failure, mutex_busy;
+static int bad_window, copy_failure, mutex_busy, info_failure;
 static unsigned capture_allocations, capture_frees, capture_bytes;
 static int allocation_failure;
 void klog(const char *fmt, ...) {}
@@ -36,7 +36,15 @@ int ksceKernelGetMemBlockBase(SceUID uid, void **base) {
     *base = uid == 22 ? (void *)memory : (void *)(uintptr_t)base_address; return 0;
 }
 int ksceKernelGetMemBlockAllocMapSize(SceUID uid, SceSize *size) { *size = sizeof(memory); return 0; }
-int ksceKernelGetMemBlockType(SceUID uid, unsigned int *type) { *type = allocation_type; return 0; }
+int ksceKernelMemBlockGetInfoEx(SceUID uid, SceKernelMemBlockInfoEx *info) {
+    TEST_CHECK(sizeof(*info) == 0xB8 && info->size == 0xB8);
+    TEST_CHECK(offsetof(SceKernelMemBlockInfoEx, core_info.type) == 4);
+    const uint8_t *bytes = (const uint8_t *)info;
+    for (unsigned i = sizeof(info->size); i < sizeof(*info); i++) TEST_CHECK(bytes[i] == 0);
+    if (info_failure) return -1;
+    info->core_info.type = allocation_type;
+    return 0;
+}
 SceUID ksceKernelProcUserMap(SceUID pid, const char *n, int permission, const void *p,
                             SceSize bytes, void **page, SceSize *size, uint32_t *offset)
 {
@@ -69,7 +77,7 @@ static void setup(void)
     g.game_pid = 7; g.game_active = VJO_GAME; g.shell_pid = 3; g.text_epoch = 1;
     caller = 3; allocation = 11; allocation_type = SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_RW;
     maps = releases = pinned = probes = syscall_depth = 0;
-    bad_window = copy_failure = mutex_busy = 0;
+    bad_window = copy_failure = mutex_busy = info_failure = 0;
     capture_allocations = capture_frees = capture_bytes = 0; allocation_failure = 0;
     process = process_epoch = 0; session = 1;
     TEST_ASSERT(text_init() == 0);
@@ -125,6 +133,40 @@ static void indirection(void)
     TEST_CHECK(vjoTextSubmit(&e) == VJO_ERR_ARG && pinned == 0);
 }
 
+static void submit_capacity(void)
+{
+    setup();
+    char expected[VJO_TEXT_BYTES];
+    for (unsigned i = 0; i < VJO_TEXT_CODEPOINTS; i++) {
+        memory[2*i] = 0x2B; memory[2*i+1] = 0x73; /* UTF-16LE 猫 */
+        memcpy(expected+3*i, "猫", 3);
+    }
+    expected[3*VJO_TEXT_CODEPOINTS] = 0;
+    TEST_ASSERT(vjoTextReference(session, expected) == 0);
+    caller = 7;
+    VjoTextEvent e = {sizeof(e), VJO_TEXT_CALL, VJO_TEXT_UTF16LE, 10,
+                     base_address, VJO_TEXT_BYTES, 0, 0};
+    TEST_ASSERT(vjoTextSubmit(&e) == 0);
+    VjoTextCandidate *c = &sources.items[0];
+    TEST_CHECK(c->id && c->length == VJO_TEXT_CODEPOINTS && c->score == 100);
+    TEST_CHECK(!strcmp(c->text, expected) && maps == releases && pinned == 0);
+    uint32_t id = c->id, sequence = sources.sequence;
+    unsigned previous_maps = maps;
+    e.bytes++;
+    TEST_CHECK(vjoTextSubmit(&e) == VJO_ERR_ARG && maps == previous_maps);
+    TEST_CHECK(sources.sequence == sequence);
+
+    /* A subsequent scan reuses the same scratch; submitted text must persist. */
+    memset(memory, 0, sizeof(memory));
+    scan_address = base_address;
+    previous_maps = maps;
+    text_tick();
+    c = vjo_text_find(&sources, id);
+    TEST_CHECK(c && !strcmp(c->text, expected) && c->score == 100);
+    TEST_CHECK(maps > previous_maps);
+    TEST_CHECK(syscall_depth == 0 && maps == releases && pinned == 0);
+}
+
 static void source_lifetime(void)
 {
     setup();
@@ -178,6 +220,26 @@ static void scan_budget(void)
     TEST_CHECK(scan_address == base_address && maps == 0);
 }
 
+static void scan_memory_type(void)
+{
+    const unsigned allowed[] = {SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_RW,
+        SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_R, SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_GAME_RW};
+    for (unsigned i = 0; i < sizeof(allowed)/sizeof(allowed[0]); i++) {
+        setup();
+        allocation_type = allowed[i]; scan_address = base_address;
+        scan_step();
+        TEST_CHECK(maps > 0 && maps == releases && pinned == 0);
+    }
+    setup();
+    info_failure = 1; scan_address = base_address;
+    scan_step();
+    TEST_CHECK(maps == 0 && scan_address >= base_address+sizeof(memory));
+    /* Failure must not leave a stale accepted type from the preceding scan. */
+    info_failure = 0; allocation_type = 99; scan_address = base_address;
+    scan_step();
+    TEST_CHECK(maps == 0 && scan_address >= base_address+sizeof(memory));
+}
+
 static void lazy_capture(void)
 {
     setup();
@@ -206,7 +268,9 @@ static void lazy_capture(void)
 
 TEST_LIST = {
     {"text syscall permissions", permissions}, {"mapped copy and nonblocking submit", submit_mapping},
-    {"register pointer and UTF16", indirection}, {"blank/freed source invalidation", source_lifetime},
+    {"register pointer and UTF16", indirection}, {"submit capacity and scratch reuse", submit_capacity},
+    {"blank/freed source invalidation", source_lifetime},
     {"same-PID session invalidation", session_epoch}, {"bounded discovery/listen", scan_budget},
+    {"stable driver memory type and failures", scan_memory_type},
     {"lazy capture and safe native release", lazy_capture}, {NULL, NULL}
 };

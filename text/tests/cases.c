@@ -2,6 +2,7 @@
 #include "cases.h"
 #include "../../core/text_scan.h"
 #include "../../core/hook_profile.h"
+#include "../../include/vjo_import.h"
 #include <string.h>
 
 static unsigned checks, failures;
@@ -11,6 +12,22 @@ static FILE *output;
 static VjoTextSources sources;
 static VjoTextCandidate choices[VJO_TEXT_CHOICES];
 static uint8_t window[4096 + VJO_TEXT_BYTES];
+
+static void import_bindings(void)
+{
+    /* Exact trap read from the physical 3.65 loader after a kernel import
+     * failed to resolve; inspecting it must never branch through it. */
+    const uint32_t unresolved[] = {0xE24FC008, 0xE3A0F000, 0xE1A00000, 0};
+    const uint32_t weak[] = {0xE3E00000, 0xE12FFF1E, 0xE1A00000, 0};
+    const uint32_t unresolved_return[] = {0xE24FC008, 0xE12FFF1E, 0xE1A00000, 0};
+    const uint32_t syscall[] = {0xE3E00000, 0xEF000123, 0xE12FFF1E, 0};
+    const uint32_t direct[] = {0xE300C001, 0xE348C100, 0xE12FFF1C, 0};
+    CHECK(!vjo_import_stub_ready(unresolved));
+    CHECK(!vjo_import_stub_ready(weak));
+    CHECK(!vjo_import_stub_ready(unresolved_return));
+    CHECK(vjo_import_stub_ready(syscall));
+    CHECK(vjo_import_stub_ready(direct));
+}
 
 static void codecs(void)
 {
@@ -139,7 +156,7 @@ static void profiles(void)
 int vjo_text_run_tests(FILE *report)
 {
     output = report; checks = failures = 0;
-    codecs(); matching(); streams(); scanner(); profiles();
+    import_bindings(); codecs(); matching(); streams(); scanner(); profiles();
     fprintf(report, "portable checks=%u failures=%u sources_bytes=%u cp932_bytes=22560\n",
             checks, failures, (unsigned)sizeof(sources));
     return (int)failures;

@@ -18,6 +18,8 @@ static uint32_t capture_flags;
 static int state_read_result;
 static unsigned raw_calls, raw_rows_copied, raw_fault_row;
 static int raw_short_read;
+static int input_block_result, input_blocked;
+static unsigned input_block_calls, input_release_calls;
 
 static void capture_pixels(uint32_t row, uint32_t n, uint8_t *dst)
 {
@@ -56,7 +58,13 @@ int vjoGetState(VjoState *out) {
 int vjoSetRegion(const VjoRect *r) { return 0; }
 int vjoSetTriggers(int toggle, int subtitle) { return 0; }
 int vjoSetGameActive(int pid, int active) { return 0; }
-int vjoSetInputBlock(int on) { return 0; }
+int vjoSetInputBlock(int on) {
+    if (on) input_block_calls++;
+    else input_release_calls++;
+    if (input_block_result < 0) return input_block_result;
+    input_blocked = on != 0;
+    return 0;
+}
 static int capture_calls;
 int vjoRequestCapture(uint32_t flags) {
     if (flags == VJO_CAPTURE_DISCARD) { discard_requests++; return 0; }
@@ -190,6 +198,9 @@ static void setup(const char *ini)
     capture_waits = capture_pending = 0;
     capture_flags = 0;
     state_read_result = 0;
+    input_block_result = input_blocked = 0;
+    input_block_calls = input_release_calls = 0;
+    input_block_error = 0;
     raw_calls = raw_rows_copied = 0;
     raw_fault_row = 0;
     raw_short_read = 0;
@@ -488,6 +499,82 @@ static void native_setup(const char *mode)
     c->id = 10; c->kind = VJO_TEXT_CALL; c->encoding = VJO_TEXT_UTF8;
     c->japanese = c->length = 6; c->updates = 1;
     strcpy(c->text, "猫を見ました");
+}
+
+static void check_overlay_owns_input(void)
+{
+    TEST_CHECK(ov != OV_CLOSED && g_view.open);
+    TEST_CHECK(input_block_calls > 0 && input_blocked);
+    TEST_CHECK(input_release_calls == 0);
+}
+
+/* Selecting a row changes the overlay's content, not its input ownership.
+ * Exercise the actual command and dictionary completion paths before close. */
+static void test_hook_selection_preserves_input_ownership(void)
+{
+    native_setup(RELAY_CONFIG "text_source = hooks\n");
+    TEST_CHECK(!input_blocked && !input_block_calls && !input_release_calls);
+    open_overlay();
+    TEST_ASSERT(g_view.hook_picker);
+    check_overlay_owns_input();
+    vjo_post_hook(hook_snapshot.session, 10);
+    on_command();
+    TEST_ASSERT(job_running && job_native && !g_view.hook_picker);
+    check_overlay_owns_input();
+    uint32_t checksum;
+    TEST_ASSERT(run_job(&results[job_idx], &cache_data[job_idx], &checksum) == VJO_OK);
+    on_job_done();
+    TEST_ASSERT(!job_running && g_view.list && g_view.list->n_entries == 1);
+    check_overlay_owns_input();
+    pending_cmd = VJO_CMD_HOOK_DISCOVER;
+    on_command();
+    TEST_CHECK(g_view.hook_picker && !hook_snapshot.selected);
+    check_overlay_owns_input();
+    pending_cmd = VJO_CMD_CLOSED;
+    on_command();
+    TEST_CHECK(ov == OV_CLOSED && !g_view.open && !input_blocked);
+    TEST_CHECK(input_release_calls == 1);
+    close_overlay();
+    TEST_CHECK(input_release_calls == 1); /* a duplicate close has no owner */
+}
+
+static void test_hook_picker_stays_closed_without_input_ownership(void)
+{
+    native_setup(RELAY_CONFIG "text_source = hooks\n");
+    input_block_result = VJO_ERR_PERM;
+    open_overlay();
+    TEST_CHECK(input_block_calls == 1 && input_release_calls == 0);
+    TEST_CHECK(!input_blocked && ov == OV_CLOSED && !g_view.open);
+    TEST_CHECK(!g_view.hook_picker && !g_view.list && !job_running);
+    TEST_CHECK(!text_started && !capture_calls && !relay_connections);
+    TEST_CHECK(g_view.strip_kind == VJO_STRIP_ERROR && !g_view.strip_busy);
+    TEST_CHECK(g_view.strip_on);
+    TEST_CHECK(strstr(g_view.strip_text, "cannot block game controls") != NULL);
+    /* A later successful retry must establish ownership before showing rows. */
+    input_block_result = 0;
+    open_overlay();
+    TEST_CHECK(input_block_calls == 2 && g_view.hook_picker);
+    check_overlay_owns_input();
+    TEST_CHECK(!g_view.strip_on && !g_view.strip_text[0]);
+}
+
+static void test_input_ownership_error_clears_on_game_change(void)
+{
+    for (int replacing_game = 0; replacing_game < 2; replacing_game++) {
+        native_setup(RELAY_CONFIG "text_source = hooks\n");
+        input_block_result = VJO_ERR_PERM;
+        open_overlay();
+        TEST_ASSERT(input_block_error && g_view.strip_on && !subtitles);
+        if (replacing_game) {
+            kernel_state.game_pid = 19;
+            on_game_start();
+        } else {
+            on_game_exit();
+        }
+        TEST_CHECK(!input_block_error && !g_view.strip_on && !g_view.strip_text[0]);
+        TEST_CHECK(ov == OV_CLOSED && !g_view.open && !input_blocked);
+        TEST_CHECK(input_release_calls == 0); /* failed open never acquired it */
+    }
 }
 
 /* A synthetic response with invented text. The real JPEG encoder, streamed
@@ -850,6 +937,7 @@ static void test_changed_picker_choice_is_not_silently_selected(void)
 {
     native_setup(RELAY_CONFIG "text_source = hooks\n");
     open_overlay();
+    check_overlay_owns_input();
     strcpy(hook_snapshot.candidates[0].text, "別の文章");
     hook_snapshot.sequence++;
     poll_hooks();
@@ -858,6 +946,7 @@ static void test_changed_picker_choice_is_not_silently_selected(void)
     TEST_CHECK(!job_running && !hook_snapshot.selected && g_view.hook_picker);
     TEST_CHECK(g_view.status_is_error && strstr(g_view.status, "changed"));
     TEST_CHECK(!strcmp(g_view.hooks[0].text, "別の文章"));
+    check_overlay_owns_input();
 }
 
 static void test_closed_anchor_clears_subtitle_busy(void)
@@ -875,6 +964,7 @@ static void test_ambiguous_and_stale_hook_choices(void)
 {
     native_setup(RELAY_CONFIG "text_source = hooks\n");
     open_overlay();
+    check_overlay_owns_input();
     hook_snapshot.count = 2;
     hook_snapshot.candidates[1] = hook_snapshot.candidates[0];
     hook_snapshot.candidates[1].id = 11;
@@ -886,6 +976,7 @@ static void test_ambiguous_and_stale_hook_choices(void)
     on_command();
     TEST_CHECK(!hook_snapshot.selected && !job_running);
     TEST_CHECK(!capture_calls && !relay_connections);
+    check_overlay_owns_input();
 }
 
 static void test_hook_picker_without_dictionary_settings(void)
@@ -1155,6 +1246,9 @@ static void test_native_heap_retires_for_ocr(void)
 }
 
 TEST_LIST = {
+    {"input_ownership_error_clears_on_game_change", test_input_ownership_error_clears_on_game_change},
+    {"hook_picker_stays_closed_without_input_ownership", test_hook_picker_stays_closed_without_input_ownership},
+    {"hook_selection_preserves_input_ownership", test_hook_selection_preserves_input_ownership},
     {"capture_allocation_status_identifies_physical_error", test_capture_allocation_status_identifies_physical_error},
     {"local_capture_keeps_multiple_passes", test_local_capture_keeps_multiple_passes},
     {"capture_rows_jpeg_lens_anchor", test_capture_rows_jpeg_lens_anchor},

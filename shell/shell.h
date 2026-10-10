@@ -85,6 +85,11 @@ void vjo_capture_fini(void);
  * out; serialized with the OCR job's capture (one kernel buffer). Returns
  * VJO_OK or a VJO_E_* code. */
 int vjo_capture_jpeg(VjoArena *a, uint32_t flags, int quality, VjoBuf *out, VjoState *st);
+/* The same single-pass capture for a raw-pixel reader: consume(ud, st) runs
+ * with the capture held and reads its rows with vjoReadRaw, each once (the
+ * kernel frees its buffer after the last). Returns consume's result, or the
+ * capture's VJO_E_* code. */
+int vjo_capture_raw(uint32_t flags, int (*consume)(void *ud, const VjoState *st), void *ud, VjoState *st);
 
 /* game.c */
 /* The process's title ID; 0, or < 0 when not readable (yet). */
@@ -123,6 +128,8 @@ void vjo_net_cancel_clear(VjoNetCancel *c);
 void vjo_platform_vita(VjoPlatform *p, VjoNetCancel *cancel);
 /* Reuses ScePaf's existing heap. Returns NULL when its bounded allocation fails. */
 void *vjo_shell_heap_alloc(size_t bytes);
+/* The same, for `what` (named in the log). */
+void *vjo_shell_heap_alloc_for(const char *what, size_t bytes);
 void vjo_shell_heap_free(void *ptr);
 
 /* This console's IPv4 address and netmask (host byte order); -1 if none. */

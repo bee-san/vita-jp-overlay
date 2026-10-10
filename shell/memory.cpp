@@ -19,7 +19,7 @@ template <typename Function> static bool ready(Function fn)
 #endif
 }
 
-extern "C" void *vjo_shell_heap_alloc(size_t bytes)
+extern "C" void *vjo_shell_heap_alloc_for(const char *what, size_t bytes)
 {
     if (!ready(::GetGlobalHeapAllocator) ||
         !ready(sce_paf_memalign) || !ready(sce_paf_free))
@@ -32,14 +32,19 @@ extern "C" void *vjo_shell_heap_alloc(size_t bytes)
         return nullptr;
     const size_t available = heap->GetFreeSize();
     if (available < RESERVE || bytes > available - RESERVE) {
-        vjo_log("Lens Paf reserve guard: free=%u requested=%u reserve=%u",
-                (unsigned)available, (unsigned)bytes, (unsigned)RESERVE);
+        vjo_log("%s Paf reserve guard: free=%u requested=%u reserve=%u",
+                what, (unsigned)available, (unsigned)bytes, (unsigned)RESERVE);
         return nullptr;
     }
     void *p = sce_paf_memalign(16, bytes);
-    vjo_log("Lens Paf allocation: free=%u requested=%u reserve=%u success=%d",
-            (unsigned)available, (unsigned)bytes, (unsigned)RESERVE, p != nullptr);
+    vjo_log("%s Paf allocation: free=%u requested=%u reserve=%u success=%d",
+            what, (unsigned)available, (unsigned)bytes, (unsigned)RESERVE, p != nullptr);
     return p;
+}
+
+extern "C" void *vjo_shell_heap_alloc(size_t bytes)
+{
+    return vjo_shell_heap_alloc_for("Lens", bytes);
 }
 
 extern "C" void vjo_shell_heap_free(void *p)

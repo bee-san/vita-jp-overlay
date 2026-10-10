@@ -120,7 +120,7 @@ python3 tools/test_vita3k_hooks.py --vpk build/vita/vjo-hook-test.vpk
 ```
 
 The VPK exports a **test transport**, loads the production `.suprx`, exercises
-all four import hooks and signed ARM/Thumb profiles, rejects a bad signature,
+all eight import hooks and signed ARM/Thumb profiles, rejects a bad signature,
 checks original return values and unloads the hooks. Separate assembly probes
 check r0–r12, SP/LR, APSR/GE, FPSCR and all 32 VFP registers, including a Thumb
 site with a four-byte-aligned stack. Host tests use the production kernel mapping
@@ -169,14 +169,18 @@ a verified CLANNAD text hook. See the [memory measurements](benchmarks/native-te
 `0.6-hooks.5` adds retail `SceLibc` imports for `memcpy`, `strcpy`, `strncpy`
 and `memmove` alongside the existing `SceLibKernel` clib hooks. An offline
 inspection of CLANNAD PCSG00415 found all four retail imports and none of the
-four original clib imports. This is a confirmed coverage gap; it does not yet
-prove that these calls carry the visible dialogue. `strcpy` results use a
+four original clib imports. Running the unchanged production text plugin in
+isolated Vita3K then captured two different visible narration pages through
+the same retail `memcpy` call site, without a CLANNAD-specific profile.
+`strcpy` results use a
 kernel-bounded, NUL-terminated UTF-8/CP932 read rather than dereferencing the
 result in the game plugin. Zero-length memory copies remain ignored.
 
 The ARM self-test explicitly imports both libraries (avoiding newlib's local
 implementations), exercises each interceptor, checks return values and an
 overlapping `memmove`, and checks that unloading restores all four retail
-imports. It passed 255 checks in isolated Vita3K. These checks validate the
-plugin mechanics; CLANNAD gameplay capture and hardware performance remain
-unverified.
+imports. It passed 255 checks in isolated Vita3K. The real-game experiment used
+an emulator-only user-space transport with the production decoder; it does not
+validate kernel page mapping or the physical overlay. See the
+[retail-hook measurements](benchmarks/native-libc-hooks-20261010.json).
+Physical CLANNAD capture and hardware performance remain unverified.

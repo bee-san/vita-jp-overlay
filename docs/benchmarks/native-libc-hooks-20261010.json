@@ -34,7 +34,59 @@
       "total": 255,
       "failures": 0
     },
-    "emulator_plugin_cases": "Both C libraries, bounded strcpy transport, preserved return values, overlapping memmove, zero-length copy ignored, all hooks removed on unload"
+    "emulator_plugin_cases": "Both C libraries, bounded strcpy transport, preserved return values, overlapping memmove, zero-length copy ignored, all hooks removed on unload",
+    "real_game_emulator": {
+      "environment": "Isolated Vita3K, Qt frontend under Xvfb, software rendering",
+      "source_reference": "Vita3K/Vita3K b75d5e6292d5caa6a8411bacc9db1eca1531beab",
+      "production_text_plugin": "Unmodified artifact listed below",
+      "transport": "Emulator-only Vjo API8 user-space bridge using production decoder; not the kernel transport",
+      "game_specific_profile_loaded": false,
+      "visible_pages_matched": 2,
+      "same_immediate_source": "0x8102CA7F",
+      "import": "SceLibc memcpy",
+      "observations": [
+        {
+          "page": 1,
+          "source_updates": 1,
+          "input_bytes": 17,
+          "utf8_bytes": 24
+        },
+        {
+          "page": 4,
+          "source_updates": 2,
+          "input_bytes": 13,
+          "utf8_bytes": 18
+        }
+      ],
+      "verification": "Manually compare each rendered page with its decoded capture; a delayed backlog source was excluded",
+      "evidence": {
+        "live-page-1.png": {
+          "sha256": "7356c9f78d35f8f9dd0ca86ad000d6026c5e0db04b29505e26fcb2e69f5197c0",
+          "bytes": 13733,
+          "distribution": "Private local evidence; not committed"
+        },
+        "live-page-1.log": {
+          "sha256": "4daeef2774d2e39db256193c8cf42c625ced1a008aa13b5cf83a76d7b2fbfd53",
+          "bytes": 42257,
+          "distribution": "Private local evidence; not committed"
+        },
+        "live-page-4b.png": {
+          "sha256": "8dd3564b134b68e0997c67ef17fe835df0c3cd2ab67ab70a864fd695c0010fe9",
+          "bytes": 422231,
+          "distribution": "Private local evidence; not committed"
+        },
+        "live-page-4.log": {
+          "sha256": "35da4e90a96465f57a989e823af33d2cb445e60efc9d7f1aedcef253a59b8ee1",
+          "bytes": 43830,
+          "distribution": "Private local evidence; not committed"
+        }
+      },
+      "limits": [
+        "Only two narration pages checked; not a full-game compatibility result",
+        "This helper filtered short/non-Japanese events before ranking; selectable-source continuity requires a separate full-feed snapshot check",
+        "No physical kernel mapping, overlay rendering, speed or memory measurement"
+      ]
+    }
   },
   "artifacts": {
     "VitaJPOverlay_Kernel.skprx": {
@@ -51,9 +103,9 @@
     }
   },
   "unverified": [
-    "Real CLANNAD dialogue through the new imports",
     "Physical hardware startup/capture with this revision",
     "Runtime performance and memory cost",
-    "Whether a game-specific hook is necessary"
+    "Physical selectable-source continuity and broader CLANNAD scenes",
+    "Whether other scenes or revisions require a game-specific hook"
   ]
 }

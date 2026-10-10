@@ -44,6 +44,17 @@ static SceUID next_uid;
 static FILE *model_file;
 static VjoGameOcrRequest queued_request;
 static int queued;
+static const char *expected_module_path;
+static char loaded_module_path[256];
+
+static void assert_model_path(const char *path, int detector)
+{
+    char expected[256];
+    int n = snprintf(expected,sizeof(expected),"%s/%s",queued_request.model_dir,
+                      detector ? VJO_MEIKI_DETECT_MODEL_FILENAME : VJO_MEIKI_MODEL_FILENAME);
+    TEST_ASSERT(n >= 0 && (size_t)n < sizeof(expected));
+    TEST_CHECK(!strcmp(path,expected));
+}
 
 static int test_import_ready(uintptr_t function) { return function != unavailable_import; }
 static TestBlock *by_uid(SceUID uid)
@@ -127,6 +138,7 @@ int sceKernelDelayThread(SceUInt us)
 static int mock_module_run(const MeikiModuleRequest *request, MeikiModuleStats *stats)
 {
     TEST_CHECK(module_live && request->workspace == bridge.workspace && request->input == bridge.input);
+    assert_model_path(request->model_path,0);
     engine_runs++; memset(request->output, 0, sizeof(*request->output));
     request->output->codes[0] = 0x4e00;
     request->output->boxes[2] = 10; request->output->scores[0] = .9f;
@@ -138,12 +150,15 @@ static int mock_module_stop(MeikiModuleStats *stats)
 static int mock_module_detect(const MeikiModuleDetectRequest *request, MeikiModuleStats *stats)
 {
     (void)stats; TEST_CHECK(module_live); memset(request->output,0,sizeof(*request->output));
+    assert_model_path(request->model_path,1);
     return 0;
 }
 SceUID sceKernelLoadStartModule(const char *path, SceSize bytes, void *arg, int flags,
                                SceKernelLMOption *opt, int *status)
 {
-    (void)flags; (void)opt; TEST_CHECK(!strcmp(path,VJO_MEIKI_MODULE_PATH));
+    (void)flags; (void)opt; TEST_CHECK(!strcmp(path,expected_module_path));
+    TEST_ASSERT(strlen(path) < sizeof(loaded_module_path));
+    strcpy(loaded_module_path,path);
     TEST_CHECK(bytes == sizeof(MeikiModuleStart)); MeikiModuleStart *start = arg;
     TEST_CHECK(start->metadata_heap == bridge.metadata);
     TEST_CHECK(!module_live && bridge.metadata && bridge.workspace && bridge.preprocessing);
@@ -174,6 +189,7 @@ SceUID sceIoOpen(const char *path, int flags, unsigned mode)
     }
     model_opens++;
     opened_asset = strstr(path,VJO_MEIKI_DETECT_MODEL_FILENAME) ? 'D' : 'R';
+    assert_model_path(path,opened_asset == 'D');
     if (model_open_rc < 0 && opened_asset == fault_asset) {
         if (cancel_on_model_failure) cancellation = 1;
         return model_open_rc;
@@ -293,6 +309,14 @@ static void setup(void)
     takes = completes = delays = foreign_frees = closes = writes = 0;
     stop_loop_after_delays = stop_loop_on_complete = 0; next_uid = 100;
     queued_request = (VjoGameOcrRequest){sizeof(VjoGameOcrRequest),7,5,24,8,96,0,"ocr"}; queued = 0;
+    expected_module_path = VJO_MEIKI_MODULE_PATH;
+    loaded_module_path[0] = 0;
+}
+static void set_model_directory(const char *directory, const char *module_path)
+{
+    TEST_ASSERT(strlen(directory) < sizeof(queued_request.model_dir));
+    strcpy(queued_request.model_dir,directory);
+    expected_module_path = module_path;
 }
 static int run(VjoGameOcrResult *result) { return vjo_game_ocr_run_request(&queued_request,result); }
 static void drained(void)
@@ -578,6 +602,73 @@ static void test_io_failure_and_successful_job_retries_reset_metadata(void)
     TEST_CHECK(run(&result) == VJO_OK && engine_runs == 2 && loads == 2 && unloads == 2);
     TEST_CHECK(!io_failure.stage && control_opens == 1 && result.text[0] != 'M'); drained();
 }
+static void test_app0_and_normal_model_module_paths(void)
+{
+    if (!have_model()) return;
+    static const char *directories[] = {
+        VJO_MEIKI_APP0_MODEL_DIR,"ux0:data/VitaJPOverlay/meiki","ocr",
+        "app0:/other-model-directory","app0-models"
+    };
+    for (unsigned i=0;i<sizeof(directories)/sizeof(directories[0]);i++) {
+        for (unsigned layout=0;layout<2;layout++) {
+            if (layout && !getenv("VJO_MEIKI_TEST_DETECT_MODEL")) continue;
+            setup();
+            const char *expected = (i == 0 || i == 3)
+                ? VJO_MEIKI_APP0_MODULE_PATH : VJO_MEIKI_MODULE_PATH;
+            set_model_directory(directories[i],expected);
+            queued_request.layout = layout;
+            VjoGameOcrResult result;
+            TEST_CHECK(run(&result) == VJO_OK && !result.cleanup_status);
+            TEST_CHECK(!strcmp(loaded_module_path,expected));
+            TEST_CHECK(model_opens == 1+layout && alloc_calls == 3 && free_calls == 3);
+            TEST_CHECK(loads == 1 && unloads == 1); drained();
+        }
+    }
+}
+static void test_app0_missing_model_allocates_nothing_and_recovers(void)
+{
+    setup(); set_model_directory(VJO_MEIKI_APP0_MODEL_DIR,VJO_MEIKI_APP0_MODULE_PATH);
+    model_open_rc = (int32_t)0x80010002;
+    VjoGameOcrResult result;
+    TEST_CHECK(run(&result) == VJO_E_OCR_MODEL_IO);
+    assert_io_diagnostic(&result,'R','O',0x80010002,'P',0);
+    TEST_CHECK(!loaded_module_path[0] && !alloc_calls && !loads);
+    if (!have_model()) return;
+    model_open_rc = 0;
+    TEST_CHECK(run(&result) == VJO_OK && !result.cleanup_status);
+    TEST_CHECK(!strcmp(loaded_module_path,VJO_MEIKI_APP0_MODULE_PATH));
+    TEST_CHECK(alloc_calls == 3 && free_calls == 3 && loads == 1 && unloads == 1);
+    TEST_CHECK(!io_failure.stage); drained();
+}
+static void test_app0_cancellation_and_cleanup_keep_ownership(void)
+{
+    if (!have_model()) return;
+    setup(); set_model_directory(VJO_MEIKI_APP0_MODEL_DIR,VJO_MEIKI_APP0_MODULE_PATH);
+    cancel_after_model_read = 1;
+    VjoGameOcrResult result;
+    TEST_CHECK(run(&result) == VJO_E_CANCELLED && !result.cleanup_status);
+    TEST_CHECK(model_reads == 1 && closes == 1 && !alloc_calls && !loads);
+    assert_empty_error_text(&result); drained();
+
+    setup(); set_model_directory(VJO_MEIKI_APP0_MODEL_DIR,VJO_MEIKI_APP0_MODULE_PATH);
+    model_close_rc = -1; model_size_set = 1; model_size_result = 1;
+    TEST_CHECK(run(&result) == VJO_E_OCR_UNAVAILABLE && result.cleanup_status);
+    TEST_CHECK(blocked && model_file && model_fd == 2 && !alloc_calls && !loads);
+    TEST_CHECK(run(&result) == VJO_E_OCR_UNAVAILABLE && model_opens == 1);
+    model_close_rc = 0;
+    TEST_CHECK(vjo_game_ocr_worker_stop() == VJO_OK); drained();
+
+    setup(); set_model_directory(VJO_MEIKI_APP0_MODEL_DIR,VJO_MEIKI_APP0_MODULE_PATH);
+    module_stop_rc = -1;
+    TEST_CHECK(run(&result) == VJO_E_OCR_UNAVAILABLE && result.cleanup_status);
+    TEST_CHECK(!strcmp(loaded_module_path,VJO_MEIKI_APP0_MODULE_PATH));
+    TEST_CHECK(blocked && module_live && bridge.module == 99 && has_owned_blocks());
+    TEST_CHECK(alloc_calls == 3 && !free_calls && !unloads);
+    TEST_CHECK(run(&result) == VJO_E_OCR_UNAVAILABLE && alloc_calls == 3 && loads == 1);
+    assert_empty_error_text(&result);
+    module_stop_rc = 0;
+    TEST_CHECK(vjo_game_ocr_worker_stop() == VJO_OK && unloads == 1 && free_calls == 3); drained();
+}
 TEST_LIST = {
     {"budget_and_import_guards_allocate_nothing",test_budget_and_import_guards_allocate_nothing},
     {"job_and_budget_threshold",test_job_and_budget_threshold},
@@ -596,5 +687,8 @@ TEST_LIST = {
     {"short_reads_succeed_and_hash_size_errors_stay_model",test_short_reads_succeed_and_hash_size_errors_stay_model},
     {"io_cleanup_and_cancellation_suppress_diagnostics",test_io_cleanup_and_cancellation_suppress_diagnostics},
     {"io_failure_and_successful_job_retries_reset_metadata",test_io_failure_and_successful_job_retries_reset_metadata},
+    {"app0_and_normal_model_module_paths",test_app0_and_normal_model_module_paths},
+    {"app0_missing_model_allocates_nothing_and_recovers",test_app0_missing_model_allocates_nothing_and_recovers},
+    {"app0_cancellation_and_cleanup_keep_ownership",test_app0_cancellation_and_cleanup_keep_ownership},
     {NULL,NULL}
 };

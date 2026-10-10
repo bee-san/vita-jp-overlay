@@ -230,6 +230,65 @@ The game process may be unable to write its own log; this diagnostic reaches
 the existing Shell log without that dependency. Cancellation or failed cleanup
 suppresses the tag, and every other failed result still clears its text.
 
+### Scoped retail game mount test
+
+A retail game process may fail to open the installed `ux0:data` models even
+when their FTP readback matches the pinned hashes. Physical log readback
+recorded recognizer Open `0x80010013` (ENODEV) before neural allocation, and
+the same-process `app0:/sce_sys/param.sfo` control returned Open
+`0x80010002` (ENOENT), rather than a successful `P`. The former is consistent
+with the requested `ux0:data` namespace being unavailable in that process;
+the latter only establishes that this SFO path was not found. The SFO need
+not be exposed through the game's `app0:` mount, so its absence does not
+establish that the separately supplied app0 model files will be unreadable.
+
+For the `PCSG00415` manual test, use the already installed rePatch plugin to
+add only these overlay-owned files beneath its game directory:
+
+```text
+ux0:rePatch/PCSG00415/VitaJPOverlay/meiki/meiki-stream-int8.mnn
+ux0:rePatch/PCSG00415/VitaJPOverlay/meiki/meiki-detect-int8.mnn
+ux0:rePatch/PCSG00415/VitaJPOverlay/meiki/meiki-engine.suprx
+```
+
+Keep any existing rePatch translations and game assets intact. This adds a
+new `VitaJPOverlay/meiki` subdirectory and uses rePatch's existing game-file
+overlay; see its [official release notes](https://github.com/dots-tb/rePatch-reDux0/releases)
+for support for files absent from the original game. Copy and read back all
+three files in this new directory before the manual test; a successful SFO
+control is not a prerequisite. This requires no additional global
+file-permission plugin and changes no allocation quota. Use the same
+pinned models and frozen ABI-compatible engine already validated locally.
+
+Select the game mount in the Shell configuration:
+
+```ini
+ocr_backend = meiki
+text_source = ocr
+ocr_model_dir = app0:/VitaJPOverlay/meiki
+```
+
+Register `VitaJPOverlay_OCR.suprx` only under `*PCSG00415`, as above, with
+Text registrations disabled. A model directory beginning exactly with `app0:`
+selects the fixed engine path
+`app0:/VitaJPOverlay/meiki/meiki-engine.suprx`; the recognizer and optional
+detector remain relative to the configured model directory. Other model
+directories retain the existing `ur0:data/VitaJPOverlay/meiki-engine.suprx`
+engine path. Hash validation still precedes all three engine-buffer allocations.
+Cancellation and failed-close/stop/unload ownership rules remain unchanged.
+
+Host tests check both layouts, exact model and engine paths, ordinary-path
+fallback, a missing model with zero allocations and successful retry, and
+cancellation/cleanup retention. They stub the native loader and file mount.
+An isolated actual ARM worker probe in Vita3K also loads the fixed `app0:`
+engine path for two successful single-line requests. No `ur0:` engine fallback
+is installed. A third request returns native missing-model Open `0x80010002`
+with zero allocations; two module load/unload cycles and six released owned
+blocks are verified. This probe uses the fake API 9 transport and emulator
+adapters described above.
+Retail rePatch visibility, loading the frozen engine from `app0:`, and actual
+in-game OCR remain pending physical validation.
+
 For physical diagnosis, optionally build with `-DVJO_MEMORY_DIAGNOSTICS=ON`.
 The first explicit pure-Meiki request compares virtual and direct Paf free
 counts with `QueryInfo` and records the heap range. A 128 KiB Paf test is

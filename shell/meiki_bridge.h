@@ -7,6 +7,10 @@
 #include <psp2/kernel/threadmgr.h>
 
 #define VJO_MEIKI_MODULE_PATH "ur0:data/VitaJPOverlay/meiki-engine.suprx"
+/* Retail game processes may only read their game mount. The engine beside
+ * app0 models is fixed, rather than selected by an arbitrary model directory. */
+#define VJO_MEIKI_APP0_MODEL_DIR "app0:/VitaJPOverlay/meiki"
+#define VJO_MEIKI_APP0_MODULE_PATH VJO_MEIKI_APP0_MODEL_DIR "/meiki-engine.suprx"
 typedef struct {
     void *ud;
     void *(*alloc)(void *ud, size_t bytes);

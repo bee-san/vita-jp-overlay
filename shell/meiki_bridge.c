@@ -176,7 +176,9 @@ int vjo_meiki_bridge_start_mode(VjoMeikiBridge *b, const VjoPlatform *p,
                               b->metadata, MEIKI_MODULE_METADATA_BYTES,
                               &b->api, &b->module_stats};
     int status = 0;
-    b->module = sceKernelLoadStartModule(VJO_MEIKI_MODULE_PATH, sizeof(start), &start, 0, NULL, &status);
+    const char *module_path = !sceClibStrncmp(model_dir, "app0:", 5)
+        ? VJO_MEIKI_APP0_MODULE_PATH : VJO_MEIKI_MODULE_PATH;
+    b->module = sceKernelLoadStartModule(module_path, sizeof(start), &start, 0, NULL, &status);
     if (b->module < 0) {
         vjo_log("Meiki module load failed 0x%08X status=%d", b->module, status);
         free_buffers(b);

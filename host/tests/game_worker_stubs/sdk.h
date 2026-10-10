@@ -38,6 +38,7 @@ typedef struct { int64_t st_size; } SceIoStat;
 #define sceClibSnprintf snprintf
 #define sceClibVsnprintf vsnprintf
 #define sceClibStrcmp strcmp
+#define sceClibStrncmp strncmp
 SceUID sceKernelAllocMemBlock(const char *, int, SceSize, void *);
 int sceKernelGetMemBlockBase(SceUID, void **);
 int sceKernelGetMemBlockInfoByRange(void *, SceSize, SceKernelMemBlockInfo *);

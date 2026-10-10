@@ -24,6 +24,7 @@ set(VJO_ROOT ${ROOT})
 set(VJO_BUILD_VITA ON)
 option(VJO_WITH_NCNN "Build the CPU-only local mobile OCR recognizer" ON)
 option(VJO_WITH_MEIKI "Build the isolated, bounded Meiki OCR engine" OFF)
+option(VJO_MEMORY_DIAGNOSTICS "Enable bounded, idle-only physical memory probes" OFF)
 set(VJO_VERSION "0.6-hooks.5")
 
 # ---------------- kernel ----------------
@@ -114,6 +115,17 @@ add_dependencies(VitaJPOverlay_Shell vjo_kernel_stubs)
 set_source_files_properties(${ROOT}/shell/boot.c ${ROOT}/shell/log_vita.c
   PROPERTIES COMPILE_OPTIONS "-mgeneral-regs-only")
 target_compile_definitions(VitaJPOverlay_Shell PRIVATE VJO_PAF_ALLOC=1)
+if(VJO_MEMORY_DIAGNOSTICS)
+  target_sources(VitaJPOverlay_Shell PRIVATE ${ROOT}/shell/memory_probe.c)
+  target_compile_definitions(VitaJPOverlay_Shell PRIVATE VJO_MEMORY_DIAGNOSTICS=1)
+  set_source_files_properties(${ROOT}/shell/memory_probe.c
+    PROPERTIES COMPILE_OPTIONS "-mgeneral-regs-only")
+  # The optional range-query import must not prevent Shell from loading on
+  # firmware that lacks it. Probes guard every Sysmem stub before any call.
+  set(VJO_SHELL_SYSMEM_STUB SceSysmem_stub_weak)
+else()
+  set(VJO_SHELL_SYSMEM_STUB SceSysmem_stub)
+endif()
 if(VJO_WITH_MEIKI)
   include(${ROOT}/cmake/MeikiOCR.cmake)
   add_subdirectory(${VJO_MEIKI_SOURCE_DIR}/module ${CMAKE_CURRENT_BINARY_DIR}/meiki-module)
@@ -136,7 +148,7 @@ target_link_libraries(VitaJPOverlay_Shell
   ScePaf_stub_weak
   SceLibKernel_stub
   SceKernelThreadMgr_stub
-  SceSysmem_stub
+  ${VJO_SHELL_SYSMEM_STUB}
   SceProcessmgr_stub
   SceIofilemgr_stub
   SceVshBridge_stub

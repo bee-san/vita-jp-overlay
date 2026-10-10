@@ -5,6 +5,10 @@
 #include <psp2/kernel/sysmem.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
+#ifdef VJO_MEMORY_DIAGNOSTICS
+#include "memory_probe.h"
+extern void vjo_paf_probe_once(void);
+#endif
 
 #include "../core/jpegsw.h"
 #include "../core/regions.h"
@@ -113,6 +117,9 @@ static void backoff_note(Backoff *b, int failed);
 #define NET_EV_JOB  1u
 #define NET_EV_QUIT 2u
 static volatile int job_running;
+#ifdef VJO_MEMORY_DIAGNOSTICS
+static int diagnostic_failure;
+#endif
 static volatile int job_done;
 static volatile int job_idx;
 static volatile int job_rc;
@@ -732,6 +739,26 @@ static void start_job(const char *why, int lookup)
         if (!lookup) return;
     }
     if (job_running) return;
+#ifdef VJO_MEMORY_DIAGNOSTICS
+    /* This opt-in build starts no Anki thread. The control thread is the
+     * sole caller, before any capture or OCR job can own a workspace. */
+    if (cfg.text_source == VJO_SOURCE_OCR && cfg.ocr_backend == VJO_OCR_MEIKI) {
+        if (diagnostic_failure) {
+            if (ov != OV_CLOSED)
+                view_publish(1, NULL, "Memory diagnostic failed; restart the Vita before testing again", 1);
+            return;
+        }
+        vjo_paf_probe_once();
+        int probe_rc = vjo_memory_probe_once();
+        if (probe_rc <= VJO_MEMORY_PROBE_CLEANUP) {
+            diagnostic_failure = probe_rc;
+            vjo_log("memory diagnostics failed rc=%d; OCR refused", probe_rc);
+            if (ov != OV_CLOSED)
+                view_publish(1, NULL, "Memory diagnostic failed; restart the Vita before testing again", 1);
+            return;
+        }
+    }
+#endif
     if (native_enabled() && !text_state.current.id &&
         (cfg.text_source == VJO_SOURCE_HOOKS || text_calibrated)) {
         if (ov != OV_CLOSED) picker_publish();
@@ -1546,10 +1573,15 @@ int vjo_worker_start(void)
         vjo_worker_stop();
         return -1;
     }
+#ifdef VJO_MEMORY_DIAGNOSTICS
+    anki_started = 0;
+    vjo_log("memory diagnostics: Anki worker disabled; probes run once before first Meiki job");
+#else
     vjo_log("worker startup: starting Anki worker");
     anki_started = vjo_anki_start() == 0;
     if (!anki_started)
         vjo_log("anki: thread failed to start: Anki is off");
+#endif
     vjo_log("worker startup: initializing arenas");
     vjo_platform_vita(&plat);
     vjo_arena_init(&scratch, scratch_mem, sizeof(scratch_mem));
@@ -1590,6 +1622,12 @@ int vjo_worker_stop(void)
 #ifdef VJO_WITH_MEIKI
     if (vjo_meiki_bridge_finish(&meiki_bridge)) {
         vjo_log("Meiki cleanup pending; refusing Shell unload");
+        return -1;
+    }
+#endif
+#ifdef VJO_MEMORY_DIAGNOSTICS
+    if (vjo_memory_probe_release()) {
+        vjo_log("memory diagnostic cleanup pending; refusing Shell unload");
         return -1;
     }
 #endif

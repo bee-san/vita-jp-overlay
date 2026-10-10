@@ -6,7 +6,25 @@
 #include "replay.h"
 #define VJO_TEST_MEMORY_STUBS 1
 #define VJO_TEST_WORKER_LIFECYCLE 1
+#ifdef VJO_MEMORY_DIAGNOSTICS
+/* Keep startup simulation local to this diagnostic test translation unit. */
+#define sceKernelCreateMutex vjo_test_default_create_mutex
+#define sceKernelCreateEventFlag vjo_test_default_create_event
+#define sceKernelCreateThread vjo_test_default_create_thread
+#define sceKernelStartThread vjo_test_default_start_thread
+#endif
 #include <psp2/host_stubs.h>
+#ifdef VJO_MEMORY_DIAGNOSTICS
+#undef sceKernelCreateMutex
+#undef sceKernelCreateEventFlag
+#undef sceKernelCreateThread
+#undef sceKernelStartThread
+SceUID sceKernelCreateMutex(const char *, unsigned int, int, void *);
+SceUID sceKernelCreateEventFlag(const char *, unsigned int, unsigned int, void *);
+SceUID sceKernelCreateThread(const char *, int (*)(SceSize, void *), int,
+                           unsigned int, unsigned int, int, void *);
+int sceKernelStartThread(SceUID, SceSize, void *);
+#endif
 #include "../../include/vjo_text.h"
 
 static VjoState kernel_state;
@@ -110,11 +128,61 @@ int vjoTextReference(uint32_t session, const char *text) {
 #include "../../shell/worker.c"
 
 enum { TEST_NET = 11, TEST_CTL, TEST_EVENT, TEST_CMD, TEST_CAPTURE, TEST_VIEW };
-static unsigned thread_joins, thread_deletes, event_deletes, mutex_deletes, anki_stops;
+static unsigned thread_joins, thread_deletes, event_deletes, mutex_deletes, anki_starts, anki_stops;
 static SceUID join_failure_uid;
 static int anki_stop_error;
 static char lifecycle_events[128];
 static unsigned lifecycle_event_count;
+#ifdef VJO_MEMORY_DIAGNOSTICS
+static unsigned diagnostic_paf_calls, diagnostic_pool_calls, diagnostic_release_calls;
+static int diagnostic_probe_error, diagnostic_release_error;
+static int diagnostic_observe_idle, diagnostic_expect_no_results;
+static unsigned diagnostic_order;
+static int startup_succeeds;
+static unsigned startup_threads, startup_mutexes, startup_events, startup_starts;
+
+SceUID sceKernelCreateMutex(const char *name, unsigned int attr, int count, void *opt)
+{
+    (void)attr; (void)count; (void)opt;
+    if (!startup_succeeds) return -1;
+    startup_mutexes++;
+    if (!strcmp(name, "VjoView")) return TEST_VIEW;
+    if (!strcmp(name, "VjoCmd")) return TEST_CMD;
+    TEST_CHECK(!strcmp(name, "VjoCapture"));
+    return TEST_CAPTURE;
+}
+SceUID sceKernelCreateEventFlag(const char *name, unsigned int attr,
+                              unsigned int bits, void *opt)
+{
+    (void)attr; (void)bits; (void)opt;
+    if (!startup_succeeds) return -1;
+    TEST_CHECK(!strcmp(name, "VjoNetEv"));
+    startup_events++;
+    return TEST_EVENT;
+}
+SceUID sceKernelCreateThread(const char *name, int (*entry)(SceSize, void *),
+                            int priority, unsigned int stack,
+                            unsigned int attr, int affinity, void *opt)
+{
+    (void)priority; (void)attr; (void)affinity; (void)opt;
+    if (!startup_succeeds) return -1;
+    startup_threads++;
+    if (!strcmp(name, "VjoNet")) {
+        TEST_CHECK(entry == net_main && stack == JOB_STACK_BYTES);
+        return TEST_NET;
+    }
+    TEST_CHECK(!strcmp(name, "VjoControl") && entry == ctl_main && stack == 0x4000);
+    return TEST_CTL;
+}
+int sceKernelStartThread(SceUID uid, SceSize size, void *args)
+{
+    (void)size; (void)args;
+    if (!startup_succeeds) return -1;
+    TEST_CHECK(uid == TEST_NET || uid == TEST_CTL);
+    startup_starts++;
+    return 0;
+}
+#endif
 
 static void lifecycle_event(char value)
 {
@@ -228,7 +296,7 @@ void vjo_log_configure(const VjoConfig *c) {}
 void vjo_log(const char *fmt, ...) {}
 int vjo_region_load(const char *tid, VjoRect *out, VjoArena *a) { return 0; }
 int vjo_region_save(const char *tid, const VjoRect *r, VjoArena *a) { return 0; }
-int vjo_anki_start(void) { return -1; }
+int vjo_anki_start(void) { anki_starts++; return -1; }
 int vjo_anki_stop(void) { anki_stops++; lifecycle_event('a'); return anki_stop_error; }
 void vjo_anki_configure(const VjoConfig *c) {}
 void vjo_anki_post_check(unsigned int seq) {}
@@ -272,6 +340,12 @@ static int paf_allocation_fail;
 void *vjo_paf_alloc(size_t bytes)
 {
     TEST_CHECK(bytes == sizeof(result_mem));
+#ifdef VJO_MEMORY_DIAGNOSTICS
+    if (diagnostic_observe_idle) {
+        TEST_CHECK(diagnostic_order == 2 && !job_running && !capture_calls);
+        diagnostic_order = 3;
+    }
+#endif
     paf_allocations++;
     return paf_allocation_fail ? NULL : result_mem;
 }
@@ -284,6 +358,43 @@ void vjo_paf_free(void *pointer)
     }
 }
 void vjo_paf_memory_report(void) {}
+#endif
+
+#ifdef VJO_MEMORY_DIAGNOSTICS
+static void check_diagnostic_idle(void)
+{
+    if (!diagnostic_observe_idle) return;
+    TEST_CHECK(!job_running && !anki_started && !capture_calls);
+    TEST_CHECK(!bridge_starts && !bridge_recognitions && !bridge_detections);
+    TEST_CHECK(!(posted_events & NET_EV_JOB));
+    if (diagnostic_expect_no_results)
+        TEST_CHECK(!has_result_memory() && !paf_allocations && !allocation_calls);
+}
+void vjo_paf_probe_once(void)
+{
+    diagnostic_paf_calls++;
+    check_diagnostic_idle();
+    if (diagnostic_observe_idle) {
+        TEST_CHECK(diagnostic_order == 0);
+        diagnostic_order = 1;
+    }
+}
+int vjo_memory_probe_once(void)
+{
+    diagnostic_pool_calls++;
+    check_diagnostic_idle();
+    if (diagnostic_observe_idle) {
+        TEST_CHECK(diagnostic_order == 1);
+        diagnostic_order = 2;
+    }
+    return diagnostic_probe_error;
+}
+int vjo_memory_probe_release(void)
+{
+    diagnostic_release_calls++;
+    TEST_CHECK(!running && !threads_started);
+    return diagnostic_release_error;
+}
 #endif
 
 static void control_poll_hook(void)
@@ -360,11 +471,20 @@ static void setup(const char *ini)
     running = 1;
     net_thread = ctl_thread = net_evf = cmd_lock = capture_lock = view_lock = -1;
     threads_started = 0;
-    thread_joins = thread_deletes = event_deletes = mutex_deletes = anki_stops = 0;
+    thread_joins = thread_deletes = event_deletes = mutex_deletes = anki_starts = anki_stops = 0;
     join_failure_uid = -1;
     anki_stop_error = 0;
     lifecycle_event_count = 0;
     lifecycle_events[0] = 0;
+#ifdef VJO_MEMORY_DIAGNOSTICS
+    diagnostic_failure = 0;
+    diagnostic_paf_calls = diagnostic_pool_calls = diagnostic_release_calls = 0;
+    diagnostic_probe_error = diagnostic_release_error = 0;
+    diagnostic_observe_idle = diagnostic_expect_no_results = 0;
+    diagnostic_order = 0;
+    startup_succeeds = 0;
+    startup_threads = startup_mutexes = startup_events = startup_starts = 0;
+#endif
 #ifdef VJO_WITH_MEIKI
     memset(&meiki_bridge, 0, sizeof(meiki_bridge));
     meiki_bridge.module = -1;
@@ -1723,7 +1843,149 @@ static void test_paf_allocation_failure_refuses_job(void)
 }
 #endif
 
+#ifdef VJO_MEMORY_DIAGNOSTICS
+#define DIAGNOSTIC_CONFIG "text_source = ocr\nocr_backend = meiki\nocr_mode = on_press\n" RELAY_CONFIG
+
+static void test_diagnostic_probes_only_for_idle_pure_meiki(void)
+{
+    setup(DIAGNOSTIC_CONFIG);
+    job_running = 1;
+    start_job("already running", 0);
+    TEST_CHECK(!diagnostic_paf_calls && !diagnostic_pool_calls);
+    TEST_CHECK(!capture_calls && !posted_events);
+
+    const char *other_backends[] = {"lens", "ncnn"};
+    for (unsigned i = 0; i < sizeof(other_backends) / sizeof(*other_backends); ++i) {
+        char ini[256];
+        snprintf(ini, sizeof(ini), "text_source = ocr\nocr_backend = %s\n%s",
+                 other_backends[i], RELAY_CONFIG);
+        setup(ini);
+        start_job("other backend", 0);
+        TEST_CHECK(job_running && (posted_events & NET_EV_JOB));
+        TEST_CHECK(!diagnostic_paf_calls && !diagnostic_pool_calls);
+    }
+
+    /* Auto text mode on a non-native game still must not run these probes. */
+    setup("text_source = auto\nocr_backend = meiki\n" RELAY_CONFIG);
+    TEST_ASSERT(!native_enabled() && cfg.text_source == VJO_SOURCE_AUTO);
+    start_job("automatic text mode", 0);
+    TEST_CHECK(job_running && !diagnostic_paf_calls && !diagnostic_pool_calls);
+
+    native_setup("text_source = hooks\nocr_backend = meiki\n" RELAY_CONFIG);
+    TEST_ASSERT(native_enabled());
+    ov = OV_OPEN;
+    start_job("native hook picker", 0);
+    TEST_CHECK(g_view.hook_picker && !job_running);
+    TEST_CHECK(!diagnostic_paf_calls && !diagnostic_pool_calls);
+    vjoTextControl(hook_snapshot.session, VJO_TEXT_FOLLOW, 10);
+    vjoTextRead(&text_state);
+    start_job("selected native hook", 1);
+    TEST_CHECK(job_running && job_native);
+    TEST_CHECK(!diagnostic_paf_calls && !diagnostic_pool_calls);
+}
+
+static void test_diagnostic_probes_precede_result_allocation_and_job(void)
+{
+    const int allowed[] = {VJO_MEMORY_PROBE_OK, VJO_MEMORY_PROBE_UNAVAILABLE};
+    for (unsigned i = 0; i < sizeof(allowed) / sizeof(*allowed); ++i) {
+        setup(DIAGNOSTIC_CONFIG);
+        remove_game_arenas();
+        diagnostic_observe_idle = diagnostic_expect_no_results = 1;
+        diagnostic_probe_error = allowed[i];
+        /* Native-game context must still use pure OCR when configured so. */
+        native_game = 1;
+        start_job("diagnostic ordering", 0);
+        TEST_CHECK(diagnostic_paf_calls == 1 && diagnostic_pool_calls == 1);
+        TEST_CHECK(diagnostic_order == 3 && paf_allocations == 1);
+        TEST_CHECK(job_running && !job_native && !job_anchor && has_result_memory());
+        TEST_CHECK(posted_events == NET_EV_JOB && !capture_calls);
+        TEST_CHECK(!diagnostic_failure && !text_reads && !text_controls);
+        start_job("running job refuses another probe", 0);
+        TEST_CHECK(diagnostic_paf_calls == 1 && diagnostic_pool_calls == 1);
+    }
+}
+
+static void test_diagnostic_failures_stick_without_allocation_or_ocr(void)
+{
+    const int errors[] = {VJO_MEMORY_PROBE_CLEANUP, VJO_MEMORY_PROBE_INVALID,
+                          VJO_MEMORY_PROBE_CANARY, VJO_MEMORY_PROBE_BUSY};
+    for (unsigned i = 0; i < sizeof(errors) / sizeof(*errors); ++i) {
+        setup(DIAGNOSTIC_CONFIG);
+        remove_game_arenas();
+        diagnostic_probe_error = errors[i];
+        open_overlay();
+        TEST_CHECK(diagnostic_failure == errors[i]);
+        TEST_CHECK(diagnostic_paf_calls == 1 && diagnostic_pool_calls == 1);
+        TEST_CHECK(g_view.open && g_view.status_is_error && !g_view.hook_picker);
+        TEST_CHECK(strstr(g_view.status, "Memory diagnostic failed") != NULL);
+        TEST_CHECK(!job_running && !posted_events && !has_result_memory());
+        TEST_CHECK(!paf_allocations && !allocation_calls && !capture_calls && !bridge_starts);
+        /* Even a later successful fake probe cannot clear the module's latch. */
+        diagnostic_probe_error = VJO_MEMORY_PROBE_OK;
+        close_overlay();
+        open_overlay();
+        TEST_CHECK(diagnostic_failure == errors[i]);
+        TEST_CHECK(diagnostic_paf_calls == 1 && diagnostic_pool_calls == 1);
+        TEST_CHECK(!job_running && !paf_allocations && !capture_calls && !bridge_starts);
+        on_game_exit();
+        strcpy(title_id, "PCSG00940");
+        start_job("another game cannot clear diagnostic failure", 0);
+        TEST_CHECK(diagnostic_failure == errors[i]);
+        TEST_CHECK(diagnostic_pool_calls == 1 && !job_running && !paf_allocations);
+    }
+}
+
+static void test_worker_stop_diagnostic_cleanup_failure_then_retry(void)
+{
+    setup_live_worker();
+    diagnostic_release_error = VJO_MEMORY_PROBE_CLEANUP;
+    TEST_CHECK(vjo_worker_stop() < 0);
+    TEST_CHECK(!running && !threads_started && thread_joins == 2);
+    TEST_CHECK(diagnostic_release_calls == 1 && !anki_stops && bridge_finishes == 1);
+    TEST_CHECK(!strcmp(lifecycle_events, "ncb"));
+    check_shell_resources_retained();
+    TEST_CHECK(vjo_worker_stop() < 0);
+    TEST_CHECK(thread_joins == 2 && diagnostic_release_calls == 2 && !anki_stops);
+    check_shell_resources_retained();
+    diagnostic_release_error = VJO_MEMORY_PROBE_OK;
+    TEST_CHECK(vjo_worker_stop() == 0);
+    TEST_CHECK(diagnostic_release_calls == 3 && thread_joins == 2 && anki_stops == 1);
+    check_shell_resources_released();
+    TEST_CHECK(!strcmp(lifecycle_events, "ncbbbaNCrempv"));
+    TEST_CHECK(vjo_worker_stop() == 0);
+    TEST_CHECK(diagnostic_release_calls == 4 && thread_joins == 2);
+    check_shell_resources_released();
+}
+
+static void test_diagnostic_startup_skips_anki_and_defers_probes(void)
+{
+    setup(DIAGNOSTIC_CONFIG);
+    remove_game_arenas();
+    startup_succeeds = 1;
+    TEST_ASSERT(vjo_worker_start() == 0);
+    TEST_CHECK(startup_mutexes == 3 && startup_events == 1);
+    TEST_CHECK(startup_threads == 2 && startup_starts == 2 && threads_started);
+    TEST_CHECK(!anki_starts && !anki_started);
+    TEST_CHECK(!diagnostic_paf_calls && !diagnostic_pool_calls && !diagnostic_release_calls);
+    TEST_CHECK(!job_running && !has_result_memory() && !paf_allocations);
+    diagnostic_observe_idle = diagnostic_expect_no_results = 1;
+    start_job("first manual Meiki action", 0);
+    TEST_CHECK(diagnostic_order == 3 && diagnostic_paf_calls == 1 && diagnostic_pool_calls == 1);
+    TEST_CHECK(job_running && !anki_starts && !anki_started);
+    TEST_CHECK(vjo_worker_stop() == 0);
+    TEST_CHECK(diagnostic_release_calls == 1 && thread_joins == 2);
+    check_shell_resources_released();
+}
+#endif
+
 TEST_LIST = {
+#ifdef VJO_MEMORY_DIAGNOSTICS
+    {"diagnostic_probes_only_for_idle_pure_meiki", test_diagnostic_probes_only_for_idle_pure_meiki},
+    {"diagnostic_probes_precede_result_allocation_and_job", test_diagnostic_probes_precede_result_allocation_and_job},
+    {"diagnostic_failures_stick_without_allocation_or_ocr", test_diagnostic_failures_stick_without_allocation_or_ocr},
+    {"worker_stop_diagnostic_cleanup_failure_then_retry", test_worker_stop_diagnostic_cleanup_failure_then_retry},
+    {"diagnostic_startup_skips_anki_and_defers_probes", test_diagnostic_startup_skips_anki_and_defers_probes},
+#endif
     {"capture_allocation_status_identifies_physical_error", test_capture_allocation_status_identifies_physical_error},
     {"local_capture_keeps_multiple_passes", test_local_capture_keeps_multiple_passes},
     {"capture_rows_jpeg_lens_anchor", test_capture_rows_jpeg_lens_anchor},

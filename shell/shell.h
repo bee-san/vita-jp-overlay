@@ -121,6 +121,11 @@ void vjo_platform_vita(VjoPlatform *p);
 /* Reuses ScePaf's existing heap. Returns NULL when its bounded allocation fails. */
 void *vjo_shell_heap_alloc(size_t bytes);
 void vjo_shell_heap_free(void *ptr);
+/* Paf/physical-pool reporting; optional probes run only in diagnostic builds. */
+void vjo_paf_memory_report(void);
+#ifdef VJO_MEMORY_DIAGNOSTICS
+void vjo_paf_probe_once(void);
+#endif
 /* This console's IPv4 address and netmask (host byte order); -1 if none. */
 int vjo_net_local_ipv4(uint32_t *ip, uint32_t *mask);
 /* Connects to port of up to VJO_NET_PROBE_MAX hosts (host byte order) at

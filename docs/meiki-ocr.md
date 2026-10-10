@@ -122,6 +122,33 @@ Host crop accuracy and ARM emulator results do not establish available Paf
 memory, latency or stability beside a game on a physical Vita. Test the
 standalone manual app first, then this optional overlay build manually.
 
+A physical in-game test on 2026-10-10 reported 2,498 KiB free from Paf and
+refused the 768 KiB result allocation before capture or Meiki started. The
+result guard alone requires 2,816 KiB including its reserve. The complete
+single-line path currently requires 24,237,184 bytes (23.114 MiB) of free Paf
+space, plus module code, stacks and capture allocations outside that total.
+Reducing only the result buffers cannot close that gap. The USER counter
+reported a negative value; that value is not a usable free-memory budget.
+
+For physical diagnosis, optionally build with `-DVJO_MEMORY_DIAGNOSTICS=ON`.
+The first explicit pure-Meiki request compares virtual and direct Paf free
+counts with `QueryInfo` and records the heap range. A 128 KiB Paf test is
+allowed only if all those readings support its reserve and margin.
+Separately, it probes owned USER, PHYCONT and CDRAM blocks, verifies their
+mapping and 128 bytes of scalar writes, and frees each block immediately.
+Only a successful small pool test and a positive free counter with 2 MiB
+headroom permit an engine-sized test. That test excludes result buffers,
+module code and thread stacks; CPU scalar access does not validate MNN or
+SIMD execution. No workspace is relocated by this diagnostic build.
+
+Diagnostics run before capture and OCR, with the optional Anki worker
+disabled in this build. Failed mapping checks prevent writes and larger
+probes in that pool. Canary or cleanup failures stop the request;
+cleanup retains ownership and prevents Shell unload until release succeeds.
+The option defaults to off. Keep `log_file = on`, reboot after installation,
+launch the game manually, and press the configured overlay trigger once.
+Return to VitaShell FTP to retrieve `ux0:data/VitaJPOverlay/log.txt`.
+
 The host adapter can be built without Vita SDK or MNN; its injected-engine
 tests cover cancellation, unsupported input, partial-result suppression and
 memory failures. To also build `vjo-meiki-ocr`, pass a patched host

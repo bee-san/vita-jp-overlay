@@ -1,5 +1,6 @@
 /* Production kernel code; SDK substitutes model PID mappings and failures. */
 #include "acutest.h"
+#include <stdarg.h>
 #include <psp2kern/host_stubs.h>
 #include "../../kernel/vjo_kernel.h"
 #include "../../kernel/text.c"
@@ -15,10 +16,21 @@ static unsigned allocation_type, maps, releases, pinned, probes;
 static int bad_window, copy_failure, mutex_busy, info_failure;
 static unsigned capture_allocations, capture_frees, capture_bytes;
 static int allocation_failure;
-void klog(const char *fmt, ...) {}
+static uint64_t test_now;
+static unsigned log_calls, log_syscall_depth;
+static char last_log[192];
+void klog(const char *fmt, ...)
+{
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(last_log, sizeof(last_log), fmt, args);
+    va_end(args);
+    log_calls++;
+    if (syscall_depth > log_syscall_depth) log_syscall_depth = syscall_depth;
+}
 
 SceUID ksceKernelGetProcessId(void) { return caller; }
-uint64_t ksceKernelGetSystemTimeWide(void) { return 1000000; }
+uint64_t ksceKernelGetSystemTimeWide(void) { return test_now; }
 SceUID ksceKernelCreateMutex(const char *n, unsigned int a, int c, void *o) { return 1; }
 int ksceKernelDeleteMutex(SceUID u) { return 0; }
 int ksceKernelLockMutex(SceUID u, int c, void *t) { return 0; }
@@ -50,7 +62,8 @@ SceUID ksceKernelProcUserMap(SceUID pid, const char *n, int permission, const vo
 {
     uintptr_t address = (uintptr_t)p;
     TEST_CHECK(permission == 1 && syscall_depth <= 1);
-    if (copy_failure || pid != g.game_pid || address < base_address ||
+    if (copy_failure) return copy_failure < 0 ? copy_failure : -1;
+    if (pid != g.game_pid || address < base_address ||
         address >= base_address+sizeof(memory) || bytes > base_address+sizeof(memory)-address) return -1;
     maps++; pinned++;
     *page = memory; *size = bad_window ? 0 : sizeof(memory);
@@ -80,6 +93,10 @@ static void setup(void)
     bad_window = copy_failure = mutex_busy = info_failure = 0;
     capture_allocations = capture_frees = capture_bytes = 0; allocation_failure = 0;
     process = process_epoch = 0; session = 1;
+    test_now = 1000000;
+    log_calls = log_syscall_depth = 0; last_log[0] = 0;
+    memset(&scan_diag, 0, sizeof(scan_diag));
+    scan_pass = scan_log_us = 0; scan_logged = 0;
     TEST_ASSERT(text_init() == 0);
     VjoTextSnapshot out;
     TEST_ASSERT(vjoTextRead(&out) == 0 && out.pid == 7);
@@ -266,11 +283,67 @@ static void lazy_capture(void)
     TEST_CHECK(vjoTextControl(session, VJO_TEXT_OFF, 0) == 0 && text_uses_frame_checks());
 }
 
+static void scan_diagnostics(void)
+{
+    setup();
+    TEST_ASSERT(vjoTextControl(session, VJO_TEXT_DISCOVER, 0) == 0);
+    TEST_CHECK(scan_pass == 1 && !log_calls); /* no syscall-stack logging */
+    scan_address = base_address;
+    text_tick();
+    TEST_CHECK(scan_diag.blocks == 1 && scan_diag.types[1] == 1);
+    TEST_CHECK(scan_diag.pages == 2 && scan_diag.bytes == 9220 && !scan_diag.map_failures);
+    TEST_CHECK(log_calls == 1 && !log_syscall_depth);
+    TEST_CHECK(strstr(last_log, "types0/1/0") && strstr(last_log, "read2/9220"));
+
+    /* The first map error is retained even while the one-second limit holds. */
+    scan_address = base_address;
+    copy_failure = (int)0x80024302u;
+    test_now += 500000;
+    text_tick();
+    TEST_CHECK(scan_diag.map_failures == 2 && scan_diag.pages == 2);
+    TEST_CHECK(scan_diag.first_map_pending && scan_diag.first_map_address == base_address);
+    TEST_CHECK(log_calls == 1);
+    scan_address = SCAN_END;
+    test_now += 500000;
+    text_tick();
+    TEST_CHECK(!scanning && log_calls == 2 && !log_syscall_depth);
+    TEST_CHECK(strstr(last_log, "scan done") && strstr(last_log, "mf2"));
+    TEST_CHECK(strstr(last_log, "firstmap:80024302@81000000"));
+    TEST_CHECK(!scan_diag.first_map_pending);
+
+    /* A new pass resets read/error counters; skipped block type stays visible. */
+    TEST_ASSERT(vjoTextControl(session, VJO_TEXT_DISCOVER, 0) == 0);
+    TEST_CHECK(scan_pass == 2 && !scan_diag.map_failures && !scan_diag.pages && log_calls == 2);
+    allocation_type = 99; copy_failure = 0; scan_address = base_address;
+    test_now += 999999;
+    text_tick();
+    TEST_CHECK(log_calls == 2 && scan_diag.skipped == 1 && !scan_diag.pages);
+    test_now++;
+    text_tick();
+    TEST_CHECK(log_calls == 3 && strstr(last_log, "skip1:00000063"));
+
+    TEST_ASSERT(vjoTextControl(session, VJO_TEXT_DISCOVER, 0) == 0);
+    info_failure = 1; scan_address = base_address;
+    test_now += 1000000;
+    text_tick();
+    TEST_CHECK(scan_diag.metadata_failures == 1 && !scan_diag.map_failures && !scan_diag.pages);
+    TEST_CHECK(strstr(last_log, "err1 info:FFFFFFFF@81000000") && !log_syscall_depth);
+
+    TEST_ASSERT(vjoTextControl(session, VJO_TEXT_DISCOVER, 0) == 0);
+    info_failure = 0; allocation_type = SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_RW;
+    bad_window = 1; scan_address = base_address; test_now += 1000000;
+    text_tick();
+    TEST_CHECK(scan_diag.map_failures == 2 && !scan_diag.pages && scan_diag.first_map_window);
+    TEST_CHECK(strstr(last_log, "firstwin:FFFFFFFF@81000000"));
+    TEST_CHECK(maps == releases && !pinned && !log_syscall_depth);
+}
+
 TEST_LIST = {
     {"text syscall permissions", permissions}, {"mapped copy and nonblocking submit", submit_mapping},
     {"register pointer and UTF16", indirection}, {"submit capacity and scratch reuse", submit_capacity},
     {"blank/freed source invalidation", source_lifetime},
     {"same-PID session invalidation", session_epoch}, {"bounded discovery/listen", scan_budget},
     {"stable driver memory type and failures", scan_memory_type},
+    {"bounded worker scanner diagnostics", scan_diagnostics},
     {"lazy capture and safe native release", lazy_capture}, {NULL, NULL}
 };

@@ -6,6 +6,7 @@
 #include <psp2/kernel/processmgr.h>
 #include <psp2/appmgr.h>
 #include <psp2/io/fcntl.h>
+#include <stdarg.h>
 #include <taihen.h>
 #include "../include/vjo_api.h"
 #include "../include/vjo_text.h"
@@ -18,6 +19,23 @@ static SceUID native_uids[VJO_NATIVE_HOOKS];
 static VjoNativeProfile profile;
 static volatile int submitting;
 static int enabled;
+static SceUID diagnostic_fd = -1;
+
+/* Startup metadata only: never write files from a game hook. A loaded module
+ * can have zero usable imports, so module state alone is not capture evidence. */
+static void diagnostic(const char *fmt, ...)
+{
+    char line[256];
+    va_list ap;
+    int n;
+    if (diagnostic_fd < 0) return;
+    va_start(ap, fmt);
+    n = sceClibVsnprintf(line, sizeof(line), fmt, ap);
+    va_end(ap);
+    if (n <= 0) return;
+    if (n >= (int)sizeof(line)) n = sizeof(line) - 1;
+    sceIoWrite(diagnostic_fd, line, n);
+}
 
 /* Single producer at a time. Recursion from our own syscalls is skipped;
  * a busy capture never waits on another game thread. */
@@ -91,13 +109,17 @@ static int find_game_module(SceKernelModuleInfo *main)
     SceUID modules[64];
     SceSize count = sizeof(modules) / sizeof(*modules);
     int found = 0;
-    if (sceKernelGetModuleList(0xFF, modules, &count) < 0 || count > 64) return -1;
+    int rc = sceKernelGetModuleList(0xFF, modules, &count);
+    diagnostic("module list rc=%08X count=%u\n", rc, (unsigned)count);
+    if (rc < 0 || count > 64) return -1;
     for (SceSize i = 0; i < count; i++) {
         SceKernelModuleInfo candidate;
         sceClibMemset(&candidate, 0, sizeof(candidate)); candidate.size = sizeof(candidate);
-        if (sceKernelGetModuleInfo(modules[i], &candidate) < 0) continue;
+        rc = sceKernelGetModuleInfo(modules[i], &candidate);
+        if (rc < 0) { diagnostic("module %08X info rc=%08X\n", modules[i], rc); continue; }
         if (sceClibStrnlen(candidate.module_name, sizeof(candidate.module_name)) == sizeof(candidate.module_name)) continue;
         unsigned len = (unsigned)sceClibStrnlen(candidate.path, sizeof(candidate.path));
+        diagnostic("module %08X name=%.27s path=%.128s\n", modules[i], candidate.module_name, candidate.path);
         if (len < 10 || len == sizeof(candidate.path) ||
             sceClibStrcmp(candidate.path + len - 9, "eboot.bin") ||
             (candidate.path[len-10] != '/' && candidate.path[len-10] != ':')) continue;
@@ -137,11 +159,23 @@ int _start(SceSize argc, const void *args) __attribute__((weak, alias("module_st
 int module_start(SceSize argc, const void *args)
 {
     SceKernelModuleInfo module;
+    char title[12] = {0}, path[96];
+    int version_ready, submit_ready, version;
     (void)argc; (void)args;
+    if (sceAppMgrAppParamGetString(0, 12, title, sizeof(title)) >= 0 && title[0]) {
+        sceClibSnprintf(path, sizeof(path), "ux0:data/VitaJPOverlay/text-%.11s.txt", title);
+        diagnostic_fd = sceIoOpen(path, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0666);
+    }
     for (unsigned i = 0; i < VJO_NATIVE_HOOKS; i++) native_uids[i] = -1;
-    if (!VJO_IMPORT_READY(vjoGetVersion) || !VJO_IMPORT_READY(vjoTextSubmit) ||
-        vjoGetVersion() != VJO_API_VERSION || find_game_module(&module) < 0)
-        return SCE_KERNEL_START_SUCCESS;
+    version_ready = VJO_IMPORT_READY(vjoGetVersion);
+    submit_ready = VJO_IMPORT_READY(vjoTextSubmit);
+    version = version_ready ? vjoGetVersion() : -1;
+    diagnostic("text startup version_ready=%d submit_ready=%d api=%d\n", version_ready, submit_ready, version);
+    if (!version_ready || !submit_ready || version != VJO_API_VERSION || find_game_module(&module) < 0)
+        goto done;
+    diagnostic("game module=%08X name=%.27s\n", module.modid, module.module_name);
+    for (unsigned i = 0; i < 4; i++)
+        diagnostic("segment %u address=%08X bytes=%u\n", i, (unsigned)(uintptr_t)module.segments[i].vaddr, module.segments[i].memsz);
     enabled = 1;
     /* NIDs from the pinned VitaSDK SceLibKernel database. Import hooks affect
      * the main game module only, so our own clib calls cannot recurse. */
@@ -149,7 +183,14 @@ int module_start(SceSize argc, const void *args)
     uids[1] = taiHookFunctionImport(&refs[1], module.module_name, 0xCAE9ACE6, 0x2CDFCD1C, strlcpy_hook);
     uids[2] = taiHookFunctionImport(&refs[2], module.module_name, 0xCAE9ACE6, 0x14E9DBD7, memcpy_hook);
     uids[3] = taiHookFunctionImport(&refs[3], module.module_name, 0xCAE9ACE6, 0xC458D60A, strncpy_hook);
+    diagnostic("import hooks strnlen=%08X strlcpy=%08X memcpy=%08X strncpy=%08X\n", uids[0], uids[1], uids[2], uids[3]);
     load_profile(&module);
+    diagnostic("profile hooks=%u\n", profile.count);
+    for (unsigned i = 0; i < profile.count; i++) diagnostic("profile %u result=%08X\n", i, native_uids[i]);
+done:
+    diagnostic("startup complete enabled=%d\n", enabled);
+    if (diagnostic_fd >= 0) sceIoClose(diagnostic_fd);
+    diagnostic_fd = -1;
     return SCE_KERNEL_START_SUCCESS;
 }
 

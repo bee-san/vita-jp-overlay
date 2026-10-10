@@ -25,6 +25,53 @@ static uint32_t last_poll_us;
 static uint8_t scan_bytes[SCAN_CHUNK + VJO_TEXT_BYTES + 2];
 _Static_assert(sizeof(scan_bytes) >= 2 * VJO_TEXT_BYTES, "text submit scratch must fit");
 
+/* Metadata only. Syscalls reset the counters under lock; only text_tick's
+ * worker logs them, so klog's stack buffer never enters the submit path. */
+static struct {
+    uint32_t blocks, holes, types[3], skipped, skipped_type;
+    uint32_t pages, bytes, map_failures, metadata_failures;
+    uint32_t error_address, first_map_address;
+    int error_rc, first_map_rc;
+    const char *error_stage;
+    SceUID last_uid;
+    int pending, first_map_pending, first_map_window;
+} scan_diag;
+static uint32_t scan_pass, scan_log_us;
+static int scan_logged;
+
+static void scan_diag_begin(void)
+{
+    memset(&scan_diag, 0, sizeof(scan_diag));
+    scan_diag.last_uid = -1;
+    scan_diag.error_stage = "none";
+    scan_diag.pending = 1;
+    scan_pass++;
+}
+
+static void scan_diag_error(const char *stage, int rc, uint32_t address)
+{
+    scan_diag.error_stage = stage;
+    scan_diag.error_rc = rc;
+    scan_diag.error_address = address;
+}
+
+static void scan_diag_log(uint32_t now)
+{
+    if (!scan_diag.pending || (scan_logged && now - scan_log_us < 1000000u)) return;
+    const char *stage = scan_diag.first_map_pending ?
+        (scan_diag.first_map_window ? "firstwin" : "firstmap") : scan_diag.error_stage;
+    int rc = scan_diag.first_map_pending ? scan_diag.first_map_rc : scan_diag.error_rc;
+    uint32_t address = scan_diag.first_map_pending ? scan_diag.first_map_address : scan_diag.error_address;
+    klog("scan %s p%u s%u pid%X at%08X b%u h%u types%u/%u/%u skip%u:%08X read%u/%u mf%u err%u %s:%08X@%08X",
+         scanning ? "run" : "done", scan_pass, session, process, scan_address,
+         scan_diag.blocks, scan_diag.holes, scan_diag.types[0], scan_diag.types[1], scan_diag.types[2],
+         scan_diag.skipped, scan_diag.skipped_type, scan_diag.pages, scan_diag.bytes,
+         scan_diag.map_failures, scan_diag.metadata_failures, stage, rc, address);
+    scan_diag.pending = scan_diag.first_map_pending = 0;
+    scan_log_us = now;
+    scan_logged = 1;
+}
+
 static int shell_caller(void)
 {
     return g.shell_pid > 0 && ksceKernelGetProcessId() == g.shell_pid;
@@ -42,14 +89,16 @@ static void sync_process(void)
     mode = VJO_TEXT_OFF; scanning = 0;
     scan_address = SCAN_BEGIN;
     last_poll_us = 0;
+    scan_diag.pending = 0;
 }
 
-static int mapped_copy(SceUID pid, uint32_t address, void *dst, uint32_t bytes)
+static int mapped_copy_checked(SceUID pid, uint32_t address, void *dst, uint32_t bytes, int *invalid_window)
 {
     void *page = NULL;
     SceSize size = 0;
     uint32_t offset = 0;
     SceUID uid;
+    if (invalid_window) *invalid_window = 0;
     if (!bytes || address < 0x40000000u || bytes > 0xFFFFFFFFu - address) return -1;
     uid = ksceKernelProcUserMap(pid, "VjoTextRead", 1, (const void *)(uintptr_t)address,
                                bytes, &page, &size, &offset);
@@ -57,11 +106,17 @@ static int mapped_copy(SceUID pid, uint32_t address, void *dst, uint32_t bytes)
     if (page && offset <= size && bytes <= size - offset)
         memcpy(dst, (const uint8_t *)page + offset, bytes);
     else {
+        if (invalid_window) *invalid_window = 1;
         ksceKernelMemBlockRelease(uid);
         return -1;
     }
     ksceKernelMemBlockRelease(uid);
     return 0;
+}
+
+static int mapped_copy(SceUID pid, uint32_t address, void *dst, uint32_t bytes)
+{
+    return mapped_copy_checked(pid, address, dst, bytes, NULL);
 }
 
 /* Read only to an allocation's end. The mapping copy pins it, and the UID
@@ -126,19 +181,34 @@ static void scan_step(void)
     /* Up to 64 hole probes or four pages per tick; no scan runs in a game's
      * display/input call. The worker yields between ticks. */
     unsigned pages = 0;
+    scan_diag.pending = 1;
     for (unsigned attempts = 0; attempts < 64 && pages < 4; attempts++) {
         SceUID uid;
         void *base = NULL;
         SceSize size = 0;
         SceKernelMemBlockInfoEx info;
         unsigned type;
+        int rc, new_block, invalid_window;
         uint32_t left, starts, bytes, prefix;
         if (scan_address >= SCAN_END) { scanning = 0; return; }
         uid = ksceKernelFindProcMemBlockByAddr(process, (void *)(uintptr_t)scan_address, 0);
-        if (uid < 0 || ksceKernelGetMemBlockBase(uid, &base) < 0 ||
-            ksceKernelGetMemBlockAllocMapSize(uid, &size) < 0 ||
-            scan_address < (uint32_t)(uintptr_t)base ||
+        if (uid < 0) {
+            scan_diag.holes++;
+            scan_address += SCAN_CHUNK; continue;
+        }
+        new_block = uid != scan_diag.last_uid;
+        if (new_block) { scan_diag.blocks++; scan_diag.last_uid = uid; }
+        rc = ksceKernelGetMemBlockBase(uid, &base);
+        if (rc < 0) {
+            scan_diag.metadata_failures++;
+            scan_diag_error("base", rc, scan_address);
+            scan_address += SCAN_CHUNK; continue;
+        }
+        rc = ksceKernelGetMemBlockAllocMapSize(uid, &size);
+        if (rc < 0 || scan_address < (uint32_t)(uintptr_t)base ||
             scan_address - (uint32_t)(uintptr_t)base >= size) {
+            scan_diag.metadata_failures++;
+            scan_diag_error(rc < 0 ? "size" : "bounds", rc < 0 ? rc : -1, scan_address);
             scan_address += SCAN_CHUNK; continue;
         }
         left = size - (scan_address - (uint32_t)(uintptr_t)base);
@@ -149,7 +219,10 @@ static void scan_step(void)
          * 3.63; a strong import prevents this entire plugin from starting. */
         memset(&info, 0, sizeof(info));
         info.size = sizeof(info);
-        if (ksceKernelMemBlockGetInfoEx(uid, &info) < 0) {
+        rc = ksceKernelMemBlockGetInfoEx(uid, &info);
+        if (rc < 0) {
+            scan_diag.metadata_failures++;
+            scan_diag_error("info", rc, scan_address);
             scan_address += left; continue;
         }
         type = info.core_info.type;
@@ -157,13 +230,31 @@ static void scan_step(void)
         if (type != SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_RW &&
             type != SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_R &&
             type != SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_GAME_RW) {
+            scan_diag.skipped++;
+            scan_diag.skipped_type = type;
             scan_address += left; continue;
         }
+        if (new_block)
+            scan_diag.types[type == SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_R ? 0 :
+                            type == SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_RW ? 1 : 2]++;
         starts = left < SCAN_CHUNK ? left : SCAN_CHUNK;
         bytes = left < sizeof(scan_bytes)-prefix ? left : sizeof(scan_bytes)-prefix;
-        if (mapped_copy(process, scan_address-prefix, scan_bytes, bytes+prefix) == 0)
+        rc = mapped_copy_checked(process, scan_address-prefix, scan_bytes, bytes+prefix, &invalid_window);
+        if (rc == 0) {
+            scan_diag.pages++;
+            scan_diag.bytes += bytes + prefix;
             vjo_text_scan(&sources, scan_bytes, bytes+prefix, prefix, starts+prefix,
                            scan_address-prefix, (uint32_t)uid);
+        } else {
+            if (!scan_diag.map_failures) {
+                scan_diag.first_map_address = scan_address - prefix;
+                scan_diag.first_map_rc = rc;
+                scan_diag.first_map_pending = 1;
+                scan_diag.first_map_window = invalid_window;
+            }
+            scan_diag.map_failures++;
+            scan_diag_error(invalid_window ? "window" : "map", rc, scan_address - prefix);
+        }
         scan_address += starts;
         pages++;
     }
@@ -180,6 +271,7 @@ void text_tick(void)
         }
         if (mode == VJO_TEXT_DISCOVER && scanning) scan_step();
     }
+    scan_diag_log((uint32_t)ksceKernelGetSystemTimeWide());
     ksceKernelUnlockMutex(lock, 1);
 }
 
@@ -198,7 +290,9 @@ int vjoTextControl(uint32_t expected, int next_mode, uint32_t selected)
         sources.selected = selected;
         mode = next_mode;
         if (mode != VJO_TEXT_OFF) g.capture_release = 1;
-        if (mode == VJO_TEXT_DISCOVER) { scan_address = SCAN_BEGIN; scanning = 1; }
+        if (mode == VJO_TEXT_DISCOVER) {
+            scan_address = SCAN_BEGIN; scanning = 1; scan_diag_begin();
+        }
         else scanning = 0;
         sources.sequence++;
     }
@@ -224,6 +318,7 @@ int vjoTextReference(uint32_t expected, const char *user_text)
         rc = expected == session && process > 0 ? vjo_text_reference(&sources, text) : VJO_ERR_NO_GAME;
         if (rc == 0) {
             scan_address = SCAN_BEGIN; scanning = 1; mode = VJO_TEXT_DISCOVER;
+            scan_diag_begin();
             g.capture_release = 1;
         }
         ksceKernelUnlockMutex(lock, 1);

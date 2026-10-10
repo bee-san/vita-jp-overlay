@@ -18,7 +18,7 @@ set(CORE_SRC
   core/arena.c core/pb.c core/utf.c core/lens.c core/json.c core/jpdb.c
   core/textfilter.c core/entries.c core/jiten.c core/config.c core/regions.c
   core/http.c core/tls.c core/tls_roots.c core/client.c core/styled.c core/jpegsw.c
-  core/base64.c core/anki.c core/net.c)
+  core/base64.c core/anki.c core/net.c core/games.c core/sfo.c)
 add_library(vjo_core STATIC ${CORE_SRC})
 target_include_directories(vjo_core PUBLIC core include)
 target_link_libraries(vjo_core PUBLIC bearssl)
@@ -48,3 +48,14 @@ add_executable(vjo-anki-tests host/tests/test_anki.c)
 target_include_directories(vjo-anki-tests PRIVATE third_party/acutest/include)
 target_link_libraries(vjo-anki-tests vjo_host)
 add_test(NAME anki COMMAND vjo-anki-tests)
+
+add_executable(vjo-games-tests host/tests/test_games.c vita/games_storage.c)
+target_include_directories(vjo-games-tests PRIVATE third_party/acutest/include host/tests/games_stubs)
+target_link_libraries(vjo-games-tests vjo_host)
+target_compile_options(vjo-games-tests PRIVATE -Wall -Wextra)
+add_test(NAME games COMMAND vjo-games-tests)
+add_executable(vjo-game-input-tests host/tests/test_game_input.c kernel/triggers.c)
+target_include_directories(vjo-game-input-tests PRIVATE third_party/acutest/include host/tests/games_stubs)
+target_link_libraries(vjo-game-input-tests vjo_host)
+target_compile_options(vjo-game-input-tests PRIVATE -Wall -Wextra -Wno-unused-parameter)
+add_test(NAME game_input COMMAND vjo-game-input-tests)

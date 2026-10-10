@@ -5,6 +5,20 @@
 #include <psp2/kernel/processmgr.h>
 
 #include "shell.h"
+#include "../core/games.h"
+#include "../vita/games_storage.h"
+
+int vjo_game_enabled(const char *tid, VjoArena *scratch)
+{
+    size_t mark = vjo_arena_mark(scratch);
+    VjoGames *games = vjo_arena_alloc(scratch, sizeof(*games));
+    int rc = games ? vjo_games_file_load(games, scratch) : -1;
+    int enabled = rc >= 0 && vjo_games_enabled(games, tid);
+    if (rc < 0) vjo_log("games.ini unreadable: OCR disabled until settings are repaired");
+    else if (rc > 0) vjo_log("games.ini recovered from backup");
+    vjo_arena_release(scratch, mark);
+    return enabled;
+}
 
 int sceKernelGetProcessTitleId(SceUID pid, char *titleid, SceSize len); /* SceProcessmgr, not in headers */
 
@@ -30,8 +44,7 @@ int vjo_title_game_mode(const char *tid)
 {
     if (!sceClibStrcmp(tid, "NPXS10028"))
         return VJO_GAME_STATIC_FB;
-    if (!sceClibStrncmp(tid, "NPXS", 4) || !sceClibStrncmp(tid, "main", 4) ||
-        !sceClibStrncmp(tid, "VITASHELL", 9))
+    if (!vjo_game_is_candidate(tid))
         return VJO_GAME_NONE;
     return VJO_GAME;
 }

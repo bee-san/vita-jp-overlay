@@ -51,6 +51,47 @@ Running it again later keeps your settings. `--uninstall` removes the plugin lin
 
 ## Using it
 
+### Choose which games use the overlay
+
+Install `JPOverlaySettings.vpk` from the release zip using VitaShell, then open
+the **JP Overlay Settings** bubble. It shows installed games from `ux0:app`,
+`ur0:app`, and an inserted cartridge, with game names, icons and ON/OFF switches.
+Turn **Uncharted** OFF to leave L+R available for aiming and firing.
+
+Changes save automatically. Close the settings app and restart or resume the
+game. Disabled games receive their normal buttons and touch input: neither OCR,
+subtitles nor overlay shortcuts activate in them. Choices survive Vita restarts.
+
+| Settings app input | Action |
+| --- | --- |
+| D-pad / L or R | Select a game / move a page |
+| × or tap a game | Toggle that game ON/OFF |
+| △ or tap the default row | Switch between all games by default and selected games only |
+| □ | Filter all, enabled or disabled games |
+| Start | Refresh installed games (including an inserted cartridge) |
+| ○ | Exit |
+
+Existing installations enable all games until you change a setting. Per-game
+choices override the default; switching the default keeps those choices.
+Adrenaline's PSP games share the `NPXS10028` setting. The settings app and
+system utilities never reserve overlay shortcuts.
+If a game's title ID cannot be identified, it stays disabled once per-game
+choices exist, so an unknown title cannot bypass your exclusions.
+
+The policy lives in `ux0:data/VitaJPOverlay/games.ini`, separately from API keys
+and OCR regions. For example (use your game's actual title ID):
+
+```ini
+default = enabled
+PCSA00029 = disabled
+```
+
+Saves keep a `games.ini.bak` recovery copy. If both copies are unreadable,
+the overlay stays disabled and the app reports the error without replacing
+your choices. Repair the file in VitaShell or restore your backup.
+
+### In a game
+
 In a game:
 
 

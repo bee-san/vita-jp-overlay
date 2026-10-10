@@ -20,6 +20,8 @@ if [ ! -x "$VITASDK/bin/arm-vita-eabi-gcc" ]; then
   yes | bash "$WORK/bootstrap-vitasdk.sh" --install-dir "$VITASDK"
 fi
 [ -f "$VITASDK/arm-vita-eabi/include/taihen.h" ] || yes | vdpm install taihen
+# Standalone per-game settings app (the plugins themselves do not use vita2d).
+[ -f "$VITASDK/arm-vita-eabi/lib/libvita2d.a" ] || vdpm pacman -- -S --noconfirm libvita2d
 
 if [ ! -d "$VITASDK/arm-vita-eabi/include/paf/widget" ]; then
   cd "$WORK"

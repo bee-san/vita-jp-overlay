@@ -727,6 +727,12 @@ static int64_t pending_since;
 
 static void activate_game(SceUID pid, const char *tid, int mode)
 {
+    if (!vjo_game_enabled(tid, &scratch)) {
+        title_id[0] = '\0';
+        vjoSetGameActive(pid, VJO_GAME_NONE);
+        vjo_log("%s: JP Overlay disabled; game input passes through", tid);
+        return;
+    }
     sceClibSnprintf(title_id, sizeof(title_id), "%s", tid);
     if (mem_uid < 0)
         mem_alloc();
@@ -779,6 +785,12 @@ static void on_game_start(void)
 {
     VjoState st;
     stable_pending = 0;
+    /* An enabled game can give way directly to a disabled game/settings app.
+     * Release its overlay and abandon its pending network result first. */
+    close_overlay();
+    cache_ok = 0;
+    if (job_running) job_cancelled = 1;
+    if (net_busy()) vjo_net_cancel(&net_cancel);
     if (subtitles) /* over a game, without its exit: the strip goes */
         set_subtitles(0);
     st.size = sizeof(st);

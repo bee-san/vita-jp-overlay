@@ -89,6 +89,8 @@ int vjo_capture_jpeg(VjoArena *a, uint32_t flags, int quality, VjoBuf *out, VjoS
 int vjo_title_id(SceUID pid, char *tid, int size);
 /* vjoSetGameActive's mode (enum VjoGameMode) for a title ID. */
 int vjo_title_game_mode(const char *tid);
+/* Reloaded on game start/resume before capture or input filtering activates. */
+int vjo_game_enabled(const char *tid, VjoArena *scratch);
 
 /* anki.c: AnkiConnect thread */
 int vjo_anki_start(void);

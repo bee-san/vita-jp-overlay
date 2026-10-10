@@ -144,18 +144,19 @@ int vjo_text_reference(VjoTextSources *s, const char *text)
     return 0;
 }
 
-/* Japanese first. OCR score second; then observed activity, Japanese fraction,
- * length and stable ID. Non-Japanese UI never outranks Japanese dialogue. */
+/* Japanese first, then OCR score. Prefer the Japanese fraction and length of
+ * readable text before activity: frequent short/binary copy streams must not
+ * hide complete dialogue. Equally useful streams favor observed updates. */
 static int better(const VjoTextCandidate *a, const VjoTextCandidate *b)
 {
     if (!a->id) return 0;
     if (!b->id) return 1;
     if (!!a->japanese != !!b->japanese) return a->japanese != 0;
     if (a->score != b->score) return a->score > b->score;
-    if (a->updates != b->updates) return a->updates > b->updates;
     if (a->japanese * b->length != b->japanese * a->length)
         return a->japanese * b->length > b->japanese * a->length;
     if (a->length != b->length) return a->length > b->length;
+    if (a->updates != b->updates) return a->updates > b->updates;
     return a->id < b->id;
 }
 

@@ -119,6 +119,30 @@ static void submit_mapping(void)
     TEST_CHECK(syscall_depth == 0);
 }
 
+static void auto_terminated(void)
+{
+    setup(); caller = 7;
+    /* CP932 NUL-terminated output at the allocation end: strcpy provides no
+     * byte count, so the kernel must discover the terminator within bounds. */
+    const uint8_t line[] = {0x94,0x4c,0x82,0xc6,0x8c,0xa2,0x82,0xaa,0x82,0xa2,0x82,0xe9,0};
+    unsigned offset = sizeof(memory) - sizeof(line);
+    memcpy(memory + offset, line, sizeof(line));
+    VjoTextEvent e = {sizeof(e), VJO_TEXT_CALL, VJO_TEXT_AUTO, 10,
+                     base_address + offset, 0, 0, 0};
+    TEST_CHECK(vjoTextSubmit(&e) == 0 && maps == releases && pinned == 0);
+    TEST_ASSERT(sources.items[0].id);
+    TEST_CHECK(!strcmp(sources.items[0].text, "猫と犬がいる"));
+    unsigned sequence = sources.sequence;
+    memset(memory + offset, 'a', sizeof(line));
+    TEST_CHECK(vjoTextSubmit(&e) < 0 && sources.sequence == sequence);
+    memory[sizeof(memory)-1] = 0;
+    TEST_CHECK(vjoTextSubmit(&e) == 0 && sources.sequence == sequence); /* ASCII ignored */
+    unsigned previous_maps = maps;
+    e.kind = VJO_TEXT_REGISTER;
+    TEST_CHECK(vjoTextSubmit(&e) == VJO_ERR_ARG && maps == previous_maps);
+    TEST_CHECK(maps == releases && pinned == 0 && syscall_depth == 0);
+}
+
 static void indirection(void)
 {
     setup(); caller = 7;
@@ -268,6 +292,7 @@ static void lazy_capture(void)
 
 TEST_LIST = {
     {"text syscall permissions", permissions}, {"mapped copy and nonblocking submit", submit_mapping},
+    {"bounded NUL-terminated automatic encoding", auto_terminated},
     {"register pointer and UTF16", indirection}, {"submit capacity and scratch reuse", submit_capacity},
     {"blank/freed source invalidation", source_lifetime},
     {"same-PID session invalidation", session_epoch}, {"bounded discovery/listen", scan_budget},

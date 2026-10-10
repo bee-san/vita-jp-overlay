@@ -48,7 +48,7 @@ entries so an untested interceptor does not load into every app.
    folded. At least four normalized characters are required. Equal best scores
    require a manual choice.
 3. The picker shows at most five candidates. Japanese text ranks first, followed
-   by OCR score, observed changes, Japanese fraction, length and stable ID.
+   by OCR score, Japanese fraction, length, observed changes and stable ID.
    Use ▲/▼ and × to choose. A **hook** observes a call site; a **pointer** follows
    a changing string pointer; a **buffer** rereads the same address. A static
    script buffer can match perfectly yet never advance: choose a hook or pointer
@@ -120,7 +120,7 @@ python3 tools/test_vita3k_hooks.py --vpk build/vita/vjo-hook-test.vpk
 ```
 
 The VPK exports a **test transport**, loads the production `.suprx`, exercises
-all four import hooks and signed ARM/Thumb profiles, rejects a bad signature,
+all eight import hooks and signed ARM/Thumb profiles, rejects a bad signature,
 checks original return values and unloads the hooks. Separate assembly probes
 check r0–r12, SP/LR, APSR/GE, FPSCR and all 32 VFP registers, including a Thumb
 site with a four-byte-aligned stack. Host tests use the production kernel mapping
@@ -165,3 +165,28 @@ lazily; a selected native source can use two bounded 128 KiB Paf arenas if the
 before retrying. The picker now opens in physical CLANNAD without the previous
 memory error, but dialogue discovery still returns no candidates. This is not
 a verified CLANNAD text hook. See the [memory measurements](benchmarks/native-text-low-memory-20261010.json).
+
+`0.6-hooks.5` adds retail `SceLibc` imports for `memcpy`, `strcpy`, `strncpy`
+and `memmove` alongside the existing `SceLibKernel` clib hooks. An offline
+inspection of CLANNAD PCSG00415 found all four retail imports and none of the
+four original clib imports. Running the unchanged production text plugin in
+isolated Vita3K then captured two different visible narration pages through
+the same retail `memcpy` call site, without a CLANNAD-specific profile.
+`strcpy` results use a
+kernel-bounded, NUL-terminated UTF-8/CP932 read rather than dereferencing the
+result in the game plugin. Zero-length memory copies remain ignored.
+
+The ARM self-test explicitly imports both libraries (avoiding newlib's local
+implementations), exercises each interceptor, checks return values and an
+overlapping `memmove`, and checks that unloading restores all four retail
+imports. It passed 264 checks in isolated Vita3K, including a regression for
+frequent short/binary streams hiding complete dialogue. Ranking prefers
+Japanese fraction and length before update counts; selected short lines still
+update normally, and OCR evidence keeps priority. The real-game experiment used
+an emulator-only user-space transport with the production decoder; it does not
+validate kernel page mapping or the physical overlay. See the
+[retail-hook measurements](benchmarks/native-libc-hooks-20261010.json).
+With every positive decode fed into the production collector, all three matching
+sources remained in the five visible choices on both tested pages (ranks 2/3/4,
+then 3/4/5). No game-specific profile was loaded. Physical CLANNAD capture and
+hardware performance remain unverified.

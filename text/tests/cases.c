@@ -102,6 +102,52 @@ static void streams(void)
     CHECK(!sources.selected && !vjo_text_find(&sources, id));
 }
 
+static void picker_quality(void)
+{
+    /* A few busy copy sites can fill every picker row even while several
+     * quieter streams hold the complete current line. Invented text only. */
+    static const struct {
+        const char *a, *b;
+        unsigned updates;
+    } noise[] = {
+        {"ｱｲｳ", "ｳｲｱ", 395},
+        {"A1B猫", "A2B犬", 9},
+        {"猫", "犬", 2},
+        {"1月23日月", "1月24日火", 3},
+        {"前の場面を選択して読み直す機能の設定を変更する",
+         "前の場面を選択して読み直す機能の設定を確認する", 4}
+    };
+    uint32_t noisy_ids[5], dialogue_ids[3];
+    vjo_text_sources_init(&sources);
+    for (unsigned i = 0; i < 5; i++)
+        for (unsigned n = 0; n < noise[i].updates; n++)
+            noisy_ids[i] = vjo_text_offer(&sources, VJO_TEXT_CALL, VJO_TEXT_AUTO,
+                i + 1, 0, n & 1 ? noise[i].b : noise[i].a);
+    for (unsigned i = 0; i < 3; i++)
+        dialogue_ids[i] = vjo_text_offer(&sources, VJO_TEXT_CALL, VJO_TEXT_AUTO,
+                                        i + 100, 0, "猫と犬がいる");
+    CHECK(vjo_text_top(&sources, choices) == VJO_TEXT_CHOICES);
+    for (unsigned i = 0; i < 3; i++) {
+        unsigned visible = 0;
+        for (unsigned j = 0; j < VJO_TEXT_CHOICES; j++)
+            if (choices[j].id == dialogue_ids[i] && !strcmp(choices[j].text, "猫と犬がいる")) visible++;
+        CHECK(dialogue_ids[i] != 0 && visible == 1);
+    }
+    /* Quality only precedes activity, not the user's explicit OCR evidence. */
+    CHECK(vjo_text_reference(&sources, "A1B猫") == 0);
+    vjo_text_top(&sources, choices);
+    CHECK(choices[0].id == noisy_ids[1] && choices[0].score == 100);
+    vjo_text_reference(&sources, "");
+    vjo_text_offer(&sources, VJO_TEXT_CALL, VJO_TEXT_AUTO, 101, 0, "犬と猫がいる");
+    vjo_text_top(&sources, choices);
+    CHECK(choices[1].id == dialogue_ids[1] && choices[1].updates == 2);
+    /* A selected stream still accepts a short next line; ranking is not a
+     * capture filter and must never leave the previous longer line frozen. */
+    sources.selected = dialogue_ids[1];
+    CHECK(vjo_text_offer(&sources, VJO_TEXT_CALL, VJO_TEXT_AUTO, 101, 0, "猫") == dialogue_ids[1]);
+    CHECK(!strcmp(vjo_text_find(&sources, sources.selected)->text, "猫"));
+}
+
 static void scanner(void)
 {
     const char *line = "今日は新しい台詞を読む";
@@ -156,7 +202,7 @@ static void profiles(void)
 int vjo_text_run_tests(FILE *report)
 {
     output = report; checks = failures = 0;
-    import_bindings(); codecs(); matching(); streams(); scanner(); profiles();
+    import_bindings(); codecs(); matching(); streams(); picker_quality(); scanner(); profiles();
     fprintf(report, "portable checks=%u failures=%u sources_bytes=%u cp932_bytes=22560\n",
             checks, failures, (unsigned)sizeof(sources));
     return (int)failures;

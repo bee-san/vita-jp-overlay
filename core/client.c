@@ -301,6 +301,9 @@ const char *vjo_err_text(VjoArena *a, int stage, const VjoErr *err)
     case VJO_E_OCR_MODEL:
         vjo_buf_puts(&b, err->detail ? err->detail : "Local OCR model is missing or invalid. Copy the complete model for the selected ocr_backend to ocr_model_dir; see docs/local-ocr.md.");
         break;
+    case VJO_E_OCR_MODEL_IO:
+        vjo_buf_puts(&b, err->detail ? err->detail : "The game could not read the local OCR model. Keep the installed model files; see log.txt for the file-access error.");
+        break;
     case VJO_E_OCR_REGION:
         vjo_buf_puts(&b, err->detail ? err->detail : "Local OCR needs a tight dialogue region with horizontal white text. Select a region, excluding portraits and menus.");
         break;

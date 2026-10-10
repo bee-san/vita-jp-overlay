@@ -30,6 +30,7 @@ typedef struct { int64_t st_size; } SceIoStat;
 #define SCE_O_CREAT 0x200
 #define SCE_O_APPEND 0x100
 #define SCE_SEEK_SET 0
+#define SCE_SEEK_END 2
 #define sceClibMemset memset
 #define sceClibMemcpy memcpy
 #define sceClibMemcmp memcmp

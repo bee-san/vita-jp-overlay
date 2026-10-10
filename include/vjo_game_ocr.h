@@ -24,6 +24,8 @@ typedef struct {
     int32_t rc;
     uint32_t neural_peak, metadata_peak;
     int32_t cleanup_status; /* Zero only after worker stop/unload/free completed. */
+    /* OCR text on success; strict vjo_game_ocr_diag.h metadata on MODEL_IO.
+     * Every other failed result carries empty text. */
     char text[VJO_GAME_OCR_TEXT_BYTES];
 } VjoGameOcrResult;
 

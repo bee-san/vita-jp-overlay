@@ -5,8 +5,8 @@
 #include "../shell/meiki_bridge.h"
 #include "../include/vjo_api.h"
 #include "../include/vjo_import.h"
+#include "../include/vjo_game_ocr_diag.h"
 #include <psp2/io/fcntl.h>
-#include <psp2/io/stat.h>
 #include <psp2/kernel/clib.h>
 #include <psp2/kernel/error.h>
 #include <psp2/kernel/modulemgr.h>
@@ -15,6 +15,8 @@
 #include <stdarg.h>
 
 #define WORKER_LOG "ux0:data/VitaJPOverlay/ocr-worker.log"
+#define CONTROL_FILE "app0:/sce_sys/param.sfo"
+#define MODEL_READ_BYTES 8192u
 #define GAME_RESERVE_BYTES (4u * 1024u * 1024u)
 #define MODULE_ALLOWANCE_BYTES (2u * 1024u * 1024u)
 #define USER_MAX_BYTES (512u * 1024u * 1024u)
@@ -28,10 +30,12 @@ typedef struct {
 } OwnedBlock;
 static OwnedBlock blocks[3] = {{.uid=-1}, {.uid=-1}, {.uid=-1}};
 static VjoMeikiBridge bridge = {.module=-1};
-static SceUID worker = -1, model_fd = -1, log_fd = -1;
+static SceUID worker = -1, model_fd = -1, control_fd = -1, log_fd = -1;
 static uint32_t quitting, job_busy, active_seq;
 static int worker_started, initialized, blocked, claim_outstanding;
 static VjoGameOcrResult pending_result;
+static VjoGameOcrIoDiagnostic io_failure;
+static char model_asset;
 
 void vjo_log(const char *format, ...)
 {
@@ -162,6 +166,11 @@ static int finish_engine(void)
         if (close_rc < 0) rc = VJO_E_OCR_UNAVAILABLE;
         else model_fd = -1;
     }
+    if (control_fd >= 0) {
+        int close_rc = sceIoClose(control_fd);
+        if (close_rc < 0) rc = VJO_E_OCR_UNAVAILABLE;
+        else control_fd = -1;
+    }
     return rc;
 }
 
@@ -190,12 +199,37 @@ static int raw_rows(void *ud, unsigned row, unsigned count, unsigned char *rgba)
     return cancelled(NULL) ? -1 : rc;
 }
 
+static void remember_io_failure(char stage, uint32_t code)
+{
+    if (!io_failure.stage) {
+        io_failure.asset = model_asset;
+        io_failure.stage = stage;
+        io_failure.code = code;
+    }
+}
+
 static int file_read(void *ud, uint64_t offset, void *out, size_t bytes)
 {
     (void)ud;
-    if (model_fd < 0 || cancelled(NULL) || offset > INT64_MAX || bytes > INT32_MAX ||
-        sceIoLseek(model_fd, (SceOff)offset, SCE_SEEK_SET) != (SceOff)offset) return -1;
-    return sceIoRead(model_fd, out, (SceSize)bytes) == (int)bytes ? 0 : -1;
+    if (model_fd < 0 || cancelled(NULL) || !out || offset > INT64_MAX || bytes > MODEL_READ_BYTES)
+        return -1;
+    SceOff position = sceIoLseek(model_fd, (SceOff)offset, SCE_SEEK_SET);
+    if (position != (SceOff)offset) {
+        remember_io_failure('L', (uint32_t)position);
+        return -1;
+    }
+    /* The bridge hashes chunks of at most 8192 bytes. Every successful short
+     * read advances; cancellation is checked between calls, and EOF fails. */
+    for (size_t used=0; used<bytes;) {
+        if (cancelled(NULL)) return -1;
+        int rc = sceIoRead(model_fd, (unsigned char *)out+used, (SceSize)(bytes-used));
+        if (rc <= 0 || (size_t)rc > bytes-used) {
+            remember_io_failure('R', (uint32_t)rc);
+            return -1;
+        }
+        used += (size_t)rc;
+    }
+    return 0;
 }
 
 static void file_close(void *ud)
@@ -207,14 +241,52 @@ static void file_close(void *ud)
 static int file_open(void *ud, const char *path, VjoFile *out)
 {
     (void)ud;
-    SceIoStat info;
     if (model_fd >= 0 || !path || !out || cancelled(NULL)) return -1;
-    sceClibMemset(&info, 0, sizeof(info));
-    if (sceIoGetstat(path, &info) < 0 || info.st_size <= 0) return -1;
+    const char *filename = path;
+    for (const char *p=path; *p; p++) if (*p == '/' || *p == ':') filename = p+1;
+    model_asset = !sceClibStrcmp(filename, VJO_MEIKI_DETECT_MODEL_FILENAME) ? 'D' : 'R';
     model_fd = sceIoOpen(path, SCE_O_RDONLY, 0);
-    if (model_fd < 0) return -1;
-    *out = (VjoFile){NULL, (uint64_t)info.st_size, file_read, file_close};
+    if (model_fd < 0) {
+        remember_io_failure('O', (uint32_t)model_fd);
+        return -1;
+    }
+    SceOff size = sceIoLseek(model_fd, 0, SCE_SEEK_END);
+    if (size <= 0) {
+        if (size < 0) remember_io_failure('S', (uint32_t)size);
+        /* Open succeeded, so finish_engine must still close this owned fd. */
+        return -1;
+    }
+    *out = (VjoFile){NULL, (uint64_t)size, file_read, file_close};
     return 0;
+}
+
+static void probe_control_file(void)
+{
+    /* This same-PID, one-byte read tests the game's own ordinary namespace.
+     * It never reads another game's files or changes filesystem permissions. */
+    io_failure.control_stage = 'P';
+    io_failure.control_code = 0;
+    if (cancelled(NULL)) return;
+    control_fd = sceIoOpen(CONTROL_FILE, SCE_O_RDONLY, 0);
+    if (control_fd < 0) {
+        io_failure.control_stage = 'O';
+        io_failure.control_code = (uint32_t)control_fd;
+        return;
+    }
+    if (!cancelled(NULL)) {
+        unsigned char byte;
+        int rc = sceIoRead(control_fd, &byte, 1);
+        if (rc != 1) {
+            io_failure.control_stage = 'R';
+            io_failure.control_code = (uint32_t)rc;
+        }
+    }
+    int rc = sceIoClose(control_fd);
+    if (rc >= 0) control_fd = -1;
+    else if (io_failure.control_stage == 'P') {
+        io_failure.control_stage = 'C';
+        io_failure.control_code = (uint32_t)rc;
+    }
 }
 
 static int budget_allows(uint32_t layout)
@@ -248,7 +320,11 @@ int vjo_game_ocr_run_request(const VjoGameOcrRequest *request, VjoGameOcrResult 
     int rc = VJO_E_SOURCE, valid_request = 0, engine_attempted = 0;
     VjoMeikiStats stats = {0};
     active_seq = request->seq;
-    if (blocked || bridge.module >= 0 || has_owned_blocks()) { rc = VJO_E_OCR_UNAVAILABLE; goto done; }
+    sceClibMemset(&io_failure, 0, sizeof(io_failure));
+    model_asset = 'R';
+    if (blocked || bridge.module >= 0 || has_owned_blocks() || model_fd >= 0 || control_fd >= 0) {
+        rc = VJO_E_OCR_UNAVAILABLE; goto done;
+    }
     if (request->size != sizeof(*request) || !request->seq || !request->done_seq ||
         !request->width || request->width > VJO_OCR_MAX_WIDTH ||
         !request->height || request->height > VJO_OCR_MAX_HEIGHT ||
@@ -278,11 +354,17 @@ int vjo_game_ocr_run_request(const VjoGameOcrRequest *request, VjoGameOcrResult 
 done:
     result->neural_peak = (uint32_t)stats.heap_peak;
     result->metadata_peak = engine_attempted ? bridge.module_stats.metadata_brk_peak : 0;
+    if (rc == VJO_E_OCR_MODEL && io_failure.stage && !cancelled(NULL)) probe_control_file();
     result->cleanup_status = finish_engine();
     if (result->cleanup_status) { blocked = 1; rc = VJO_E_OCR_UNAVAILABLE; }
     else if (valid_request && cancelled(NULL)) rc = VJO_E_CANCELLED;
+    if (rc) sceClibMemset(result->text, 0, sizeof(result->text));
+    if (rc == VJO_E_OCR_MODEL && io_failure.stage) {
+        rc = vjo_game_ocr_io_write(result->text, sizeof(result->text), &io_failure)
+           ? VJO_E_OCR_UNAVAILABLE : VJO_E_OCR_MODEL_IO;
+        if (rc != VJO_E_OCR_MODEL_IO) sceClibMemset(result->text, 0, sizeof(result->text));
+    }
     result->rc = rc;
-    if (rc) result->text[0] = 0;
     vjo_log("job seq=%u dims=%ux%u layout=%u rc=%d neural=%u metadata=%u cleanup=%d",
              request->seq, request->width, request->height, request->layout, rc,
              result->neural_peak, result->metadata_peak, result->cleanup_status);
@@ -364,7 +446,7 @@ int vjo_game_ocr_worker_stop(void)
     if (claim_outstanding) {
         pending_result.cleanup_status = 0;
         pending_result.rc = VJO_E_CANCELLED;
-        pending_result.text[0] = 0;
+        sceClibMemset(pending_result.text, 0, sizeof(pending_result.text));
         if (vjoOcrComplete(&pending_result)) return VJO_E_OCR_UNAVAILABLE;
         claim_outstanding = 0;
     }

@@ -20,6 +20,7 @@ extern void vjo_paf_probe_once(void);
 #include "meiki_bridge.h"
 #ifdef VJO_MEIKI_GAME_WORKER
 #include "game_ocr_client.h"
+#include "../include/vjo_game_ocr_diag.h"
 #else
 static VjoMeikiBridge meiki_bridge = {.module = -1};
 #endif
@@ -656,6 +657,20 @@ static int run_meiki_ocr(VjoArena *a, VjoOverlayData *out, uint32_t *checksum)
         vjo_log("game Meiki rc=%d pool peak=%u KiB metadata peak=%u KiB cleanup=%d",
                 rc, result->neural_peak >> 10, result->metadata_peak >> 10,
                 result->cleanup_status);
+        if (rc == VJO_E_OCR_MODEL_IO) {
+            VjoGameOcrIoDiagnostic diagnostic;
+            if (!vjo_game_ocr_io_parse(result->text, sizeof(result->text), &diagnostic)) {
+                const char *operation = diagnostic.stage == 'O' ? "open" :
+                    diagnostic.stage == 'S' ? "size" : diagnostic.stage == 'L' ? "seek" : "read";
+                vjo_log("game Meiki model I/O asset=%c operation=%s code=0x%08X app0_stage=%c app0_code=0x%08X",
+                        diagnostic.asset, operation, diagnostic.code,
+                        diagnostic.control_stage, diagnostic.control_code);
+                sceClibSnprintf(result->text, sizeof(result->text),
+                    "Meiki could not %s the %s model (0x%08X). Keep the installed model files; this is a game file-access error.",
+                    operation, diagnostic.asset == 'D' ? "detector" : "recognizer", diagnostic.code);
+                out->err.detail = result->text;
+            }
+        }
     }
     sceKernelUnlockMutex(capture_lock, 1);
     if (!rc && job_cancelled(NULL)) rc = VJO_E_CANCELLED;

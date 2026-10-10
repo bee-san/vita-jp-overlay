@@ -172,7 +172,10 @@ target_compile_options(VitaJPOverlay_Shell PRIVATE -O2 -Wall -Wno-unused-paramet
   "$<$<COMPILE_LANGUAGE:CXX>:-fno-rtti;-fno-exceptions;-Wno-sign-compare;-Wno-unused-function>"
   "-D__declspec(x)=")
 target_link_directories(VitaJPOverlay_Shell PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/vjo_kernel_stubs)
-target_link_options(VitaJPOverlay_Shell PRIVATE -nostdlib -nostartfiles -Wl,-q -Wl,--no-wchar-size-warning)
+# The converter appends import/export metadata to the RO segment. Preserve
+# enough linker headroom before the SDK's 64 KiB-aligned RW segment.
+target_link_options(VitaJPOverlay_Shell PRIVATE -nostdlib -nostartfiles -Wl,-q
+  -Wl,--no-wchar-size-warning -Wl,--defsym=__sce_headroom=4096)
 target_link_libraries(VitaJPOverlay_Shell
   vjo_core_vita
   VitaJPOverlay_Kernel_stub_weak  # weak: the shell still starts (and reports) without the kernel plugin

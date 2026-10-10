@@ -27,7 +27,16 @@ static int budget_user, budget_rc, alloc_fail_at, map_failure, free_fail_slot;
 static int base_fail_slot, identity_fail_slot, accepted_free_lookup_valid;
 static int thread_start_rc, thread_delete_rc, thread_join_rc, module_stop_rc;
 static int model_close_rc, complete_failures, cancel_on_raw, cancellation;
+static int model_open_rc, model_size_set, model_read_result_set, model_read_result;
+static int model_offset_seek_rc, model_short_read_bytes, corrupt_model_bytes;
+static int cancel_after_model_read, cancel_on_model_failure;
+static int cancel_on_control_read;
+static SceOff model_size_result;
+static char fault_asset, opened_asset;
+static int control_open_rc, control_read_rc, control_close_failures, control_live;
 static unsigned alloc_calls, free_calls, loads, unloads, engine_runs, engine_stops;
+static unsigned free_calls_at_load, model_opens, model_reads, stat_calls;
+static unsigned control_opens, control_reads, control_closes;
 static unsigned takes, completes, delays, foreign_frees, closes, writes;
 static unsigned stop_loop_after_delays, stop_loop_on_complete;
 static int module_live;
@@ -137,17 +146,17 @@ SceUID sceKernelLoadStartModule(const char *path, SceSize bytes, void *arg, int 
     (void)flags; (void)opt; TEST_CHECK(!strcmp(path,VJO_MEIKI_MODULE_PATH));
     TEST_CHECK(bytes == sizeof(MeikiModuleStart)); MeikiModuleStart *start = arg;
     TEST_CHECK(start->metadata_heap == bridge.metadata);
-    TEST_CHECK(!module_live && alloc_calls == 3);
+    TEST_CHECK(!module_live && bridge.metadata && bridge.workspace && bridge.preprocessing);
     *start->api_out = (MeikiModuleApi){sizeof(MeikiModuleApi),MEIKI_MODULE_ABI,
                                      mock_module_run,mock_module_stop,mock_module_detect};
-    *status = SCE_KERNEL_START_SUCCESS; loads++; module_live = 1; return 99;
+    *status = SCE_KERNEL_START_SUCCESS; loads++; module_live = 1; free_calls_at_load = free_calls; return 99;
 }
 int sceKernelStopUnloadModule(SceUID uid, SceSize bytes, void *arg, int flags,
                               SceKernelULMOption *opt, int *status)
 {
     (void)bytes; (void)arg; (void)flags; (void)opt;
     TEST_CHECK(uid == 99 && module_live && engine_stops && bridge.stopped);
-    TEST_CHECK(!free_calls); unloads++; module_live = 0; *status = SCE_KERNEL_STOP_SUCCESS; return 0;
+    TEST_CHECK(free_calls == free_calls_at_load); unloads++; module_live = 0; *status = SCE_KERNEL_STOP_SUCCESS; return 0;
 }
 static const char *model_on_host(const char *path)
 {
@@ -158,12 +167,24 @@ SceUID sceIoOpen(const char *path, int flags, unsigned mode)
 {
     (void)mode;
     if (flags != SCE_O_RDONLY) { TEST_CHECK(!strcmp(path,WORKER_LOG)); return 1; }
+    if (!strcmp(path,CONTROL_FILE)) {
+        control_opens++; TEST_CHECK(!control_live);
+        if (control_open_rc < 0) return control_open_rc;
+        control_live = 1; return 3;
+    }
+    model_opens++;
+    opened_asset = strstr(path,VJO_MEIKI_DETECT_MODEL_FILENAME) ? 'D' : 'R';
+    if (model_open_rc < 0 && opened_asset == fault_asset) {
+        if (cancel_on_model_failure) cancellation = 1;
+        return model_open_rc;
+    }
     TEST_CHECK(!model_file); const char *host = model_on_host(path);
     model_file = host ? fopen(host,"rb") : NULL;
     return model_file ? 2 : -1;
 }
 int sceIoGetstat(const char *path, SceIoStat *info)
 {
+    stat_calls++;
     const char *host = model_on_host(path); struct stat st;
     if (!host || stat(host,&st)) return -1;
     info->st_size = st.st_size; return 0;
@@ -171,14 +192,46 @@ int sceIoGetstat(const char *path, SceIoStat *info)
 int sceIoClose(SceUID fd)
 {
     if (fd == 1) return 0;
+    if (fd == 3) {
+        TEST_CHECK(control_live); control_closes++;
+        if (control_close_failures) {
+            if (control_close_failures > 0) control_close_failures--;
+            return (int32_t)0x80010005;
+        }
+        control_live = 0; return 0;
+    }
     TEST_CHECK(fd == 2 && model_file); closes++;
     if (model_close_rc) return model_close_rc;
     fclose(model_file); model_file = NULL; return 0;
 }
 SceOff sceIoLseek(SceUID fd, SceOff offset, int whence)
-{ TEST_CHECK(fd == 2 && model_file && whence == SCE_SEEK_SET); return fseek(model_file,(long)offset,SEEK_SET) ? -1 : offset; }
+{
+    TEST_CHECK(fd == 2 && model_file);
+    if (whence == SCE_SEEK_END) {
+        TEST_CHECK(!offset);
+        if (model_size_set && opened_asset == fault_asset) return model_size_result;
+        return fseek(model_file,0,SEEK_END) ? -1 : (SceOff)ftell(model_file);
+    }
+    TEST_CHECK(whence == SCE_SEEK_SET);
+    if (model_offset_seek_rc && opened_asset == fault_asset) return model_offset_seek_rc;
+    return fseek(model_file,(long)offset,SEEK_SET) ? -1 : offset;
+}
 int sceIoRead(SceUID fd, void *out, SceSize bytes)
-{ TEST_CHECK(fd == 2 && model_file); return (int)fread(out,1,bytes,model_file); }
+{
+    if (fd == 3) {
+        TEST_CHECK(control_live && bytes == 1); control_reads++;
+        if (control_read_rc == 1) *(unsigned char *)out = 0;
+        if (cancel_on_control_read) cancellation = 1;
+        return control_read_rc;
+    }
+    TEST_CHECK(fd == 2 && model_file); model_reads++;
+    if (model_read_result_set && opened_asset == fault_asset) return model_read_result;
+    if (model_short_read_bytes && bytes > (unsigned)model_short_read_bytes) bytes = model_short_read_bytes;
+    int rc = (int)fread(out,1,bytes,model_file);
+    if (rc > 0 && corrupt_model_bytes && opened_asset == fault_asset) ((unsigned char *)out)[0] ^= 1;
+    if (cancel_after_model_read) cancellation = 1;
+    return rc;
+}
 int sceIoWrite(SceUID fd, const void *data, SceSize bytes)
 {
     TEST_CHECK(fd == 1 && bytes <= 255);
@@ -205,7 +258,7 @@ int vjoReadRaw(uint32_t row, uint32_t rows, void *out)
 int vjoOcrComplete(const VjoGameOcrResult *result)
 {
     completes++; TEST_CHECK(claim_outstanding && result->seq == queued_request.seq);
-    if (!result->cleanup_status) TEST_CHECK(!module_live && !has_owned_blocks() && model_fd < 0);
+    if (!result->cleanup_status) TEST_CHECK(!module_live && !has_owned_blocks() && model_fd < 0 && control_fd < 0);
     if (complete_failures) { if (complete_failures > 0) complete_failures--; return -7; }
     if (stop_loop_on_complete && !result->cleanup_status) quitting = 1;
     return 0;
@@ -218,17 +271,24 @@ static int have_model(void)
 }
 static void setup(void)
 {
-    TEST_ASSERT(!module_live && !has_owned_blocks() && !model_file);
+    TEST_ASSERT(!module_live && !has_owned_blocks() && !model_file && !control_live);
     memset(owned,0,sizeof(owned)); memset(blocks,0,sizeof(blocks));
     for (unsigned i=0;i<3;i++) blocks[i].uid = -1;
     memset(&bridge,0,sizeof(bridge)); bridge.module = -1;
-    worker = model_fd = log_fd = -1;
+    worker = model_fd = control_fd = log_fd = -1;
     quitting = job_busy = active_seq = 0;
     worker_started = initialized = blocked = claim_outstanding = 0;
     unavailable_import = 0; budget_user = 64*1024*1024; budget_rc = alloc_fail_at = map_failure = 0;
     free_fail_slot = base_fail_slot = identity_fail_slot = -1; accepted_free_lookup_valid = 0;
     thread_start_rc = thread_delete_rc = thread_join_rc = module_stop_rc = model_close_rc = 0;
     complete_failures = cancel_on_raw = cancellation = 0;
+    model_open_rc = model_size_set = model_read_result_set = model_read_result = 0;
+    model_offset_seek_rc = model_short_read_bytes = corrupt_model_bytes = 0;
+    cancel_after_model_read = cancel_on_model_failure = cancel_on_control_read = 0; model_size_result = 0;
+    fault_asset = opened_asset = 'R';
+    control_open_rc = control_close_failures = control_live = 0; control_read_rc = 1;
+    free_calls_at_load = model_opens = model_reads = stat_calls = 0;
+    control_opens = control_reads = control_closes = 0;
     alloc_calls = free_calls = loads = unloads = engine_runs = engine_stops = 0;
     takes = completes = delays = foreign_frees = closes = writes = 0;
     stop_loop_after_delays = stop_loop_on_complete = 0; next_uid = 100;
@@ -238,7 +298,7 @@ static int run(VjoGameOcrResult *result) { return vjo_game_ocr_run_request(&queu
 static void drained(void)
 {
     TEST_CHECK(!module_live && !has_owned_blocks() && !bridge.metadata && !bridge.workspace && !bridge.preprocessing);
-    TEST_CHECK(!model_file && !foreign_frees);
+    TEST_CHECK(!model_file && !foreign_frees && !control_live && control_fd < 0);
     for (unsigned i=0;i<3;i++) TEST_CHECK(!owned[i].live);
 }
 static void test_budget_and_import_guards_allocate_nothing(void)
@@ -395,6 +455,129 @@ static void test_portable_floorf_matches_finite_binary32(void)
     union {float f;uint32_t u;} actual = {vjo_game_test_floorf(negative_zero.f)};
     TEST_CHECK(actual.u == negative_zero.u);
 }
+static void assert_empty_error_text(const VjoGameOcrResult *result)
+{
+    for (unsigned i=0;i<sizeof(result->text);i++) TEST_CHECK(result->text[i] == 0);
+}
+static void assert_io_diagnostic(const VjoGameOcrResult *result, char asset, char stage,
+                                 uint32_t code, char control_stage, uint32_t control_code)
+{
+    VjoGameOcrIoDiagnostic parsed;
+    TEST_CHECK(result->rc == VJO_E_OCR_MODEL_IO && !result->cleanup_status);
+    TEST_CHECK(!result->metadata_peak && !result->neural_peak && !alloc_calls && !loads);
+    TEST_CHECK(strlen(result->text) == 28);
+    TEST_ASSERT(!vjo_game_ocr_io_parse(result->text,sizeof(result->text),&parsed));
+    TEST_CHECK(parsed.asset == asset && parsed.stage == stage && parsed.code == code);
+    TEST_CHECK(parsed.control_stage == control_stage && parsed.control_code == control_code);
+    for (unsigned i=29;i<sizeof(result->text);i++) TEST_CHECK(result->text[i] == 0);
+    TEST_CHECK(control_opens == 1 && !stat_calls); drained();
+}
+static void test_native_open_failure_and_control_outcomes(void)
+{
+    const int open_errors[] = {(int32_t)0x8001000D,(int32_t)0x80010002};
+    for (unsigned i=0;i<sizeof(open_errors)/sizeof(open_errors[0]);i++) {
+        setup(); model_open_rc = open_errors[i]; VjoGameOcrResult result;
+        TEST_CHECK(run(&result) == VJO_E_OCR_MODEL_IO);
+        assert_io_diagnostic(&result,'R','O',(uint32_t)open_errors[i],'P',0);
+        TEST_CHECK(control_reads == 1 && control_closes == 1);
+    }
+    setup(); model_open_rc = (int32_t)0x8001000D; control_open_rc = (int32_t)0x80010002;
+    VjoGameOcrResult result; TEST_CHECK(run(&result) == VJO_E_OCR_MODEL_IO);
+    assert_io_diagnostic(&result,'R','O',0x8001000D,'O',0x80010002);
+    TEST_CHECK(!control_reads && !control_closes);
+    int read_errors[] = {(int32_t)0x80010005,0};
+    for (unsigned i=0;i<sizeof(read_errors)/sizeof(read_errors[0]);i++) {
+        setup(); model_open_rc = (int32_t)0x8001000D; control_read_rc = read_errors[i];
+        TEST_CHECK(run(&result) == VJO_E_OCR_MODEL_IO);
+        assert_io_diagnostic(&result,'R','O',0x8001000D,'R',(uint32_t)read_errors[i]);
+        TEST_CHECK(control_reads == 1 && control_closes == 1);
+    }
+    setup(); model_open_rc = (int32_t)0x8001000D; control_close_failures = 1;
+    TEST_CHECK(run(&result) == VJO_E_OCR_MODEL_IO);
+    assert_io_diagnostic(&result,'R','O',0x8001000D,'C',0x80010005);
+    TEST_CHECK(control_closes == 2); /* failed close UID retained, cleanup retried it */
+}
+static void test_size_offset_and_read_native_failures(void)
+{
+    if (!have_model()) return;
+    VjoGameOcrResult result;
+    setup(); model_size_set = 1; model_size_result = (int32_t)0x80010005;
+    TEST_CHECK(run(&result) == VJO_E_OCR_MODEL_IO);
+    assert_io_diagnostic(&result,'R','S',0x80010005,'P',0);
+    TEST_CHECK(closes == 1 && !model_reads);
+    setup(); model_offset_seek_rc = (int32_t)0x80010016;
+    TEST_CHECK(run(&result) == VJO_E_OCR_MODEL_IO);
+    assert_io_diagnostic(&result,'R','L',0x80010016,'P',0);
+    TEST_CHECK(closes == 1 && !model_reads);
+    int read_errors[] = {(int32_t)0x80010005,0};
+    for (unsigned i=0;i<sizeof(read_errors)/sizeof(read_errors[0]);i++) {
+        setup(); model_read_result_set = 1; model_read_result = read_errors[i];
+        TEST_CHECK(run(&result) == VJO_E_OCR_MODEL_IO);
+        assert_io_diagnostic(&result,'R','R',(uint32_t)read_errors[i],'P',0);
+        TEST_CHECK(closes == 1 && model_reads == 1);
+    }
+    if (getenv("VJO_MEIKI_TEST_DETECT_MODEL")) {
+        setup(); queued_request.layout = VJO_GAME_OCR_DIALOGUE_BOX;
+        fault_asset = 'D'; model_open_rc = (int32_t)0x8001000D;
+        TEST_CHECK(run(&result) == VJO_E_OCR_MODEL_IO);
+        assert_io_diagnostic(&result,'D','O',0x8001000D,'P',0);
+        TEST_CHECK(model_opens == 2 && closes == 1);
+    }
+}
+static void test_short_reads_succeed_and_hash_size_errors_stay_model(void)
+{
+    if (!have_model()) return;
+    setup(); model_short_read_bytes = 3072; VjoGameOcrResult result;
+    TEST_CHECK(run(&result) == VJO_OK && !result.cleanup_status && !control_opens && !stat_calls);
+    TEST_CHECK(model_reads > MODEL_BYTES/8192 && engine_runs == 1); drained();
+    setup(); corrupt_model_bytes = 1;
+    TEST_CHECK(run(&result) == VJO_E_OCR_MODEL && !result.cleanup_status);
+    TEST_CHECK(!alloc_calls && !loads && !control_opens && !io_failure.stage); assert_empty_error_text(&result); drained();
+    SceOff wrong_sizes[] = {0,1,MODEL_BYTES-1,MODEL_BYTES+1};
+    for (unsigned i=0;i<sizeof(wrong_sizes)/sizeof(wrong_sizes[0]);i++) {
+        setup(); model_size_set = 1; model_size_result = wrong_sizes[i];
+        TEST_CHECK(run(&result) == VJO_E_OCR_MODEL && !result.cleanup_status);
+        TEST_CHECK(closes == 1 && !model_reads && !alloc_calls && !control_opens && !io_failure.stage);
+        assert_empty_error_text(&result); drained();
+    }
+}
+static void test_io_cleanup_and_cancellation_suppress_diagnostics(void)
+{
+    VjoGameOcrResult result;
+    setup(); model_open_rc = (int32_t)0x8001000D; control_close_failures = -1;
+    TEST_CHECK(run(&result) == VJO_E_OCR_UNAVAILABLE && result.cleanup_status);
+    TEST_CHECK(blocked && control_fd == 3 && control_live && !alloc_calls); assert_empty_error_text(&result);
+    TEST_CHECK(vjo_game_ocr_worker_stop() == VJO_E_OCR_UNAVAILABLE && control_fd == 3);
+    control_close_failures = 0; TEST_CHECK(vjo_game_ocr_worker_stop() == VJO_OK); drained();
+    setup(); model_open_rc = (int32_t)0x8001000D; cancel_on_model_failure = 1;
+    TEST_CHECK(run(&result) == VJO_E_CANCELLED && !control_opens && !result.cleanup_status);
+    assert_empty_error_text(&result); drained();
+    setup(); model_open_rc = (int32_t)0x8001000D; cancel_on_control_read = 1;
+    TEST_CHECK(run(&result) == VJO_E_CANCELLED && control_closes == 1 && !result.cleanup_status);
+    assert_empty_error_text(&result); drained();
+    if (!have_model()) return;
+    setup(); model_read_result_set = 1; model_read_result = 0; model_close_rc = -1;
+    TEST_CHECK(run(&result) == VJO_E_OCR_UNAVAILABLE && result.cleanup_status && model_fd == 2);
+    TEST_CHECK(!alloc_calls && blocked); assert_empty_error_text(&result);
+    model_close_rc = 0; TEST_CHECK(vjo_game_ocr_worker_stop() == VJO_OK); drained();
+    setup(); model_short_read_bytes = 3072; cancel_after_model_read = 1;
+    TEST_CHECK(run(&result) == VJO_E_CANCELLED && model_reads == 1 && !control_opens && !alloc_calls);
+    assert_empty_error_text(&result); drained();
+}
+static void test_io_failure_and_successful_job_retries_reset_metadata(void)
+{
+    if (!have_model()) return;
+    setup(); VjoGameOcrResult result;
+    TEST_CHECK(run(&result) == VJO_OK && engine_runs == 1); drained();
+    model_open_rc = (int32_t)0x8001000D;
+    TEST_CHECK(run(&result) == VJO_E_OCR_MODEL_IO && !result.cleanup_status);
+    VjoGameOcrIoDiagnostic diagnostic;
+    TEST_CHECK(!vjo_game_ocr_io_parse(result.text,sizeof(result.text),&diagnostic));
+    TEST_CHECK(!result.metadata_peak && !result.neural_peak && engine_runs == 1 && control_opens == 1); drained();
+    model_open_rc = 0;
+    TEST_CHECK(run(&result) == VJO_OK && engine_runs == 2 && loads == 2 && unloads == 2);
+    TEST_CHECK(!io_failure.stage && control_opens == 1 && result.text[0] != 'M'); drained();
+}
 TEST_LIST = {
     {"budget_and_import_guards_allocate_nothing",test_budget_and_import_guards_allocate_nothing},
     {"job_and_budget_threshold",test_job_and_budget_threshold},
@@ -408,5 +591,10 @@ TEST_LIST = {
     {"persistent_complete_failure_refuses_unload",test_persistent_complete_failure_refuses_unload},
     {"start_failure_retains_undeleted_thread_module",test_start_failure_retains_undeleted_thread_module},
     {"portable_floorf_matches_finite_binary32",test_portable_floorf_matches_finite_binary32},
+    {"native_open_failure_and_control_outcomes",test_native_open_failure_and_control_outcomes},
+    {"size_offset_and_read_native_failures",test_size_offset_and_read_native_failures},
+    {"short_reads_succeed_and_hash_size_errors_stay_model",test_short_reads_succeed_and_hash_size_errors_stay_model},
+    {"io_cleanup_and_cancellation_suppress_diagnostics",test_io_cleanup_and_cancellation_suppress_diagnostics},
+    {"io_failure_and_successful_job_retries_reset_metadata",test_io_failure_and_successful_job_retries_reset_metadata},
     {NULL,NULL}
 };

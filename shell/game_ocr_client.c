@@ -1,5 +1,6 @@
 #include "game_ocr_client.h"
 #include "../core/conn.h"
+#include "../include/vjo_game_ocr_diag.h"
 #include <string.h>
 
 int vjo_game_ocr_exchange(const VjoGameOcrClient *client,
@@ -32,7 +33,17 @@ int vjo_game_ocr_exchange(const VjoGameOcrClient *client,
                 !memchr(result->text, 0, sizeof(result->text)) || result->rc > 0 ||
                 result->cleanup_status) { rc = VJO_E_OCR_INFERENCE; break; }
             rc = result->rc;
-            if (rc) memset(result->text, 0, sizeof(result->text));
+            if (rc == VJO_E_OCR_MODEL_IO) {
+                VjoGameOcrIoDiagnostic diagnostic;
+                if (vjo_game_ocr_io_parse(result->text, sizeof(result->text), &diagnostic)) {
+                    rc = VJO_E_OCR_INFERENCE;
+                    break;
+                }
+                /* A failed worker must never return unvalidated text, even
+                 * in unused bytes after its fixed metadata payload. */
+                memset(result->text+VJO_GAME_OCR_IO_DIAG_BYTES, 0,
+                       sizeof(result->text)-VJO_GAME_OCR_IO_DIAG_BYTES);
+            } else if (rc) memset(result->text, 0, sizeof(result->text));
             if (cancelled && cancelled(cancel_ud)) {
                 memset(result->text, 0, sizeof(result->text));
                 return VJO_E_CANCELLED;

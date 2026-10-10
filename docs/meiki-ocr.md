@@ -206,6 +206,25 @@ prove physical USER budgets, or bypass any production allocation guard.
 peaks and cleanup status without dialogue text. Return to VitaShell FTP after a
 manual trigger to retrieve that log and the Shell log.
 
+The first physical game-worker test allocated Shell's 320 KiB result block,
+passed the game budget guard, and returned a model-validation error before any
+neural or metadata allocation. Both installed model files were then downloaded
+over FTP and matched their pinned sizes and SHA-256 values. This establishes a
+different failure from the earlier Shell heap refusal; it does not establish
+that a retail game process can read those files or load the engine.
+
+Game-worker file sizing uses read-only Open plus Lseek, and model reads loop to
+complete bounded short reads. Native Open/Lseek/Read failures return
+`VJO_E_OCR_MODEL_IO` separately from successfully opened size/hash mismatches.
+The result carries a strict 28-character metadata tag, preserving the API 9
+wire size and containing only model identity, failed operation and raw code.
+On such a failure, a one-byte read of `app0:/sce_sys/param.sfo` tests ordinary
+game-file access in that same process. Shell validates this tag, logs both
+outcomes, and shows a file-access error instead of requesting a model reinstall.
+The game process may be unable to write its own log; this diagnostic reaches
+the existing Shell log without that dependency. Cancellation or failed cleanup
+suppresses the tag, and every other failed result still clears its text.
+
 For physical diagnosis, optionally build with `-DVJO_MEMORY_DIAGNOSTICS=ON`.
 The first explicit pure-Meiki request compares virtual and direct Paf free
 counts with `QueryInfo` and records the heap range. A 128 KiB Paf test is

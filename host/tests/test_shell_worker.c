@@ -296,6 +296,7 @@ int vjo_meiki_bridge_finish(VjoMeikiBridge *bridge)
 
 #ifdef VJO_MEIKI_GAME_WORKER
 static int game_submit_reply, game_engine_reply;
+static const char *game_error_metadata;
 static unsigned game_submits, game_reads, game_cancels;
 static VjoGameOcrRequest game_request;
 int vjoOcrSubmit(const VjoGameOcrRequest *request)
@@ -311,7 +312,7 @@ int vjoOcrRead(uint32_t seq, VjoGameOcrResult *result)
     TEST_CHECK(seq == (uint32_t)game_submit_reply);
     game_reads++; memset(result, 0, sizeof(*result));
     result->size = sizeof(*result); result->seq = seq; result->rc = game_engine_reply;
-    strcpy(result->text, "猫"); return 0;
+    strcpy(result->text, game_error_metadata ? game_error_metadata : "猫"); return 0;
 }
 int vjoOcrCancel(uint32_t seq) { (void)seq; game_cancels++; return 0; }
 #endif
@@ -480,6 +481,7 @@ static void setup(const char *ini)
     mem_kind = MEM_RESULTS;
 #ifdef VJO_MEIKI_GAME_WORKER
     game_submit_reply = 19; game_engine_reply = VJO_OK;
+    game_error_metadata = NULL;
     game_submits = game_reads = game_cancels = 0;
 #endif
     capture_calls = 0;
@@ -1862,6 +1864,31 @@ static void test_game_meiki_dispatch_and_failure(void)
         TEST_CHECK(!has_result_memory());
     }
 }
+static void test_game_meiki_model_access_error(void)
+{
+    native_setup(RELAY_CONFIG "text_source = ocr\nocr_backend = meiki\nocr_mode = on_press\n");
+    activate_game(7, "PCSG00001", VJO_GAME);
+    region_selected = 1; capture_reply = 71;
+    kernel_state.width = 96; kernel_state.height = 32;
+    kernel_state.raw_stride = kernel_state.width*4;
+    game_engine_reply = VJO_E_OCR_MODEL_IO;
+    game_error_metadata = "MIO1:R:O:8001000D:P:00000000";
+    open_overlay();
+    TEST_ASSERT(job_running && !job_native);
+    job_lookup = 0;
+    uint32_t checksum = 0;
+    TEST_CHECK(run_job(&results[job_idx], &cache_data[job_idx], &checksum) == VJO_E_OCR_MODEL_IO);
+    const VjoOverlayData *out = &cache_data[job_idx];
+    TEST_CHECK(out->failed_stage == VJO_STAGE_OCR && out->err.rc == VJO_E_OCR_MODEL_IO);
+    TEST_ASSERT(out->err.detail);
+    TEST_CHECK(strstr(out->err.detail, "open the recognizer model (0x8001000D)") != NULL);
+    TEST_CHECK(strstr(out->err.detail, "Keep the installed model files") != NULL);
+    TEST_CHECK(!strstr(out->err.detail, "Install") && !strstr(out->err.detail, "MIO1"));
+    TEST_CHECK(!job_text_ready && !text_reads && !relay_connections && !raw_calls);
+    job_done = 1; on_job_done(); on_game_exit();
+    TEST_CHECK(!has_result_memory());
+    game_error_metadata = NULL;
+}
 #endif
 
 static void test_meiki_manual_and_no_fallback(void)
@@ -2100,6 +2127,7 @@ TEST_LIST = {
     {"meiki_manual_and_no_fallback", test_meiki_manual_and_no_fallback},
 #ifdef VJO_MEIKI_GAME_WORKER
     {"game_meiki_dispatch_and_failure", test_game_meiki_dispatch_and_failure},
+    {"game_meiki_model_access_error", test_game_meiki_model_access_error},
 #endif
     {"meiki_layout_invalidates_cache", test_meiki_layout_invalidates_cache},
     {"ocr_context_changes", test_ocr_context_changes},

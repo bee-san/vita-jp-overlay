@@ -14,9 +14,10 @@
 #include "shell.h"
 
 /* Memory: two result arenas (the overlay shows one while the network thread
- * fills the other) in one memblock allocated while a game runs, plus a small
+ * fills the other) in one memblock allocated only when a job needs it, plus a small
  * static scratch arena (control thread only) for config/region/messages. */
 #define RESULT_ARENA_SIZE (384 * 1024)
+#define NATIVE_ARENA_SIZE (128 * 1024)
 #define SCRATCH_SIZE      (24 * 1024)
 #define MEM_SIZE          (2 * RESULT_ARENA_SIZE)
 
@@ -44,6 +45,7 @@ static SceUID net_evf = -1;
 static volatile int running = 1;
 
 static SceUID mem_uid = -1;
+static void *mem_heap; /* optional bounded Paf allocation, owned instead of mem_uid */
 static VjoArena results[2];
 static VjoArena scratch; /* static; control thread only */
 static uint8_t scratch_mem[SCRATCH_SIZE];
@@ -51,6 +53,9 @@ static int active = -1;               /* results[] index shown/cached */
 static uint32_t cache_checksum;
 static int cache_ok;
 static VjoOverlayData cache_data[2];
+/* Raw native text shares the picker's resident text storage. The picker and
+ * this list are mutually exclusive; neither depends on a result arena. */
+static VjoEntryList native_list;
 
 static VjoConfig cfg;      /* control thread */
 static VjoConfig job_cfg;  /* snapshot used by the network thread */
@@ -63,7 +68,8 @@ static int native_game, text_calibrated, text_started;
 static int job_native, job_anchor;
 static char job_hook_text[VJO_TEXT_BYTES], seen_hook_text[VJO_TEXT_BYTES];
 static uint32_t seen_hook_id;
-static int64_t hook_changed_us;
+static int64_t hook_changed_us, hook_log_after;
+static int hook_log_pending;
 static uint32_t pending_hook_session, pending_hook_id;
 
 /* Control-thread state. The overlay and the network job are independent: an
@@ -87,8 +93,9 @@ static int stable_pending;
 typedef struct {
     int64_t until, us;
 } Backoff;
-static Backoff ocr_backoff, dict_backoff;
+static Backoff ocr_backoff, dict_backoff, mem_backoff;
 static int64_t job_started_us;
+static void backoff_note(Backoff *b, int failed);
 
 /* network job */
 #define NET_EV_JOB  1u
@@ -143,6 +150,8 @@ static void picker_publish(void)
 {
     vjo_view_lock();
     g_view.hook_picker = 1;
+    g_view.list = NULL;
+    g_view.list_seq++;
     g_view.hook_session = text_state.session;
     g_view.hook_count = text_state.count;
     sceClibMemcpy(g_view.hooks, text_state.candidates, sizeof(g_view.hooks));
@@ -163,24 +172,61 @@ static int64_t now_us(void)
     return (int64_t)sceKernelGetProcessTimeWide();
 }
 
+static void log_hook_state(const char *why)
+{
+    vjo_log("hooks %s session=%u seq=%u candidates=%u scanning=%u address=%08X selected=%u kind=%u encoding=%u bytes=%u updates=%u",
+            why, text_state.session, text_state.sequence, text_state.count, text_state.scanning,
+            text_state.scan_address, text_state.selected, text_state.current.kind, text_state.current.encoding,
+            (unsigned)sceClibStrnlen(text_state.current.text, sizeof(text_state.current.text)),
+            text_state.current.updates);
+    hook_log_after = now_us() + 1000000;
+    hook_log_pending = 0;
+}
+
 /* ---------------- memory ---------------- */
+
+static void mem_free(void);
 
 static int mem_alloc(void)
 {
     void *base = NULL;
     uint8_t *p;
-    if (mem_uid >= 0)
+    size_t arena_size = RESULT_ARENA_SIZE;
+    /* A later OCR request needs the full result capacity. No job is running
+     * when this function is called, so retire the native-only fallback. */
+    if (mem_heap && (!native_enabled() || !text_state.current.id))
+        mem_free();
+    if (mem_uid >= 0 || mem_heap)
         return 0;
+    if (now_us() < mem_backoff.until)
+        return -1;
     mem_uid = sceKernelAllocMemBlock("VjoShellMem", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW,
                                      (MEM_SIZE + 0xFFF) & ~0xFFF, NULL);
     if (mem_uid < 0) {
         vjo_log("shell memblock (%d KiB) failed 0x%08X", MEM_SIZE >> 10, mem_uid);
-        return mem_uid;
+        /* Native lookup needs neither the JPEG nor TLS OCR workspace. Paf
+         * can have unused space in pages it already owns even when a new
+         * physical memblock cannot be allocated. Keep this fallback bounded;
+         * an oversized dictionary result still leaves raw text available. */
+        if (native_enabled() && text_state.current.id)
+            mem_heap = vjo_shell_heap_alloc(2 * NATIVE_ARENA_SIZE);
+        if (!mem_heap) {
+            backoff_note(&mem_backoff, 1);
+            return mem_uid;
+        }
+        base = mem_heap;
+        arena_size = NATIVE_ARENA_SIZE;
+        vjo_log("native dictionary arenas: Paf heap, %u KiB each", (unsigned)(arena_size >> 10));
+    } else if (sceKernelGetMemBlockBase(mem_uid, &base) < 0 || !base) {
+        sceKernelFreeMemBlock(mem_uid);
+        mem_uid = -1;
+        backoff_note(&mem_backoff, 1);
+        return -1;
     }
-    sceKernelGetMemBlockBase(mem_uid, &base);
+    backoff_note(&mem_backoff, 0);
     p = (uint8_t *)base;
-    vjo_arena_init(&results[0], p, RESULT_ARENA_SIZE);
-    vjo_arena_init(&results[1], p + RESULT_ARENA_SIZE, RESULT_ARENA_SIZE);
+    vjo_arena_init(&results[0], p, arena_size);
+    vjo_arena_init(&results[1], p + arena_size, arena_size);
     active = -1;
     cache_ok = 0;
     return 0;
@@ -188,17 +234,20 @@ static int mem_alloc(void)
 
 static void mem_free(void)
 {
-    if (mem_uid >= 0) {
+    if (mem_uid >= 0 || mem_heap) {
         vjo_view_lock();
         g_view.list = NULL;
         vjo_view_unlock();
-        sceKernelFreeMemBlock(mem_uid);
+        if (mem_heap) vjo_shell_heap_free(mem_heap);
+        else sceKernelFreeMemBlock(mem_uid);
     }
+    mem_heap = NULL;
     mem_uid = -1;
     vjo_arena_init(&results[0], NULL, 0);
     vjo_arena_init(&results[1], NULL, 0);
     active = -1;
     cache_ok = 0;
+    backoff_note(&mem_backoff, 0);
 }
 
 /* ---------------- view ---------------- */
@@ -262,6 +311,32 @@ static void strip_publish(const char *text, int kind, int busy)
     g_view.font_size_en = cfg.font_size_en;
     g_view.strip_version++;
     vjo_view_unlock();
+}
+
+/* Hook text needs no capture, network job or result arena. Filtering uses the
+ * control thread's existing scratch space; only resident copies escape it.
+ * Keep job_hook_text and both result arenas untouched while a lookup runs. */
+static void native_publish(const char *status, int is_error)
+{
+    VjoOverlayData d;
+    size_t mark = vjo_arena_mark(&scratch);
+    const char *text = text_state.current.text;
+    if (!text_state.current.id || !text[0]) return;
+    if (vjo_overlay_ocr_text(&scratch, &cfg, text, &d) == VJO_OK)
+        text = d.sentence;
+    if (ov != OV_CLOSED) {
+        vjo_view_lock();
+        g_view.hook_picker = 0;
+        copy_utf8(g_view.hooks[0].text, sizeof(g_view.hooks[0].text), text);
+        native_list.header = g_view.hooks[0].text;
+        native_list.entries = NULL;
+        native_list.n_entries = 0;
+        vjo_view_unlock();
+        view_publish(1, &native_list, status, is_error);
+    }
+    if (subtitles)
+        strip_publish(text, VJO_STRIP_SENTENCE, 0);
+    vjo_arena_release(&scratch, mark);
 }
 
 /* ---------------- network thread ---------------- */
@@ -431,7 +506,9 @@ recognized:
     }
     __sync_synchronize(); /* the sentence is visible before job_text_ready */
     job_text_ready = 1;
-    return job_lookup ? vjo_overlay_lookup(a, &plat, &job_cfg, out) : VJO_OK;
+    if (job_lookup) return vjo_overlay_lookup(a, &plat, &job_cfg, out);
+    out->list.header = out->sentence ? out->sentence : "";
+    return VJO_OK;
 }
 
 static int net_main(SceSize args, void *argp)
@@ -463,20 +540,40 @@ static int net_main(SceSize args, void *argp)
 /* lookup = 0: OCR only (the subtitles' sentence). */
 static void start_job(const char *why, int lookup)
 {
-    if (job_running || mem_uid < 0)
-        return;
+    int native = native_enabled() && text_state.current.id;
+    if (native) {
+        if (!text_state.current.text[0]) return;
+        native_publish(NULL, 0);
+        if (!lookup) return;
+    }
+    if (job_running) return;
     if (native_enabled() && !text_state.current.id &&
         (cfg.text_source == VJO_SOURCE_HOOKS || text_calibrated)) {
         if (ov != OV_CLOSED) picker_publish();
         return;
     }
-    job_native = native_enabled() && text_state.current.id;
+    job_native = native;
     if (job_native) {
         if (!text_state.current.text[0]) return;
         copy_utf8(job_hook_text, sizeof(job_hook_text), text_state.current.text);
     }
     job_anchor = native_enabled() && !job_native && !text_calibrated;
     if (job_anchor) text_calibrated = 1; /* one attempt, even when OCR fails */
+    if (mem_alloc() < 0) {
+        if (native) {
+            native_publish("Text available; not enough memory for dictionary lookup", 1);
+        } else if (native_enabled()) {
+            if (ov != OV_CLOSED) {
+                view_publish(1, NULL, "Choose a text hook; not enough memory for OCR matching", 0);
+                picker_publish();
+            }
+            if (subtitles) strip_publish("Open the overlay to choose a text hook", VJO_STRIP_STATUS, 0);
+        } else {
+            if (ov != OV_CLOSED) view_publish(1, NULL, "Not enough memory for the overlay", 1);
+            if (subtitles) strip_publish("Not enough memory for subtitles", VJO_STRIP_ERROR, 0);
+        }
+        return;
+    }
     vjo_log("job start (%s)%s", why, lookup ? "" : ", OCR only");
     job_lookup = lookup;
     job_idx = active == 0 ? 1 : 0;
@@ -489,7 +586,7 @@ static void start_job(const char *why, int lookup)
     job_started_us = now_us();
     __sync_synchronize();
     sceKernelSetEventFlag(net_evf, NET_EV_JOB);
-    if (subtitles)
+    if (subtitles && !job_native)
         strip_publish(NULL, 0, 1);
 }
 
@@ -556,10 +653,6 @@ static void open_overlay(void)
     VjoState st;
     ov = OV_OPEN;
     vjoSetInputBlock(1);
-    if (mem_uid < 0 && mem_alloc() < 0) {
-        view_publish(1, NULL, "Not enough memory for the overlay", 1);
-        return;
-    }
     apply_config(); /* settings are re-read on every open */
     if (cfg.text_source == VJO_SOURCE_HOOKS && !native_game) {
         view_publish(1, NULL, "Native text hooks are available for Vita games", 1);
@@ -570,6 +663,7 @@ static void open_overlay(void)
             view_publish(1, NULL, "Cannot read native text sources", 1);
             return;
         }
+        log_hook_state("open");
         if (!text_started) {
             vjoTextControl(text_state.session, text_state.selected ? VJO_TEXT_FOLLOW : VJO_TEXT_DISCOVER,
                            text_state.selected);
@@ -674,7 +768,7 @@ static void on_job_done(void)
             start_job("hook text changed during lookup", ov != OV_CLOSED && vjo_config_dict_ready(&cfg));
         return;
     }
-    if (job_cancelled(NULL)) {
+    if (job_cancelled(NULL) || (job_native && !same_pipeline(&job_cfg, &cfg))) {
         /* The result is for an earlier region or game. Redo it for whoever
          * still waits: the overlay, or the subtitles (on_command's own job
          * was skipped while this one ran; the strip still shows busy). */
@@ -691,6 +785,11 @@ static void on_job_done(void)
     backoff_note(&ocr_backoff, ocr_failed);
     if (!ocr_failed && job_lookup)
         backoff_note(&dict_backoff, d->err.rc != VJO_OK);
+    if (job_native && d->err.rc == VJO_E_OOM) {
+        cache_ok = 0;
+        native_publish("Text available; not enough memory for dictionary lookup", 1);
+        return;
+    }
     if (!job_lookup && ov == OV_OPEN && !job_native) {
         /* OCR only, while the overlay shows a result or an error: that stays
          * (and its arena stays active); the strip takes the sentence */
@@ -737,11 +836,12 @@ static void on_job_text(void)
     __sync_synchronize(); /* pairs with the network thread's barrier */
     sentence = cache_data[job_idx].sentence;
     job_text_ready = 0;
-    if (job_cancelled(NULL) || !same_pipeline(&job_cfg, &cfg)) return;
+    if (job_cancelled(NULL) || !same_pipeline(&job_cfg, &cfg) ||
+        (job_native && sceClibStrcmp(job_hook_text, text_state.current.text))) return;
     if (job_anchor && sentence)
         vjoTextReference(text_state.session, sentence);
     vjo_log("subtitle text ready in %d ms", (int)((now_us() - job_started_us) / 1000));
-    if (subtitles && sentence)
+    if (subtitles && sentence && !job_native)
         strip_publish(sentence, VJO_STRIP_SENTENCE, 1);
 }
 
@@ -753,10 +853,6 @@ static void set_subtitles(int on)
     vjo_log("subtitles %s", on ? "on" : "off");
     if (!on) {
         strip_publish("", VJO_STRIP_SENTENCE, 0);
-        return;
-    }
-    if (mem_uid < 0 && mem_alloc() < 0) {
-        strip_publish("Not enough memory for subtitles", VJO_STRIP_ERROR, 0);
         return;
     }
     apply_config(); /* settings are re-read, as when the overlay opens */
@@ -826,6 +922,7 @@ static void on_command(void)
         vjoTextReference(text_state.session, "");
         vjoTextControl(text_state.session, VJO_TEXT_DISCOVER, 0);
         vjoTextRead(&text_state);
+        log_hook_state("discover");
         picker_publish();
         break;
     case VJO_CMD_HOOK_SELECT:
@@ -834,6 +931,7 @@ static void on_command(void)
         __atomic_add_fetch(&capture_generation, 1, __ATOMIC_RELEASE);
         cache_ok = 0;
         vjoTextRead(&text_state);
+        log_hook_state("select");
         picker_close();
         view_publish(1, NULL, "Reading the selected hook…", 0);
         start_job("manual hook selection", vjo_config_dict_ready(&cfg));
@@ -911,16 +1009,17 @@ static int title_game_mode(const char *tid)
 static void activate_game(SceUID pid, const char *tid, int mode)
 {
     sceClibSnprintf(title_id, sizeof(title_id), "%s", tid);
-    if (mem_uid < 0)
-        mem_alloc();
     apply_config();
     push_region();
     backoff_note(&ocr_backoff, 0);
     backoff_note(&dict_backoff, 0);
+    backoff_note(&mem_backoff, 0);
     vjoSetGameActive(pid, mode);
     native_game = mode == VJO_GAME;
     text_started = text_calibrated = 0;
     seen_hook_id = 0; seen_hook_text[0] = 0;
+    hook_log_after = 0;
+    hook_log_pending = 0;
     sceClibMemset(&text_state, 0, sizeof(text_state));
     picker_close();
     if (native_enabled() && vjoTextRead(&text_state) == 0) {
@@ -1005,8 +1104,11 @@ static int background_wanted(void)
 static void poll_hooks(void)
 {
     uint32_t previous = text_state.sequence;
+    uint32_t previous_count = text_state.count, previous_scan = text_state.scanning;
     int picker;
     if (!game_active() || !native_enabled() || vjoTextRead(&text_state) < 0) return;
+    if (previous_count != text_state.count || previous_scan != text_state.scanning)
+        hook_log_pending = 1;
     if (seen_hook_id && !text_state.selected) {
         /* The old screen no longer validates another source. Keep OCR on
          * demand, and clear its scores before showing fresh candidates. */
@@ -1035,6 +1137,7 @@ static void poll_hooks(void)
         seen_hook_id = text_state.current.id;
         copy_utf8(seen_hook_text, sizeof(seen_hook_text), text_state.current.text);
         hook_changed_us = now_us(); cache_ok = 0;
+        hook_log_pending = 1;
         if (!seen_hook_id || !seen_hook_text[0]) {
             if (subtitles) strip_publish("Waiting for a valid text source…", VJO_STRIP_STATUS, 0);
             if (ov != OV_CLOSED) {
@@ -1047,14 +1150,18 @@ static void poll_hooks(void)
              * or the previous sentence's text-filter error. */
             backoff_note(&ocr_backoff, 0);
             picker_close();
+            native_publish(NULL, 0);
+            picker = 0;
         }
     }
     if (!picker && seen_hook_id && seen_hook_text[0] && !job_running &&
-        now_us() - hook_changed_us >= 300000 && (ov != OV_CLOSED || subtitles) &&
+        now_us() - hook_changed_us >= 300000 && ov != OV_CLOSED && vjo_config_dict_ready(&cfg) &&
         (!cache_ok || active < 0) && now_us() >= ocr_backoff.until &&
-        (ov == OV_CLOSED || !vjo_config_dict_ready(&cfg) || now_us() >= dict_backoff.until)) {
-        start_job("hook text settled", ov != OV_CLOSED && vjo_config_dict_ready(&cfg));
+        now_us() >= dict_backoff.until && now_us() >= mem_backoff.until) {
+        start_job("hook text settled", 1);
     }
+    if (hook_log_pending && now_us() >= hook_log_after)
+        log_hook_state("update");
 }
 
 static int background_throttled(void)
@@ -1111,7 +1218,7 @@ static int ctl_main(SceSize args, void *argp)
         if (bits & VJO_EV_REGION_STABLE)
             stable_pending = 1;
         auto_prefetch();
-        if (!game_active() && !job_running && mem_uid >= 0 && ov == OV_CLOSED)
+        if (!game_active() && !job_running && (mem_uid >= 0 || mem_heap) && ov == OV_CLOSED)
             mem_free();
     }
     return 0;

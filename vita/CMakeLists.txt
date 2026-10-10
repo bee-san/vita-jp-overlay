@@ -23,7 +23,7 @@ set(ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
 set(VJO_ROOT ${ROOT})
 set(VJO_BUILD_VITA ON)
 option(VJO_WITH_NCNN "Build the CPU-only local mobile OCR recognizer" ON)
-set(VJO_VERSION "0.6-hooks.3")
+set(VJO_VERSION "0.6-hooks.4")
 
 # ---------------- kernel ----------------
 add_executable(VitaJPOverlay_Kernel

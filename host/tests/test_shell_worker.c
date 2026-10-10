@@ -3,6 +3,7 @@
 #include "acutest.h"
 #include "client.h"
 #include "replay.h"
+#define VJO_TEST_MEMORY_STUBS 1
 #include <psp2/host_stubs.h>
 #include "../../include/vjo_text.h"
 
@@ -53,6 +54,34 @@ void vjo_anki_post_check(unsigned int seq) {}
 void vjo_platform_vita(VjoPlatform *p) {}
 
 static uint8_t result_mem[2][RESULT_ARENA_SIZE];
+static unsigned allocation_calls, allocation_frees;
+static int allocation_failure;
+static uint8_t heap_mem[2 * NATIVE_ARENA_SIZE];
+static unsigned heap_calls, heap_frees;
+static int heap_available;
+void *vjo_shell_heap_alloc(size_t bytes)
+{
+    heap_calls++;
+    TEST_CHECK(bytes == sizeof(heap_mem));
+    return heap_available && bytes <= sizeof(heap_mem) ? heap_mem : NULL;
+}
+void vjo_shell_heap_free(void *ptr)
+{
+    TEST_CHECK(ptr == heap_mem);
+    heap_frees++;
+}
+SceUID sceKernelAllocMemBlock(const char *name, int type, unsigned int size, void *opt)
+{
+    allocation_calls++;
+    if (allocation_failure || size > sizeof(result_mem)) return (int)0x80024302u;
+    return 1;
+}
+int sceKernelGetMemBlockBase(SceUID uid, void **base)
+{
+    *base = result_mem;
+    return 0;
+}
+int sceKernelFreeMemBlock(SceUID uid) { allocation_frees++; return 0; }
 static VjoMemConn relay_conn;
 static char relay_reply[1024], relay_request[4096];
 static int relay_connections;
@@ -88,8 +117,15 @@ static void setup(const char *ini)
     hook_snapshot.session = 42;
     memset(&text_state, 0, sizeof(text_state));
     seen_hook_id = 0; seen_hook_text[0] = 0;
+    hook_log_after = 0;
+    hook_log_pending = 0;
     anchor_calls = 0;
     capture_calls = 0;
+    allocation_calls = allocation_frees = 0;
+    allocation_failure = 1;
+    heap_calls = heap_frees = 0;
+    heap_available = 0;
+    mem_heap = NULL;
     running = 1;
     region_selected = job_region_selected = 0;
     capture_generation = job_generation = 0;
@@ -97,6 +133,8 @@ static void setup(const char *ini)
     memset(cache_data, 0, sizeof(cache_data));
     memset(&ocr_backoff, 0, sizeof(ocr_backoff));
     memset(&dict_backoff, 0, sizeof(dict_backoff));
+    memset(&mem_backoff, 0, sizeof(mem_backoff));
+    memset(&native_list, 0, sizeof(native_list));
     memset(&plat, 0, sizeof(plat));
     plat.connect = connect_relay;
     plat.disconnect = disconnect_relay;
@@ -441,11 +479,9 @@ static void test_hook_picker_without_dictionary_settings(void)
     open_overlay();
     TEST_CHECK(g_view.hook_picker && !g_view.status_is_error && !job_running);
     vjo_post_hook(hook_snapshot.session, 10); on_command();
-    TEST_ASSERT(job_running && job_native && !job_lookup);
-    uint32_t checksum;
-    TEST_CHECK(run_job(&results[job_idx], &cache_data[job_idx], &checksum) == VJO_OK);
-    on_job_text(); on_job_done();
-    TEST_CHECK(g_view.list && !capture_calls && !relay_connections);
+    TEST_ASSERT(!job_running && g_view.list && g_view.list->header);
+    TEST_CHECK(!strcmp(g_view.list->header, "猫を見ました"));
+    TEST_CHECK(!capture_calls && !relay_connections && !allocation_calls);
 }
 
 static void test_changed_hook_discards_old_lookup(void)
@@ -460,7 +496,8 @@ static void test_changed_hook_discards_old_lookup(void)
     poll_hooks();
     on_job_done();
     TEST_CHECK(job_running && job_native && !strcmp(job_hook_text, "犬を見ました"));
-    TEST_CHECK(!g_view.list && !capture_calls);
+    TEST_ASSERT(g_view.list && g_view.list->header);
+    TEST_CHECK(!strcmp(g_view.list->header, "犬を見ました") && !capture_calls);
 }
 
 static void test_lost_hook_stays_manual(void)
@@ -487,13 +524,11 @@ static void test_hook_cache_uses_unfiltered_source(void)
     strcpy(hook_snapshot.candidates[0].text, "English speaker\n猫を見ました");
     vjoTextControl(hook_snapshot.session, VJO_TEXT_FOLLOW, 10);
     open_overlay(); poll_hooks();
-    uint32_t checksum;
-    TEST_CHECK(run_job(&results[job_idx], &cache_data[job_idx], &checksum) == VJO_OK);
-    on_job_done();
-    TEST_ASSERT(cache_ok && !job_running);
-    TEST_CHECK(strcmp(cache_data[active].sentence, seen_hook_text) != 0);
+    TEST_ASSERT(!job_running && g_view.list && g_view.list->header);
+    TEST_CHECK(!strcmp(g_view.list->header, "猫を見ました"));
+    TEST_CHECK(strcmp(g_view.list->header, seen_hook_text) != 0);
     test_now += 400000; poll_hooks();
-    TEST_CHECK(cache_ok && !job_running && !capture_calls);
+    TEST_CHECK(!job_running && !capture_calls && !allocation_calls);
 }
 
 static void test_blank_selected_hook_recovers(void)
@@ -506,10 +541,213 @@ static void test_blank_selected_hook_recovers(void)
     TEST_ASSERT(g_view.hook_picker && !job_running);
     strcpy(hook_snapshot.current.text, "猫を見ました");
     poll_hooks(); test_now += 400000; poll_hooks();
-    TEST_CHECK(!g_view.hook_picker && job_running && job_native && !capture_calls);
+    TEST_ASSERT(!g_view.hook_picker && !job_running && g_view.list && g_view.list->header);
+    TEST_CHECK(!strcmp(g_view.list->header, "猫を見ました") && !capture_calls);
+}
+
+static void remove_game_arenas(void)
+{
+    mem_uid = -1;
+    for (int i = 0; i < 2; i++) vjo_arena_init(&results[i], NULL, 0);
+}
+
+static void check_native_sentence(const char *sentence)
+{
+    TEST_ASSERT(g_view.list && g_view.list->header);
+    TEST_CHECK(!strcmp(g_view.list->header, sentence));
+    TEST_CHECK(g_view.list->n_entries == 0);
+    TEST_CHECK(!g_view.hook_picker && !capture_calls && !anchor_calls);
+    if (subtitles) {
+        TEST_CHECK(g_view.strip_kind == VJO_STRIP_SENTENCE && !g_view.strip_busy);
+        TEST_CHECK(!strcmp(g_view.strip_text, sentence));
+    }
+}
+
+static void test_low_memory_picker_and_raw_updates(void)
+{
+    native_setup(RELAY_CONFIG "text_source = hooks\nocr_backend = ncnn\n");
+    remove_game_arenas();
+    activate_game(7, "PCSG00415", VJO_GAME);
+    TEST_CHECK(mem_uid < 0 && allocation_calls == 0);
+    open_overlay();
+    TEST_CHECK(g_view.open && g_view.hook_picker && g_view.hook_count == 1);
+    TEST_CHECK(!g_view.status_is_error && !job_running && allocation_calls == 0);
+    set_subtitles(1);
+    TEST_CHECK(allocation_calls == 0 && !capture_calls && !anchor_calls);
+    vjo_post_hook(hook_snapshot.session, 10); on_command();
+    TEST_CHECK(allocation_calls == 1 && mem_uid < 0 && !job_running);
+    check_native_sentence("猫を見ました");
+
+    /* Kernel polling must neither require arenas nor retry allocation per tick. */
+    for (int i = 0; i < 20; i++) { test_now += 50000; poll_hooks(); }
+    TEST_CHECK(allocation_calls == 1 && !job_running);
+    strcpy(hook_snapshot.current.text, "犬を見ました");
+    hook_snapshot.sequence++;
+    poll_hooks();
+    check_native_sentence("犬を見ました");
+    TEST_CHECK(allocation_calls == 1 && !relay_connections && !posted_events);
+    test_now += BACKOFF_MIN_US;
+    poll_hooks();
+    TEST_CHECK(allocation_calls == 2 && !job_running);
+    check_native_sentence("犬を見ました");
+}
+
+static void test_native_subtitles_need_no_arena(void)
+{
+    native_setup(RELAY_CONFIG "text_source = hooks\n");
+    remove_game_arenas();
+    vjoTextControl(hook_snapshot.session, VJO_TEXT_FOLLOW, 10);
+    set_subtitles(1);
+    TEST_CHECK(!g_view.open && subtitles && !job_running && allocation_calls == 0);
+    TEST_CHECK(g_view.strip_kind == VJO_STRIP_SENTENCE && !g_view.strip_busy);
+    TEST_CHECK(!strcmp(g_view.strip_text, "猫を見ました"));
+    strcpy(hook_snapshot.current.text, "次の台詞を読みます");
+    poll_hooks(); test_now += 500000; poll_hooks();
+    TEST_CHECK(!strcmp(g_view.strip_text, "次の台詞を読みます"));
+    TEST_CHECK(!job_running && !allocation_calls && !capture_calls && !anchor_calls);
+}
+
+static void test_stale_dictionary_events_preserve_new_native_text(void)
+{
+    native_setup(RELAY_CONFIG "text_source = hooks\n");
+    vjoTextControl(hook_snapshot.session, VJO_TEXT_FOLLOW, 10);
+    set_subtitles(1);
+    open_overlay();
+    TEST_ASSERT(job_running && job_native && job_lookup);
+    uint32_t checksum;
+    TEST_ASSERT(run_job(&results[job_idx], &cache_data[job_idx], &checksum) == VJO_OK);
+    strcpy(hook_snapshot.current.text, "犬を見ました");
+    hook_snapshot.sequence++;
+    poll_hooks();
+    check_native_sentence("犬を見ました");
+    on_job_text();
+    check_native_sentence("犬を見ました");
+    on_job_done();
+    TEST_ASSERT(g_view.list && g_view.list->header);
+    TEST_CHECK(!strcmp(g_view.list->header, "犬を見ました"));
+    TEST_CHECK(!strcmp(g_view.strip_text, "犬を見ました"));
+    TEST_CHECK(!cache_ok && !capture_calls);
+}
+
+static void test_low_memory_exit_and_reopen(void)
+{
+    native_setup(RELAY_CONFIG "text_source = hooks\n");
+    remove_game_arenas();
+    open_overlay();
+    vjo_post_hook(hook_snapshot.session, 10); on_command();
+    TEST_CHECK(allocation_calls == 1 && !job_running);
+    close_overlay();
+    open_overlay();
+    check_native_sentence("猫を見ました");
+    TEST_CHECK(allocation_calls == 1); /* same failed allocation remains throttled */
+    on_game_exit();
+    TEST_CHECK(!g_view.open && !g_view.list && !subtitles && !native_game && !title_id[0]);
+    hook_snapshot.session++;
+    hook_snapshot.selected = 0;
+    memset(&hook_snapshot.current, 0, sizeof(hook_snapshot.current));
+    strcpy(hook_snapshot.candidates[0].text, "新しいゲームです");
+    activate_game(8, "PCSG00940", VJO_GAME);
+    open_overlay();
+    TEST_CHECK(g_view.hook_picker && !g_view.list && !job_running);
+    allocation_failure = 0;
+    vjo_post_hook(hook_snapshot.session, 10); on_command();
+    TEST_CHECK(allocation_calls == 2 && mem_uid >= 0 && job_running && job_native);
+    TEST_ASSERT(g_view.list && g_view.list->header);
+    TEST_CHECK(!strcmp(g_view.list->header, "新しいゲームです"));
+}
+
+static void test_native_arena_exhaustion_preserves_raw_text(void)
+{
+    native_setup(RELAY_CONFIG "text_source = hooks\n");
+    vjoTextControl(hook_snapshot.session, VJO_TEXT_FOLLOW, 10);
+    set_subtitles(1); open_overlay(); poll_hooks();
+    TEST_ASSERT(job_running && job_native);
+    vjo_arena_init(&results[job_idx], result_mem[job_idx], 1);
+    uint32_t checksum;
+    TEST_CHECK(run_job(&results[job_idx], &cache_data[job_idx], &checksum) == VJO_E_OOM);
+    on_job_text(); on_job_done();
+    TEST_CHECK(!job_running && !cache_ok && g_view.status_is_error);
+    check_native_sentence("猫を見ました");
+    int64_t until = ocr_backoff.until > dict_backoff.until ? ocr_backoff.until : dict_backoff.until;
+    TEST_ASSERT(until > (int64_t)test_now);
+    test_now = (uint64_t)(until-1); poll_hooks();
+    TEST_CHECK(!job_running);
+    check_native_sentence("猫を見ました");
+    test_now++; poll_hooks();
+    TEST_CHECK(job_running && job_native && !allocation_calls && !relay_connections);
+}
+
+static void test_native_pipeline_change_discards_old_dictionary(void)
+{
+    native_setup(RELAY_CONFIG "text_source = hooks\n");
+    vjoTextControl(hook_snapshot.session, VJO_TEXT_FOLLOW, 10);
+    set_subtitles(1); open_overlay();
+    TEST_ASSERT(job_running && job_native);
+    uint32_t checksum;
+    TEST_ASSERT(run_job(&results[job_idx], &cache_data[job_idx], &checksum) == VJO_OK);
+    TEST_ASSERT(cache_data[job_idx].list.n_entries == 1);
+    loaded_config.dictionary = VJO_DICT_LOCAL;
+    strcpy(loaded_config.local_dictionaries, "replacement.vjdict");
+    apply_config();
+    TEST_ASSERT(!same_pipeline(&job_cfg, &cfg));
+    on_job_text();
+    check_native_sentence("猫を見ました");
+    on_job_done();
+    TEST_CHECK(job_running && job_native && same_pipeline(&job_cfg, &cfg));
+    TEST_CHECK(!cache_ok);
+    check_native_sentence("猫を見ました");
+}
+
+static void test_native_heap_lookup_and_cleanup(void)
+{
+    native_setup(RELAY_CONFIG "text_source = hooks\n");
+    remove_game_arenas();
+    heap_available = 1;
+    vjoTextControl(hook_snapshot.session, VJO_TEXT_FOLLOW, 10);
+    open_overlay();
+    TEST_ASSERT(job_running && job_native && mem_heap == heap_mem && mem_uid < 0);
+    TEST_CHECK(heap_calls == 1 && allocation_calls == 1);
+    TEST_CHECK(results[0].size == NATIVE_ARENA_SIZE && results[1].size == NATIVE_ARENA_SIZE);
+    TEST_CHECK(results[1].base == heap_mem + NATIVE_ARENA_SIZE);
+    uint32_t checksum;
+    TEST_ASSERT(run_job(&results[job_idx], &cache_data[job_idx], &checksum) == VJO_OK);
+    on_job_text(); on_job_done();
+    TEST_ASSERT(g_view.list && g_view.list->n_entries == 1);
+    TEST_CHECK(!strcmp(g_view.list->header, "猫を見ました"));
+    TEST_CHECK(results[active].peak <= NATIVE_ARENA_SIZE);
+    on_game_exit();
+    TEST_CHECK(heap_frees == 1 && allocation_frees == 0 && !mem_heap && !g_view.list);
+    TEST_CHECK(!results[0].base && !results[1].base);
+    mem_free();
+    TEST_CHECK(heap_frees == 1);
+}
+
+static void test_native_heap_retires_for_ocr(void)
+{
+    native_setup(RELAY_CONFIG "text_source = hooks\n");
+    remove_game_arenas();
+    heap_available = 1;
+    vjoTextControl(hook_snapshot.session, VJO_TEXT_FOLLOW, 10);
+    vjoTextRead(&text_state);
+    TEST_ASSERT(mem_alloc() == 0 && mem_heap);
+    cfg.text_source = VJO_SOURCE_OCR;
+    allocation_failure = 0;
+    TEST_ASSERT(mem_alloc() == 0);
+    TEST_CHECK(heap_frees == 1 && !mem_heap && mem_uid >= 0);
+    TEST_CHECK(results[0].size == RESULT_ARENA_SIZE && results[1].size == RESULT_ARENA_SIZE);
+    mem_free();
+    TEST_CHECK(allocation_frees == 1 && heap_frees == 1);
 }
 
 TEST_LIST = {
+    {"native_heap_lookup_and_cleanup", test_native_heap_lookup_and_cleanup},
+    {"native_heap_retires_for_ocr", test_native_heap_retires_for_ocr},
+    {"low_memory_picker_and_raw_updates", test_low_memory_picker_and_raw_updates},
+    {"native_subtitles_need_no_arena", test_native_subtitles_need_no_arena},
+    {"stale_dictionary_events_preserve_new_native_text", test_stale_dictionary_events_preserve_new_native_text},
+    {"low_memory_exit_and_reopen", test_low_memory_exit_and_reopen},
+    {"native_arena_exhaustion_preserves_raw_text", test_native_arena_exhaustion_preserves_raw_text},
+    {"native_pipeline_change_discards_old_dictionary", test_native_pipeline_change_discards_old_dictionary},
     {"manual_hook_bypasses_capture_and_ocr", test_manual_hook_bypasses_capture_and_ocr},
     {"automatic_hooks_match_once_and_handle_ocr_failure", test_automatic_hooks_match_once_and_handle_ocr_failure},
     {"ambiguous_and_stale_hook_choices", test_ambiguous_and_stale_hook_choices},

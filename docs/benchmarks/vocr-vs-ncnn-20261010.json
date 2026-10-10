@@ -1,0 +1,205 @@
+{
+  "measured_at_utc": "2026-10-10T22:00:04+00:00",
+  "environment": {
+    "platform": "Linux-6.12.110-135.202.amzn2023.x86_64-x86_64-with-glibc2.34",
+    "machine": "x86_64",
+    "host_compiler": "gcc 11.5.0 (Release, -O2 for the vita-vn-ocr runtime)",
+    "note": "x86-64 host; no PS Vita measurement"
+  },
+  "overlay_base_commit": "53d0e2afd67c3249b461941a54a99978bfd07958",
+  "source_sha256": {
+    "core/vocr_ocr.c": "2d791327d020444a16f621009515fc8b78c7a4d5a6eaf624a527c8fad3f32815",
+    "core/vocr_ocr.h": "e15cb3a756297bbaf370220111d8069f918ba4fa6987432a949a4682d7377c61",
+    "core/local_ocr.cpp": "bec426cd7c0202bc27f7b7265a11d120dc9c648f9ad256420b0fdabb5ac3b9ec",
+    "core/ocr_lines.c": "ede00e179fdce2cb54b9daaaf5e9d017bd212a7a5691b18a8580fb5f9635e534",
+    "host/ocr_tool.c": "e17547b58ef850fb535c3e4607ddd2d6274def7ee9e0e4881fdaea88eb8fc403",
+    "tools/benchmark_local_ocr.py": "043f5ec779f9e390145a4a14cb8657b94f9f488f8be6dc7806767ee2a16372f0"
+  },
+  "vita_vn_ocr": {
+    "repository": "https://github.com/bee-san/vita-vn-ocr",
+    "commit": "72cf4af0905091a0ee329d336889ccf0a8cd38c8",
+    "runtime_sha256": {
+      "vocr.c": "d1fe1f7be4b479ec96d5ca0c1c44c4c3cb7edcf66dcf7abced332601fdcdeb33",
+      "vocr.h": "c4948a25be4063cd1e22c2011a24c21d95c6a06c2360348452876a24288e09dd",
+      "vocr_lines.c": "2430531cf5d58e47676f165247f8400b819b5377b1f39669107d88a150f67d06",
+      "vocr_lines.h": "e54bd395e63d0f6968dd427749d7d949ac8cb9be058ab7c3bb37a30283e57630"
+    },
+    "eval_manifests_sha256": {
+      "vita-test.jsonl": "5fa68d04648c246c1a0fd2966c8c13a8a0a8d49521288d0663a8770518ae1122",
+      "psp-test.jsonl": "2b8db0849a42673b72f86d5466439719b2a9f8012c68e3c560fce3374e4076bc"
+    }
+  },
+  "models": {
+    "ncnn": {
+      "file": "PP_OCRv5_mobile_rec.ncnn.bin",
+      "bytes": 8242276,
+      "sha256": "49d9907a55ba20fa6637f9f788f66ab00793bc8ce57a733a09dbe86b9a2e3db0",
+      "source": "tools/prepare_ocr.py (nihui/ncnn-android-ppocrv5 671ac4a7), -DVJO_WITH_NCNN=ON"
+    },
+    "vocr:H15_w8.vocr": {
+      "bytes": 1155968,
+      "sha256": "316ebc377ec34520440991c5085199d8e74031f01a867938be90a60c1e3f03cd",
+      "source": "bee-san/vita-vn-ocr release v0.2.0 (tools/prepare_ocr.py --backend vocr)"
+    },
+    "vocr:FL10_w8.vocr": {
+      "bytes": 657664,
+      "sha256": "500e0b842e5f0cb326f55e7d991a52ab66dd24977ccc89bd188228aedc825e84",
+      "source": "bee-san/vita-vn-ocr release v0.2.0"
+    }
+  },
+  "commands": [
+    "cmake -S . -B build/host -G Ninja -DCMAKE_BUILD_TYPE=Release -DVJO_WITH_NCNN=ON -DVJO_WITH_VOCR=ON -DVJO_VOCR_SOURCE_DIR=/path/to/vita-vn-ocr -DVJO_VOCR_MODEL_DIR=$PWD/ocr",
+    "cmake --build build/host",
+    "tools/benchmark_local_ocr.py --vjo-ocr build/host/vjo-ocr --vocr-repo /path/to/vita-vn-ocr --eval-data /path/to/vita-vn-ocr/data/eval --run ncnn=build/host/ocr-model --run vocr=ocr:H15_w8.vocr --run vocr=ocr:FL10_w8.vocr --out results.json",
+    "(cross-check, in vita-vn-ocr) eval/run.py --model 'cmd:runtime/build/vocr_cli H15_w8.vocr --mode w8i --stdin' --set vita-test,psp-test --finder console --polarity console|native"
+  ],
+  "metric": "eval's region-level concat CER (vita-vn-ocr eval/metrics.norm, Levenshtein): all lines a backend read, top to bottom, against all lines of the region; a refused region counts all its characters; regions with an uncertain line are left out. Each region runs once in a fresh vjo-ocr process.",
+  "workspace_peak": "vjo-ocr tensor_heap_peak: ncnn's tensor heap peak inside its 64 MiB block; vocr's exact workspace (weights + max(finder, recognizer arena) + grey region + runtime structs), all of which the job uses. Host struct sizes are 64-bit; on the Vita the structs take 3,760 bytes.",
+  "peak_rss": "VmHWM of the vjo-ocr process after exec (its own pages: code, libc, the RGBA input, the workspace). Baseline with no recognition: 4,509,696 bytes.",
+  "sets": {
+    "vita-test": {
+      "ncnn": {
+        "regions": 84,
+        "refused": 25,
+        "failed": 0,
+        "concat_cer": 0.3755,
+        "concat_errors": 941,
+        "concat_chars": 2506,
+        "lines_read": 137,
+        "workspace_peak_max": 44469952,
+        "workspace_peak_median": 33949760,
+        "rss_max": 58990592,
+        "rss_median": 40179712,
+        "ms_median": 204.5
+      },
+      "vocr:H15_w8.vocr": {
+        "regions": 84,
+        "refused": 0,
+        "failed": 0,
+        "concat_cer": 0.06784,
+        "concat_errors": 170,
+        "concat_chars": 2506,
+        "lines_read": 207,
+        "workspace_peak_max": 1470416,
+        "workspace_peak_median": 1393472,
+        "rss_max": 6365184,
+        "rss_median": 5969920,
+        "ms_median": 61.8
+      },
+      "vocr:FL10_w8.vocr": {
+        "regions": 84,
+        "refused": 0,
+        "failed": 0,
+        "concat_cer": 0.08659,
+        "concat_errors": 217,
+        "concat_chars": 2506,
+        "lines_read": 207,
+        "workspace_peak_max": 914000,
+        "workspace_peak_median": 837056,
+        "rss_max": 5812224,
+        "rss_median": 5406720,
+        "ms_median": 34.3
+      }
+    },
+    "psp-test": {
+      "ncnn": {
+        "regions": 93,
+        "refused": 41,
+        "failed": 0,
+        "concat_cer": 0.60717,
+        "concat_errors": 1524,
+        "concat_chars": 2510,
+        "lines_read": 113,
+        "workspace_peak_max": 40219904,
+        "workspace_peak_median": 33506496,
+        "rss_max": 47472640,
+        "rss_median": 40042496,
+        "ms_median": 117.8
+      },
+      "vocr:H15_w8.vocr": {
+        "regions": 93,
+        "refused": 0,
+        "failed": 0,
+        "concat_cer": 0.14701,
+        "concat_errors": 369,
+        "concat_chars": 2510,
+        "lines_read": 233,
+        "workspace_peak_max": 1383632,
+        "workspace_peak_median": 1361856,
+        "rss_max": 5926912,
+        "rss_median": 5816320,
+        "ms_median": 47.0
+      },
+      "vocr:FL10_w8.vocr": {
+        "regions": 93,
+        "refused": 0,
+        "failed": 0,
+        "concat_cer": 0.17649,
+        "concat_errors": 443,
+        "concat_chars": 2510,
+        "lines_read": 233,
+        "workspace_peak_max": 827216,
+        "workspace_peak_median": 805440,
+        "rss_max": 5378048,
+        "rss_median": 5255168,
+        "ms_median": 26.2
+      }
+    }
+  },
+  "eval_run_cross_check_H15": {
+    "console": {
+      "vita-test": {
+        "regions": 84,
+        "regions_rejected": 0,
+        "gt_lines": 206,
+        "line_recall": 0.95146,
+        "detections": 205,
+        "line_precision": 0.9561,
+        "pipeline_cer": 0.06825,
+        "concat_cer": 0.06784,
+        "concat_regions_chars": 2506
+      },
+      "psp-test": {
+        "regions": 93,
+        "regions_rejected": 0,
+        "gt_lines": 245,
+        "line_recall": 0.90204,
+        "detections": 233,
+        "line_precision": 0.9485,
+        "pipeline_cer": 0.14701,
+        "concat_cer": 0.14701,
+        "concat_regions_chars": 2510
+      }
+    },
+    "native": {
+      "vita-test": {
+        "regions": 84,
+        "regions_rejected": 0,
+        "gt_lines": 206,
+        "line_recall": 0.95146,
+        "detections": 205,
+        "line_precision": 0.9561,
+        "pipeline_cer": 0.06942,
+        "concat_cer": 0.06903,
+        "concat_regions_chars": 2506
+      },
+      "psp-test": {
+        "regions": 93,
+        "regions_rejected": 0,
+        "gt_lines": 245,
+        "line_recall": 0.90204,
+        "detections": 233,
+        "line_precision": 0.9485,
+        "pipeline_cer": 0.14661,
+        "concat_cer": 0.14622,
+        "concat_regions_chars": 2510
+      }
+    }
+  },
+  "limits": [
+    "Host x86-64 measurements; no PS Vita memory, speed or stability claim.",
+    "psp-test regions are at the PSP's native 480x272; Adrenaline on the Vita usually shows them scaled up.",
+    "Host time includes process start, model load and SHA-256 check; single pass per region on an idle shared host.",
+    "Accuracy depends on the line finder and the hand-drawn regions as well as the recognizer."
+  ]
+}

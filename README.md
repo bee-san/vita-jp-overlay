@@ -17,6 +17,12 @@ Experiments are isolated on separate branches:
 
 The normal release contains only the kernel and Shell plugins; neither experimental
 worker is registered or loaded. Jiten and JPDB remain optional backends.
+
+Local OCR on the Vita itself, with no network: a build made with
+`-DVJO_WITH_VOCR=ON` adds `ocr_backend = vocr`, the
+[vita-vn-ocr](https://github.com/bee-san/vita-vn-ocr) recognizer and line finder
+(about 1.4 MiB per recognition). It is experimental and not yet tested on a
+console; see [vita-vn-ocr](docs/vita-vn-ocr.md).
 No dictionary API key is needed for Hachidori.
 
 Connection timings and the GameSentenceMiner comparison are in
@@ -194,7 +200,9 @@ All settings live in `ux0:data/VitaJPOverlay/config.ini`. The area to read (□ 
 | `font_size_en`        | 8 to 40                                                             | 14         | Size of the English text: meanings and messages.                                             |
 | `toggle_button`       | `l+r`, `select`, `start`, `select+l`, `select+r`, `rear_double_tap` | `l+r`      | What opens and closes the overlay. Buttons are hidden from the game; rear taps are not.      |
 | `subtitle_button`     | same as `toggle_button`                                             | `select+r` | What turns subtitles on and off.                                                             |
-| `ocr_backend` | `lens` | `lens` | Google Lens screenshot recognition. |
+| `ocr_backend` | `lens`, `vocr` | `lens` | Google Lens screenshot recognition, or vita-vn-ocr on the console (builds with `VJO_WITH_VOCR`; [guide](docs/vita-vn-ocr.md)). |
+| `ocr_model_dir` | directory path | `ux0:data/VitaJPOverlay/ocr` | Folder holding local OCR weights. |
+| `vocr_model` | `H15_w8.vocr`, `FL10_w8.vocr`, `F20_w8.vocr` | `H15_w8.vocr` | vita-vn-ocr weights file in `ocr_model_dir`. |
 | `text_source` | `ocr` | `ocr` | Screenshot OCR; old `auto` settings migrate to OCR. Hooks require the experimental branch. |
 | `ocr_mode` | `auto`, `on_press` | `auto` | Recognize changing text in the background or only when opening the overlay. |
 | `log_host`            | IPv4 address                                                        | empty      | Send debug logs to `tools/udp_log_listener.py` on that computer.                             |
@@ -293,6 +301,8 @@ Build and run the tests on your computer:
 The default build uses Google Lens and needs no neural model download.
 Python 3 and Pillow are needed for conversion and host JPEG tests. The retained
 ncnn adapter is opt-in with `-DVJO_WITH_NCNN=ON`; the default Shell stays Lens-only.
+`-DVJO_WITH_VOCR=ON -DVJO_VOCR_SOURCE_DIR=...` adds the vita-vn-ocr backend to the
+Shell and the host tools ([build notes](docs/vita-vn-ocr.md#build)).
 
 ```bash
 cmake -S . -B build/host -G Ninja && cmake --build build/host

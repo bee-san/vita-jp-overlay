@@ -21,6 +21,22 @@ if [ ! -x "$VITASDK/bin/arm-vita-eabi-gcc" ]; then
 fi
 [ -f "$VITASDK/arm-vita-eabi/include/taihen.h" ] || yes | vdpm install taihen
 
+# The August 2026 SDK image predates the stable ForDriver memblock-info
+# declaration and import. Pin the official headers and regenerate its Sysmem
+# stubs so local builds and CI use the same firmware-compatible ABI.
+HEADERS_REV=e66ebe90b73d1fa4cce005a5b2072cec27322544
+HEADERS_SRC="$WORK/vita-headers-$HEADERS_REV"
+if [ ! -f "$VITASDK/arm-vita-eabi/.vjo-headers-$HEADERS_REV" ]; then
+  [ -d "$HEADERS_SRC/.git" ] || git clone -q https://github.com/vitasdk/vita-headers "$HEADERS_SRC"
+  git -C "$HEADERS_SRC" checkout -q "$HEADERS_REV"
+  mkdir -p "$HEADERS_SRC/build-sysmem"
+  vita-libs-gen "$HEADERS_SRC/db/360/SceSysmem.yml" "$HEADERS_SRC/build-sysmem"
+  make -C "$HEADERS_SRC/build-sysmem" -j"$ncpu" >/dev/null
+  cp -R "$HEADERS_SRC/include/." "$VITASDK/arm-vita-eabi/include/"
+  make -C "$HEADERS_SRC/build-sysmem" install >/dev/null
+  touch "$VITASDK/arm-vita-eabi/.vjo-headers-$HEADERS_REV"
+fi
+
 if [ ! -d "$VITASDK/arm-vita-eabi/include/paf/widget" ]; then
   cd "$WORK"
   [ -d vitasdk-paf-component ] || git clone -q https://github.com/Princess-of-Sleeping/vitasdk-paf-component
